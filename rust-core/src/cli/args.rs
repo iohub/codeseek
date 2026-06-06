@@ -75,6 +75,12 @@ pub enum Commands {
         #[clap(long, action)]
         force: bool,
     },
+    /// 列出所有已索引的项目
+    List {
+        /// JSON 格式输出
+        #[clap(long, action)]
+        json: bool,
+    },
     /// 安装 git hooks（post-commit, post-merge → codeseek init）
     InstallHooks,
 }

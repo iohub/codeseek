@@ -60,8 +60,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Try loading existing graph for incremental update
             let existing_graph = storage.get_persistence().load_graph(&project_hash).ok().flatten();
 
-            // Phase 1: Parse files
-            let pb = ProgressBar::start("Parsing source files...");
+            // Phase 1: Parse files (0→70%)
+            let pb = ProgressBar::start("Scanning & parsing source files");
+            pb.set_pct(5);
             let mut analyzer = CodeAnalyzer::new();
             let result = analyzer.analyze_directory(&project_root);
             let code_graph = match result {
@@ -72,22 +73,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             let new_stats = code_graph.get_stats();
-            pb.set_files(new_stats.total_files);
-            pb.set_funcs(new_stats.total_functions);
+            pb.set_pct(70);
+            pb.set_stats(new_stats.total_files, new_stats.total_functions);
 
-            // Phase 2: Build graph — merge new results into existing or build fresh
-            pb.set_phase("Building call graph...");
+            // Phase 2: Build graph (70→85%)
+            pb.set_phase("Building call graph");
             let mut pet_graph = existing_graph.unwrap_or_else(|| PetCodeGraph::new());
 
             if new_stats.total_functions > 0 {
-                // Remove old entries from files that were re-parsed
                 let changed_files: std::collections::HashSet<_> = code_graph.functions.values()
                     .map(|f| f.file_path.clone())
                     .collect();
                 for file in &changed_files {
                     pet_graph.remove_functions_by_file(file);
                 }
-                // Add new entries
                 for func in code_graph.functions.values() {
                     pet_graph.add_function(func.clone());
                 }
@@ -96,14 +95,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 pet_graph.update_stats();
             }
+            pb.set_pct(85);
 
-            // Phase 3: Save
-            pb.set_phase("Saving index...");
+            // Phase 3: Save (85→100%)
+            pb.set_phase("Saving index to disk");
+
+            // Write project metadata so list/hash lookup works
+            let meta = serde_json::json!({
+                "project_root": project_root.to_string_lossy(),
+                "indexed_at": chrono::Utc::now().to_rfc3339(),
+            });
+            std::fs::create_dir_all(&index_dir)?;
+            std::fs::write(index_dir.join("project.json"), serde_json::to_string_pretty(&meta)?)?;
+
             let stats = pet_graph.get_stats().clone();
             storage.get_persistence().save_graph(&project_hash, &pet_graph)?;
             storage.set_graph(pet_graph);
+            pb.set_pct(100);
 
-            pb.finish("Index built");
+            pb.finish(&format!("{} files, {} functions", stats.total_files, stats.total_functions));
         }
         Commands::Status { json } => {
             let project_root = detect_project()?;
@@ -282,6 +292,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let key = project_root.to_string_lossy().to_string();
                 cfg.installed_hooks.remove(&key);
                 cfg.save().ok();
+            }
+        }
+        Commands::List { json } => {
+            let codeseek_dir = dirs::home_dir().unwrap_or_default().join(".codeseek");
+            if !codeseek_dir.exists() {
+                println!("No indexed projects found.");
+                return Ok(());
+            }
+
+            let mut projects = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&codeseek_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let meta_file = path.join("project.json");
+                        if meta_file.exists() {
+                            if let Ok(content) = std::fs::read_to_string(&meta_file) {
+                                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) {
+                                    let hash = path.file_name().unwrap_or_default().to_string_lossy();
+                                    let graph_file = path.join("graph.bin");
+                                    let functions = if graph_file.exists() {
+                                        let s = graph_file.metadata().map(|m| m.len()).unwrap_or(0);
+                                        format!("{}", s)
+                                    } else { "—".to_string() };
+                                    projects.push(serde_json::json!({
+                                        "project_root": meta["project_root"],
+                                        "hash": hash,
+                                        "indexed_at": meta.get("indexed_at").map(|v| v.as_str().unwrap_or("")),
+                                        "size": functions,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&projects)?);
+            } else if projects.is_empty() {
+                println!("No indexed projects found.");
+            } else {
+                for p in &projects {
+                    println!("  {}  →  {}", p["hash"].as_str().unwrap_or("?").chars().take(12).collect::<String>(), p["project_root"].as_str().unwrap_or("?"));
+                }
             }
         }
         Commands::InstallHooks => {

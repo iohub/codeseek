@@ -36,6 +36,10 @@ impl CodeSeekRunner {
                 info!("uninit command - to be implemented in Phase 2");
                 Ok(())
             }
+            Commands::List { json: _ } => {
+                info!("list command - please use codeseek directly");
+                Ok(())
+            }
             Commands::InstallHooks => {
                 info!("install-hooks command - to be implemented in Phase 2");
                 Ok(())
