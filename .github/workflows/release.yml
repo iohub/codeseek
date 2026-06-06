@@ -29,6 +29,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: Build
         run: |
           cd rust-core
