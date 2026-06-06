@@ -200,11 +200,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
 
-            match results {
-                Some(results) if *json => {
-                    println!("{}", serde_json::to_string_pretty(&results)?);
+            // Fallback to graph-based name search when embeddings unavailable or empty
+            let use_graph_fallback = results.as_ref().map(|r| r.is_empty()).unwrap_or(true);
+
+            if use_graph_fallback {
+                let storage = Arc::new(StorageManager::new());
+                let project_hash = Config::compute_project_hash(&project_root);
+                if let Ok(Some(graph)) = storage.get_persistence().load_graph(&project_hash) {
+                    let funcs = graph.find_functions_by_name(query);
+                    if *json {
+                        let output: Vec<_> = funcs.iter().map(|f| serde_json::json!({
+                            "name": f.name,
+                            "file_path": f.file_path,
+                            "line_start": f.line_start,
+                            "line_end": f.line_end,
+                            "language": f.language,
+                        })).collect();
+                        println!("{}", serde_json::to_string_pretty(&output)?);
+                    } else if funcs.is_empty() {
+                        println!("No results found.");
+                    } else {
+                        for (i, f) in funcs.iter().enumerate().take(*limit) {
+                            println!("{}. {} [{}]", i + 1, f.name, f.language);
+                            println!("   {}:{}", f.file_path.display(), f.line_start);
+                        }
+                    }
+                } else {
+                    println!("No index found. Run 'codeseek init' first.");
                 }
-                Some(results) => {
+            } else {
+                let results = results.unwrap();
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&results)?);
+                } else {
                     if results.is_empty() {
                         println!("No results found.");
                     } else {
@@ -213,9 +241,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("   {}:{}", r.file_path, r.line_start);
                         }
                     }
-                }
-                None => {
-                    println!("Semantic search not available. Run 'codeseek init' first and configure embedding.");
                 }
             }
         }

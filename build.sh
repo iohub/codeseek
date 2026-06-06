@@ -8,18 +8,23 @@ BIN_PATH="$BIN_DIR/codeseek"
 
 echo "==> [1/2] Building TypeScript wrapper..."
 cd "$SCRIPT_DIR"
-npx tsc
-echo "    dist/ ready"
+if [ -f "node_modules/.package-lock.json" ] || [ -d "node_modules/typescript" ]; then
+    npx tsc 2>/dev/null && echo "    dist/ ready" || echo "    (tsc skipped)"
+else
+    echo "    (no node_modules, skipping TS build)"
+fi
 
 echo ""
 echo "==> [2/2] Building Rust binary..."
 cd "$RUST_DIR"
 
-# Use debug build for faster iteration; switch to --release for production
-if [ "${1:-}" = "--release" ]; then
+MODE="${1:-}"
+if [ "$MODE" = "--release" ] || [ "$MODE" = "-r" ]; then
+    echo "    Building release..."
     cargo build --release
     RUST_BIN="$RUST_DIR/target/release/codeseek"
 else
+    echo "    Building debug..."
     cargo build
     RUST_BIN="$RUST_DIR/target/debug/codeseek"
 fi
@@ -32,21 +37,25 @@ chmod 755 "$BIN_PATH"
 
 # Add to PATH if needed
 if ! echo "$PATH" | tr ':' '\n' | grep -qF "$BIN_DIR"; then
-    SHELL_RC="$HOME/.zshrc"
-    [ -f "$HOME/.bashrc" ] && SHELL_RC="$HOME/.bashrc"
-    echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$SHELL_RC"
-    echo "    Added $BIN_DIR to $SHELL_RC"
+    for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+        if [ -f "$rc" ]; then
+            if ! grep -qF "$BIN_DIR" "$rc"; then
+                echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$rc"
+                echo "    Added $BIN_DIR to $rc"
+            fi
+        fi
+    done
 fi
 
+BIN_SIZE=$(du -h "$BIN_PATH" | cut -f1)
 echo ""
-echo "==> Done!"
-echo "    Binary:  $BIN_PATH"
+echo "==> Done! $BIN_PATH ($BIN_SIZE)"
 echo "    Version: $($BIN_PATH --version 2>/dev/null || echo '...')"
 echo ""
 echo "    Usage:"
 echo "      codeseek init              # build index"
 echo "      codeseek search <query>    # semantic search"
 echo "      codeseek status            # index status"
-echo "      codeseek callers <symbol>  # find callers"
+echo "      codeseek install           # register with Claude Code"
 echo ""
-echo "    Tip: run 'source ~/.zshrc' first if codeseek not found"
+echo "    Tip: run 'source ~/.zshrc' if codeseek not found"
