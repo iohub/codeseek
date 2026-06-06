@@ -10,11 +10,6 @@ union MyUnion {
     f1: u32,
     f2: f32,
 }
-
-unsafe {
-    let f = u.f1;
-}   
-
 static GLOBAL_VARIABLE: &str = "asdasd";
 
 lazy_static! {
