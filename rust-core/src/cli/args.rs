@@ -81,6 +81,16 @@ pub enum Commands {
         #[clap(long, action)]
         json: bool,
     },
+    /// 启动 MCP server（供 Claude Code / Codex 调用）
+    Serve {
+        /// MCP stdio 模式
+        #[clap(long, action)]
+        mcp: bool,
+    },
+    /// 安装 codeseek 到 Claude Code / Codex（写入 MCP 配置）
+    Install,
+    /// 从 Claude Code / Codex 卸载（移除 MCP 配置）
+    Uninstall,
     /// 安装 git hooks（post-commit, post-merge → codeseek init）
     InstallHooks,
 }

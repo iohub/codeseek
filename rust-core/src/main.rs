@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn, error};
 use codeseek::ui::progress::ProgressBar;
+use codeseek::mcp;
 
 /// 从当前工作目录检测项目根（向上找 .git/）
 fn detect_project() -> Result<PathBuf, String> {
@@ -339,6 +340,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Serve { mcp } => {
+            if !mcp {
+                eprintln!("Use 'codeseek serve --mcp' for MCP stdio mode.");
+                return Ok(());
+            }
+            mcp::server::run_mcp_server().await?;
+        }
+        Commands::Install => {
+            install_to_claude()?;
+            install_to_codex()?;
+        }
+        Commands::Uninstall => {
+            uninstall_from_claude()?;
+            uninstall_from_codex()?;
+        }
         Commands::InstallHooks => {
             let project_root = detect_project()?;
             let git_dir = project_root.join(".git");
@@ -476,4 +492,186 @@ fn execute_callees(
     }
 
     Ok(output)
+}
+
+// ── MCP Install / Uninstall helpers ────────────────────────────────────
+
+fn codeseek_bin() -> String {
+    "codeseek".to_string()
+}
+
+fn mcp_server_entry() -> serde_json::Value {
+    serde_json::json!({
+        "command": codeseek_bin(),
+        "args": ["serve", "--mcp"]
+    })
+}
+
+fn claude_global_mcp_path() -> PathBuf {
+    dirs::home_dir().unwrap_or_default().join(".claude.json")
+}
+
+fn claude_local_mcp_path() -> PathBuf {
+    PathBuf::from(".mcp.json")
+}
+
+fn claude_settings_path(local: bool) -> PathBuf {
+    let base = if local {
+        PathBuf::from(".claude")
+    } else {
+        dirs::home_dir().unwrap_or_default().join(".claude")
+    };
+    base.join("settings.json")
+}
+
+fn codex_config_path() -> PathBuf {
+    dirs::home_dir().unwrap_or_default().join(".codex").join("config.toml")
+}
+
+fn install_to_claude() -> Result<(), Box<dyn std::error::Error>> {
+    let local = claude_local_mcp_path();
+    let (mcp_path, settings_path, scope) = if std::env::current_dir()
+        .map(|d| d.join(".mcp.json").exists())
+        .unwrap_or(false)
+        || local.exists()
+    {
+        (local, claude_settings_path(true), "local")
+    } else {
+        (claude_global_mcp_path(), claude_settings_path(false), "global")
+    };
+
+    // 1. Write MCP server entry
+    let mut mcp_config: serde_json::Value = if mcp_path.exists() {
+        let content = std::fs::read_to_string(&mcp_path)?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if !mcp_config.get("mcpServers").is_some() {
+        mcp_config["mcpServers"] = serde_json::json!({});
+    }
+    mcp_config["mcpServers"]["codeseek"] = mcp_server_entry();
+
+    if let Some(parent) = mcp_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&mcp_path, serde_json::to_string_pretty(&mcp_config)?)?;
+    println!("  ✓ MCP config → {}", mcp_path.display());
+
+    // 2. Write permissions
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = std::fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if !settings.get("permissions").is_some() {
+        settings["permissions"] = serde_json::json!({});
+    }
+    let allow = settings["permissions"]["allow"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let perms = ["Bash(codeseek *)"];
+    let mut new_allow = allow.clone();
+    for p in &perms {
+        let s = p.to_string();
+        if !allow.iter().any(|v| v.as_str() == Some(&s)) {
+            new_allow.push(serde_json::json!(s));
+        }
+    }
+    settings["permissions"]["allow"] = serde_json::json!(new_allow);
+
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+    println!("  ✓ Permissions → {}", settings_path.display());
+    println!();
+    println!("  Restart Claude Code to apply. codeseek tools will appear automatically.");
+
+    Ok(())
+}
+
+fn install_to_codex() -> Result<(), Box<dyn std::error::Error>> {
+    let config_path = codex_config_path();
+    if !config_path.parent().map(|p| p.exists()).unwrap_or(false) {
+        return Ok(());
+    }
+
+    let toml_block = format!(
+        "[mcp_servers.codeseek]\ncommand = \"{}\"\nargs = [\"serve\", \"--mcp\"]\n",
+        codeseek_bin()
+    );
+
+    let existing = if config_path.exists() {
+        std::fs::read_to_string(&config_path)?
+    } else {
+        String::new()
+    };
+
+    let header = "[mcp_servers.codeseek]";
+    if existing.contains(header) {
+        let start = existing.find(header).unwrap();
+        let end = existing[start..]
+            .find("\n[")
+            .map(|i| start + i)
+            .unwrap_or(existing.len());
+        let mut updated = existing[..start].to_string();
+        updated.push_str(&toml_block);
+        if end < existing.len() {
+            updated.push_str(&existing[end..]);
+        }
+        std::fs::write(&config_path, updated.trim_end())?;
+    } else {
+        std::fs::create_dir_all(config_path.parent().unwrap())?;
+        let content = if existing.is_empty() {
+            toml_block
+        } else {
+            format!("{}\n\n{}", existing.trim_end(), toml_block)
+        };
+        std::fs::write(&config_path, content)?;
+    }
+
+    println!("  ✓ Codex config → {}", config_path.display());
+    Ok(())
+}
+
+fn uninstall_from_claude() -> Result<(), Box<dyn std::error::Error>> {
+    let mcp_path = claude_global_mcp_path();
+    if mcp_path.exists() {
+        let content = std::fs::read_to_string(&mcp_path)?;
+        let mut config: serde_json::Value = serde_json::from_str(&content)?;
+        if config.get("mcpServers").and_then(|s| s.get("codeseek")).is_some() {
+            config["mcpServers"].as_object_mut().map(|s| s.remove("codeseek"));
+            std::fs::write(&mcp_path, serde_json::to_string_pretty(&config)?)?;
+            println!("  ✓ Removed from {}", mcp_path.display());
+        }
+    }
+    Ok(())
+}
+
+fn uninstall_from_codex() -> Result<(), Box<dyn std::error::Error>> {
+    let config_path = codex_config_path();
+    if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        let header = "[mcp_servers.codeseek]";
+        if content.contains(header) {
+            let start = content.find(header).unwrap();
+            let end = content[start..]
+                .find("\n[")
+                .map(|i| start + i)
+                .unwrap_or(content.len());
+            let mut updated = content[..start].to_string();
+            if end < content.len() {
+                updated.push_str(&content[end..]);
+            }
+            std::fs::write(&config_path, updated.trim())?;
+            println!("  ✓ Removed from {}", config_path.display());
+        }
+    }
+    Ok(())
 }

@@ -40,8 +40,20 @@ impl CodeSeekRunner {
                 info!("list command - please use codeseek directly");
                 Ok(())
             }
+            Commands::Serve { mcp: _ } => {
+                info!("serve command - please use codeseek directly");
+                Ok(())
+            }
+            Commands::Install => {
+                info!("install command - please use codeseek directly");
+                Ok(())
+            }
+            Commands::Uninstall => {
+                info!("uninstall command - please use codeseek directly");
+                Ok(())
+            }
             Commands::InstallHooks => {
-                info!("install-hooks command - to be implemented in Phase 2");
+                info!("install-hooks command - please use codeseek directly");
                 Ok(())
             }
         }
