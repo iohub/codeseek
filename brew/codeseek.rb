@@ -1,26 +1,21 @@
 class Codeseek < Formula
   desc "Code intelligence CLI — AST-based call graph + semantic search"
   homepage "https://github.com/CodeBendKit/codeseek"
-  version "0.1.0"
+  version "0.1.2"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/CodeBendKit/codeseek/releases/download/v0.1.0/codeseek-darwin-arm64"
+      url "https://github.com/CodeBendKit/codeseek/releases/download/v0.1.2/codeseek-darwin-arm64"
       sha256 "REPLACE_WITH_ACTUAL_SHA256"
     else
-      url "https://github.com/CodeBendKit/codeseek/releases/download/v0.1.0/codeseek-darwin-x64"
+      url "https://github.com/CodeBendKit/codeseek/releases/download/v0.1.2/codeseek-darwin-x64"
       sha256 "REPLACE_WITH_ACTUAL_SHA256"
     end
   end
 
   on_linux do
-    if Hardware::CPU.arm?
-      url "https://github.com/CodeBendKit/codeseek/releases/download/v0.1.0/codeseek-linux-arm64"
-      sha256 "REPLACE_WITH_ACTUAL_SHA256"
-    else
-      url "https://github.com/CodeBendKit/codeseek/releases/download/v0.1.0/codeseek-linux-x64"
-      sha256 "REPLACE_WITH_ACTUAL_SHA256"
-    end
+    url "https://github.com/CodeBendKit/codeseek/releases/download/v0.1.2/codeseek-linux-x64"
+    sha256 "REPLACE_WITH_ACTUAL_SHA256"
   end
 
   def install
