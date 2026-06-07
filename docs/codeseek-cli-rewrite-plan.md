@@ -22,7 +22,6 @@ Homebrew 分发，作为 Claude Code 的代码智能插件使用。
 | 模型提供商 | 先只支持 OpenAI 兼容 API，默认 SiliconFlow |
 
 ## 一、新仓库结构
-
 ```
 codeseek/
 ├── package.json              # npm 包定义（项目根目录）
