@@ -1,13 +1,13 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
-/// 存储方式配置
+/// Storage format for persisted call graphs
 #[derive(Debug, Clone, ValueEnum)]
 pub enum StorageMode {
-    /// 仅JSON格式存储
+    /// JSON only
     Json,
-    /// 仅二进制格式存储
+    /// Binary (bincode) only
     Binary,
-    /// 同时保存JSON和二进制格式
+    /// Both JSON and binary
     Both,
 }
 
@@ -30,67 +30,67 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// 构建/更新代码索引（首次全量，后续MD5增量）
+    /// Build or update the code index (full on first run, MD5-incremental thereafter)
     Init {
-        /// 交互式配置引导
+        /// Interactive configuration wizard
         #[clap(short = 'i', long, action)]
         interactive: bool,
     },
-    /// 查看索引状态
+    /// Show index statistics (functions, files, last update)
     Status {
-        /// JSON 格式输出
+        /// Output as JSON
         #[clap(long, action)]
         json: bool,
     },
-    /// 语义搜索代码（向量+BM25+RRF融合）
+    /// Semantic code search (vector + BM25 + RRF fusion)
     Search {
-        /// 搜索查询文本
+        /// Search query text
         query: String,
-        /// 返回结果数量
+        /// Maximum results to return
         #[clap(short, long, default_value = "10")]
         limit: usize,
-        /// JSON 格式输出
+        /// Output as JSON
         #[clap(long, action)]
         json: bool,
     },
-    /// 查询调用者
+    /// Find functions that call the given symbol
     Callers {
-        /// 函数/符号名称
+        /// Function or symbol name
         symbol: String,
-        /// JSON 格式输出
+        /// Output as JSON
         #[clap(long, action)]
         json: bool,
     },
-    /// 查询被调用者
+    /// Find functions called by the given symbol
     Callees {
-        /// 函数/符号名称
+        /// Function or symbol name
         symbol: String,
-        /// JSON 格式输出
+        /// Output as JSON
         #[clap(long, action)]
         json: bool,
     },
-    /// 删除当前项目的索引数据
+    /// Delete the current project's index data
     Uninit {
-        /// 跳过确认
+        /// Skip confirmation prompt
         #[clap(long, action)]
         force: bool,
     },
-    /// 列出所有已索引的项目
+    /// List all indexed projects
     List {
-        /// JSON 格式输出
+        /// Output as JSON
         #[clap(long, action)]
         json: bool,
     },
-    /// 启动 MCP server（供 Claude Code / Codex 调用）
+    /// Start MCP server (for Claude Code / Codex integration)
     Serve {
-        /// MCP stdio 模式
+        /// Run in MCP stdio mode
         #[clap(long, action)]
         mcp: bool,
     },
-    /// 安装 codeseek 到 Claude Code / Codex（写入 MCP 配置）
+    /// Register codeseek as MCP tools in Claude Code / Codex
     Install,
-    /// 从 Claude Code / Codex 卸载（移除 MCP 配置）
+    /// Remove codeseek MCP integration from Claude Code / Codex
     Uninstall,
-    /// 安装 git hooks（post-commit, post-merge → codeseek init）
+    /// Install git hooks (post-commit, post-merge → codeseek init)
     InstallHooks,
 }
