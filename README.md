@@ -120,36 +120,75 @@ codeseek uninstall
 
 ## How It Works
 
+### Index Building (`codeseek init`)
+
 ```
-codeseek search "auth middleware"
-  → Detect project root (walk up to .git/)
-  → Load index from ~/.codeseek/<project_hash>/
-  → Graph-based name search (PetCodeGraph)
-  → Output results
+Source files
+  → Tree-sitter AST parse (7 languages)
+  → Extract functions / classes / methods
+  → Batch embed via API (20 texts per call, SQLite cache)
+  → Store vectors in LanceDB
+  → Build BM25 index in Tantivy
+  → Serialize call graph (PetCodeGraph)
+  → Save to ~/.codeseek/<project_hash>/
 ```
 
-No daemon, no HTTP server. Every command is a standalone process.
+**Idempotent**: first run is full build, subsequent runs compare MD5 hashes — only changed files are re-processed. Use `codeseek install-hooks` for automatic re-index on git commit/merge.
+
+### Hybrid Search Pipeline (`codeseek search`)
+
+```
+                        ┌─────────────────────┐
+User query ────────────→│  Embedding Model     │──→ Query vector
+                        └─────────────────────┘
+                                  │
+          ┌───────────────────────┼───────────────────────┐
+          ▼                       ▼                       ▼
+   ┌─────────────┐       ┌─────────────┐       ┌─────────────┐
+   │ Dense Search │       │ Sparse Search│       │ Graph Search │
+   │ (LanceDB ANN)│       │ (Tantivy BM25)│      │ (PetCodeGraph)│
+   └──────┬───────┘       └──────┬──────┘       └──────┬──────┘
+          │                      │                      │
+          └──────────────────────┼──────────────────────┘
+                                 ▼
+                        ┌─────────────────┐
+                        │   RRF Fusion    │  ← Reciprocal Rank Fusion
+                        │  (Top-20 candidates)│
+                        └────────┬────────┘
+                                 │
+                                 ▼
+                        ┌─────────────────┐
+                        │    Reranker     │  ← Cross-Encoder fine re-ranking
+                        │ (Qwen3-Reranker)│     scores each (query, code) pair
+                        └────────┬────────┘
+                                 │
+                                 ▼
+                        ┌─────────────────┐
+                        │   Final Results  │  ← Top-5 (or Top-N)
+                        └─────────────────┘
+```
+
+| Stage | Technology | Role | Speed |
+|-------|-----------|------|:-----:|
+| **Dense Search** | LanceDB + Embedding Model | Semantic vector similarity | Fast |
+| **Sparse Search** | Tantivy BM25 | Keyword & token matching | Fast |
+| **RRF Fusion** | Reciprocal Rank Fusion | Merge heterogeneous scores fairly | Instant |
+| **Reranker** | Cross-Encoder (Qwen3-Reranker-4B) | Full-interaction precision scoring | ~1-2s |
+| **Fallback** | PetCodeGraph | Graph-based name search (no API needed) | Instant |
+
+If embedding/Reranker are unavailable, the pipeline falls back gracefully to graph-based name search.
 
 ### Storage
 
 - **Config**: `~/.codeseek/config.json` (global, shared across all projects)
 - **Index**: `~/.codeseek/<md5(project_root)>/`
-  - `project.json` — Project metadata (root path, indexed timestamp)
-  - `graph.bin` — Serialized call graph (PetCodeGraph)
-  - `embeddings.lance/` — LanceDB vector data (optional, requires API token)
-  - `tantivy_bm25/` — BM25 full-text index (optional)
+  - `project.json` — Project metadata
+  - `graph.bin` — Serialized call graph
+  - `embeddings.lance/` — LanceDB vector data
+  - `tantivy_bm25/` — BM25 full-text index
   - `file_hashes.json` — MD5 incremental tracking
 
-### Incremental Updates
-
-`codeseek init` is idempotent:
-- First run: Full AST parse → build graph → save
-- Subsequent runs: MD5 comparison → only re-process changed files → merge with existing graph
-
-```bash
-# Install git hooks for automatic re-index on commit/merge
-codeseek install-hooks
-```
+No daemon, no HTTP server. Every command is a standalone process.
 
 ## Supported Languages
 
@@ -178,11 +217,34 @@ codeseek install-hooks
   },
   "index": {
     "min_code_block_length": 16,
-    "enable_reranker": false
+    "enable_reranker": true,
+    "hybrid": {
+      "enable_bm25": true,
+      "bm25_top_k": 20,
+      "vector_top_k": 20,
+      "rrf_k": 60,
+      "rrf_top_k": 20
+    },
+    "reranker": {
+      "enabled": true,
+      "model": "Qwen/Qwen3-Reranker-4B",
+      "api_token": "sk-...",
+      "api_base_url": "https://api.siliconflow.cn/v1/rerank",
+      "top_n": 5,
+      "candidate_multiplier": 5,
+      "timeout_secs": 60
+    }
   },
   "installed_hooks": {}
 }
 ```
+
+### Model Roles
+
+| Model | Role | When |
+|-------|------|------|
+| `Qwen/Qwen3-Embedding-4B` | Converts code → vectors for dense search | Index building |
+| `Qwen/Qwen3-Reranker-4B` | Scores (query, code) pairs for precision | Search time |
 
 Set via the interactive wizard on first run, or create manually.
 

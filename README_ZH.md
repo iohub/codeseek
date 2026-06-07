@@ -120,36 +120,75 @@ codeseek uninstall
 
 ## 工作原理
 
+### 构建索引 (`codeseek init`)
+
 ```
-codeseek search "auth middleware"
-  → 自动检测项目根目录（向上找 .git/）
-  → 从 ~/.codeseek/<project_hash>/ 加载索引
-  → 基于图谱的名称搜索（PetCodeGraph）
-  → 输出结果
+源码文件
+  → Tree-sitter AST 解析（7 种语言）
+  → 提取函数 / 类 / 方法
+  → 批量嵌入 API 调用（每次 20 个文本，SQLite 缓存）
+  → LanceDB 向量存储
+  → Tantivy BM25 索引
+  → 序列化调用图 (PetCodeGraph)
+  → 保存到 ~/.codeseek/<project_hash>/
 ```
 
-无守护进程、无 HTTP 服务器。每个命令都是独立的单次进程。
+**幂等**：首次全量构建，后续 MD5 对比仅处理变更文件。用 `codeseek install-hooks` 可在 commit/merge 时自动增量索引。
+
+### 混合搜索管线 (`codeseek search`)
+
+```
+                        ┌─────────────────────┐
+用户查询 ────────────────→│  嵌入模型 (Embedding)  │──→ 查询向量
+                        └─────────────────────┘
+                                  │
+          ┌───────────────────────┼───────────────────────┐
+          ▼                       ▼                       ▼
+   ┌─────────────┐       ┌─────────────┐       ┌─────────────┐
+   │  密集搜索    │       │  稀疏搜索    │       │  图谱搜索    │
+   │ (LanceDB)   │       │ (Tantivy)   │       │(PetCodeGraph)│
+   └──────┬───────┘       └──────┬──────┘       └──────┬──────┘
+          │                      │                      │
+          └──────────────────────┼──────────────────────┘
+                                 ▼
+                        ┌─────────────────┐
+                        │   RRF 融合排序   │  ← Reciprocal Rank Fusion
+                        │   (Top-20 候选)  │
+                        └────────┬────────┘
+                                 │
+                                 ▼
+                        ┌─────────────────┐
+                        │   重排序 (Reranker)│  ← Cross-Encoder 精细打分
+                        │ (Qwen3-Reranker) │    逐对 (查询, 代码) 评分
+                        └────────┬────────┘
+                                 │
+                                 ▼
+                        ┌─────────────────┐
+                        │    最终结果      │  ← Top-5（或 Top-N）
+                        └─────────────────┘
+```
+
+| 阶段 | 技术 | 作用 | 速度 |
+|-------|------|------|:---:|
+| **密集搜索** | LanceDB + 嵌入模型 | 语义向量相似度 | 快 |
+| **稀疏搜索** | Tantivy BM25 | 关键词 & Token 匹配 | 快 |
+| **RRF 融合** | Reciprocal Rank Fusion | 公平融合异构分数 | 即时 |
+| **重排序** | Cross-Encoder (Qwen3-Reranker-4B) | 全交互精准评分 | ~1-2s |
+| **兜底** | PetCodeGraph | 基于图谱的名称搜索 | 即时 |
+
+嵌入 / Reranker 不可用时自动回退到图谱名称搜索。
 
 ### 存储
 
 - **配置**：`~/.codeseek/config.json`（全局，所有项目共享）
 - **索引**：`~/.codeseek/<md5(project_root)>/`
-  - `project.json` — 项目元数据（根路径、索引时间）
-  - `graph.bin` — 序列化调用图（PetCodeGraph）
-  - `embeddings.lance/` — LanceDB 向量数据（可选，需要 API token）
-  - `tantivy_bm25/` — BM25 全文索引（可选）
+  - `project.json` — 项目元数据
+  - `graph.bin` — 序列化调用图
+  - `embeddings.lance/` — LanceDB 向量数据
+  - `tantivy_bm25/` — BM25 全文索引
   - `file_hashes.json` — MD5 增量追踪
 
-### 增量更新
-
-`codeseek init` 是幂等的：
-- 首次运行：全量 AST 解析 → 构建图谱 → 保存
-- 后续运行：MD5 对比 → 仅处理变更文件 → 与已有图谱合并
-
-```bash
-# 安装 git hooks，每次 commit/merge 自动增量索引
-codeseek install-hooks
-```
+无守护进程、无 HTTP 服务器。每个命令都是独立的单次进程。
 
 ## 支持的语言
 
@@ -178,11 +217,34 @@ codeseek install-hooks
   },
   "index": {
     "min_code_block_length": 16,
-    "enable_reranker": false
+    "enable_reranker": true,
+    "hybrid": {
+      "enable_bm25": true,
+      "bm25_top_k": 20,
+      "vector_top_k": 20,
+      "rrf_k": 60,
+      "rrf_top_k": 20
+    },
+    "reranker": {
+      "enabled": true,
+      "model": "Qwen/Qwen3-Reranker-4B",
+      "api_token": "sk-...",
+      "api_base_url": "https://api.siliconflow.cn/v1/rerank",
+      "top_n": 5,
+      "candidate_multiplier": 5,
+      "timeout_secs": 60
+    }
   },
   "installed_hooks": {}
 }
 ```
+
+### 模型角色
+
+| 模型 | 作用 | 时机 |
+|------|------|------|
+| `Qwen/Qwen3-Embedding-4B` | 将代码转为向量，用于密集搜索 | 构建索引时 |
+| `Qwen/Qwen3-Reranker-4B` | 为 (查询, 代码) 配对精确打分 | 搜索时 |
 
 首次运行交互式向导自动填写，也可以手动创建。
 
