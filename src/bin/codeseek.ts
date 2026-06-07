@@ -131,6 +131,15 @@ async function runSetupWizard(): Promise<void> {
         short_code_threshold: 30,
         short_code_penalty: 0.5,
       },
+      reranker: {
+        enabled: false,
+        model: "BAAI/bge-reranker-v2-m3",
+        api_token: "",
+        api_base_url: "https://api.siliconflow.cn/v1",
+        top_n: 10,
+        candidate_multiplier: 5,
+        timeout_secs: 30,
+      },
     },
     installed_hooks: {},
   };

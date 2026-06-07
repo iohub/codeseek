@@ -214,19 +214,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if let Some(bm25) = bm25_index {
                             let hybrid_cfg = &cfg.index.hybrid;
-                            let hybrid = HybridSearchService::new(
-                                Arc::new(es),
-                                bm25,
-                                HybridSearchConfig {
-                                    enable_sparse: hybrid_cfg.enable_bm25,
-                                    rrf_k: hybrid_cfg.rrf_k,
-                                    dense_limit: hybrid_cfg.vector_top_k,
-                                    sparse_limit: hybrid_cfg.bm25_top_k,
-                                    timeout_ms: 0,
-                                    short_code_threshold: hybrid_cfg.short_code_threshold,
-                                    short_code_penalty: hybrid_cfg.short_code_penalty,
-                                },
-                            );
+                            let reranker_cfg = &cfg.index.reranker;
+
+                            let hybrid = if reranker_cfg.enabled && !reranker_cfg.api_token.is_empty() {
+                                let reranker = codeseek::services::RerankerService::new(reranker_cfg.clone());
+                                HybridSearchService::with_reranker(
+                                    Arc::new(es),
+                                    bm25,
+                                    HybridSearchConfig {
+                                        enable_sparse: hybrid_cfg.enable_bm25,
+                                        rrf_k: hybrid_cfg.rrf_k,
+                                        dense_limit: hybrid_cfg.vector_top_k,
+                                        sparse_limit: hybrid_cfg.bm25_top_k,
+                                        timeout_ms: 0,
+                                        short_code_threshold: hybrid_cfg.short_code_threshold,
+                                        short_code_penalty: hybrid_cfg.short_code_penalty,
+                                    },
+                                    Some(reranker),
+                                )
+                            } else {
+                                HybridSearchService::new(
+                                    Arc::new(es),
+                                    bm25,
+                                    HybridSearchConfig {
+                                        enable_sparse: hybrid_cfg.enable_bm25,
+                                        rrf_k: hybrid_cfg.rrf_k,
+                                        dense_limit: hybrid_cfg.vector_top_k,
+                                        sparse_limit: hybrid_cfg.bm25_top_k,
+                                        timeout_ms: 0,
+                                        short_code_threshold: hybrid_cfg.short_code_threshold,
+                                        short_code_penalty: hybrid_cfg.short_code_penalty,
+                                    },
+                                )
+                            };
                             Some(hybrid.search(query, *limit).await.unwrap_or_default())
                         } else {
                             None
