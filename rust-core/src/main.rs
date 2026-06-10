@@ -137,12 +137,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 warn!("Embedding table setup failed: {}", e);
                                 embedding_done = false;
                             } else {
+                                // Load previous file hashes to detect deletions
+                                let existing_hashes = EmbeddingService::load_hashes(&project_hash);
                                 match es.vectorize_directory(
                                     &project_root.to_string_lossy(),
-                                    None,
+                                    existing_hashes.as_ref(),
                                 ).await {
                                     Ok(new_hashes) => {
                                         pb.set_stats(new_hashes.len(), stats.total_functions);
+                                        // Persist hashes for next incremental run
+                                        if let Err(e) = EmbeddingService::save_hashes(&project_hash, &new_hashes) {
+                                            warn!("Failed to save embedding hashes: {}", e);
+                                        }
                                     }
                                     Err(e) => {
                                         warn!("Embedding not available (LanceDB issue): {}. Graph-based search will be used.", e);
