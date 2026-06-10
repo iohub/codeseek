@@ -215,7 +215,7 @@ impl EmbeddingProvider for OpenAICompatibleEmbeddingProvider {
         }
 
         let embedding_response: EmbeddingResponse = response.json().await?;
-        let mut results: Vec<Vec<f32>> = embedding_response.data.into_iter()
+        let results: Vec<Vec<f32>> = embedding_response.data.into_iter()
             .map(|d| d.embedding)
             .collect();
 
