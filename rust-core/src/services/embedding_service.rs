@@ -23,6 +23,14 @@ use crate::codegraph::parser::CodeParser;
 use crate::config::Config;
 use crate::storage::traits_bm25::{TextSearchProvider, CodeChunk};
 
+use lancedb::table::OptimizeAction;
+use lance::dataset::optimize::CompactionOptions;
+use std::sync::atomic::{AtomicU64, Ordering};
+use chrono::TimeDelta;
+
+/// 累积软删除次数阈值，达到后自动触发 LanceDB compaction
+const OPTIMIZE_DELETE_THRESHOLD: u64 = 10;
+
 struct EmbeddingCache {
     conn: Mutex<SqliteConnection>,
 }
@@ -238,6 +246,8 @@ pub struct EmbeddingService {
     pub bm25_index: Option<Arc<dyn TextSearchProvider>>,
     /// Minimum code block length (chars after trim) to be indexed.
     min_code_block_length: usize,
+    /// 自上次 optimize 以来的 pending 删除操作计数，用于阈值触发优化
+    pending_delete_count: AtomicU64,
 }
 
 impl EmbeddingService {
@@ -292,6 +302,7 @@ impl EmbeddingService {
             cache,
             bm25_index,
             min_code_block_length,
+            pending_delete_count: AtomicU64::new(0),
         })
     }
     
@@ -318,6 +329,7 @@ impl EmbeddingService {
             cache,
             bm25_index: None,
             min_code_block_length: 16,
+            pending_delete_count: AtomicU64::new(0),
         })
     }
 
@@ -427,6 +439,14 @@ impl EmbeddingService {
         }
 
         info!("Vectorization completed. Total vectors created: {}", total_vectors);
+
+        // ── Post-batch: LanceDB storage optimization ──
+        // 批量处理完成后进行 compact + prune，回收软删除行的磁盘空间
+        // 非致命：即使优化失败，数据依然正确，仅磁盘回收延迟
+        if let Err(e) = self.optimize_lancedb().await {
+            error!("LanceDB post-batch optimization failed (non-fatal): {e}");
+        }
+
         Ok(new_hashes)
     }
 
@@ -473,6 +493,11 @@ impl EmbeddingService {
         // Delete rows where file_path matches
         let predicate = format!("file_path = '{}'", file_path.replace("'", "''"));
         table.delete(&predicate).await?;
+
+        // ── 更新 pending 删除计数 ──
+        let count = self.pending_delete_count.fetch_add(1, Ordering::Relaxed) + 1;
+        debug!("LanceDB soft-delete recorded, pending_deletes={}", count);
+
         Ok(())
     }
 
@@ -649,6 +674,19 @@ impl EmbeddingService {
             }
         }
         
+        // ── 阈值触发优化检查 ──
+        // 当累积软删除操作达到阈值时，自动触发 compact + prune
+        let count = self.pending_delete_count.load(Ordering::Relaxed);
+        if count >= OPTIMIZE_DELETE_THRESHOLD {
+            info!(
+                "Pending deletes ({}) reached threshold ({}), triggering optimization",
+                count, OPTIMIZE_DELETE_THRESHOLD
+            );
+            if let Err(e) = self.optimize_lancedb().await {
+                error!("Threshold-triggered LanceDB optimization failed (non-fatal): {e}");
+            }
+        }
+        
         Ok(vectors_created)
     }
 
@@ -726,6 +764,59 @@ impl EmbeddingService {
         let batches = vec![Ok(batch)];
         let batch_iter = RecordBatchIterator::new(batches, schema.clone());
         table.add(batch_iter).execute().await?;
+
+        Ok(())
+    }
+
+    /// 优化 LanceDB 存储：compact 碎片整理 + prune 旧版本清理
+    ///
+    /// # 功能
+    /// 1. **Compact**: 物理合并且删除已标记为删除的行，回收磁盘空间
+    /// 2. **Prune**: 清理旧的版本文件
+    ///
+    /// # 何时调用
+    /// - `vectorize_directory()` 批量处理完成后自动调用
+    /// - 当 `pending_delete_count` 达到阈值时自动调用
+    pub async fn optimize_lancedb(&self) -> anyhow::Result<()> {
+        info!("Starting LanceDB storage optimization (compact + prune)");
+
+        let table = self.connection.open_table(&self.table_name).execute().await
+            .map_err(|e| anyhow::anyhow!("Failed to open LanceDB table for optimization: {e}"))?;
+
+        // ── Step 1: Compact ──
+        // 合并小文件碎片，物理删除被标记为已删除的行
+        let compact_options = CompactionOptions {
+            target_rows_per_fragment: 1024 * 1024,  // ~1M 行每文件
+            max_rows_per_group: 1024,                // 1K 行每组
+            materialize_deletions: true,             // 强制物理删除软删除的行
+            materialize_deletions_threshold: 0.1,    // 10% 删除阈值作为后备
+            num_threads: 4,                          // 4 线程并行
+        };
+
+        let _compact_stats = table
+            .optimize(OptimizeAction::Compact {
+                options: compact_options,
+                remap_options: None,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("LanceDB compact failed: {e}"))?;
+
+        info!("LanceDB compact completed");
+
+        // ── Step 2: Prune ──
+        // 清理 compact 后遗留的旧版本文件
+        let _prune_stats = table
+            .optimize(OptimizeAction::Prune {
+                older_than: TimeDelta::zero(),   // 立即清理所有非最新版本
+                delete_unverified: Some(false),        // 安全：只删除已验证的版本
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("LanceDB prune failed: {e}"))?;
+
+        info!("LanceDB prune completed");
+
+        // 重置 pending 删除计数
+        self.pending_delete_count.store(0, Ordering::Relaxed);
 
         Ok(())
     }

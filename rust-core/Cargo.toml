@@ -54,6 +54,8 @@ dirs = "5.0"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 anyhow = "1"
 
+lance = "=0.10.6"
+
 # BM25 full-text search
 tantivy = "0.22"
 
