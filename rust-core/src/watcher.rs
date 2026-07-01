@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 
 /// The set of file extensions that should trigger re-indexing.
 const WATCHED_EXTENSIONS: &[&str] = &[
-    "rs", "ts", "js", "py", "go", "java", "cpp", "c", "h", "hpp",
+    "rs", "ts", "py", "go", "java", "cpp", "c", "h", "hpp",
     "toml", "json", "yaml", "yml", "md",
 ];
 
