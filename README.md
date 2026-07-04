@@ -31,6 +31,23 @@ codeseek status
 codeseek install-hooks
 ```
 
+Natural Language Code Search example
+
+```bash
+╰─$ codeseek search 'how the code embedding work'
+1. get_embedding (0.7973)
+   /home/do/ssd/iohub/dev/codeseek/rust-core/src/services/embedding_service.rs:0
+2. EmbeddingService (0.2855)
+   /home/do/ssd/iohub/dev/codeseek/rust-core/src/services/embedding_service.rs:0
+3. EmbeddingData (0.1449)
+   /home/do/ssd/iohub/dev/codeseek/rust-core/src/services/embedding_service.rs:0
+4. EmbeddingResponse (0.1304)
+   /home/do/ssd/iohub/dev/codeseek/rust-core/src/services/embedding_service.rs:0
+5. default_model (0.0450)
+   /home/do/ssd/iohub/dev/codeseek/rust-core/src/config.rs:0
+
+```
+
 ## Install
 
 ### npm
@@ -64,6 +81,10 @@ brew install codeseek
 ### From source
 
 ```bash
+# install protoc
+# macos: brew install protobuf
+# ubuntu: sudo apt install protoc
+
 git clone https://github.com/CodeBendKit/codeseek.git
 cd codeseek
 ./build.sh --release
