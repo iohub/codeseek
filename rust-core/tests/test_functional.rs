@@ -6,12 +6,11 @@ use std::fs;
 use codeseek::storage::StorageManager;
 use codeseek::services::CodeAnalyzer;
 use codeseek::codegraph::types::PetCodeGraph;
-use uuid::Uuid;
 
 /// 测试构建图功能
 #[test]
 fn test_build_graph_functionality() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let _temp_dir = TempDir::new().expect("Failed to create temp directory");
     let storage = Arc::new(StorageManager::new());
     
     // 测试Rust项目
@@ -27,7 +26,7 @@ fn test_build_graph_functionality() {
     test_build_graph_for_project(&storage, "tests/test_repos/simple_ts_project");
 }
 
-fn test_build_graph_for_project(storage: &Arc<StorageManager>, project_path: &str) {
+fn test_build_graph_for_project(_storage: &Arc<StorageManager>, project_path: &str) {
     println!("Testing build_graph for project: {}", project_path);
     
     let project_dir = PathBuf::from(project_path);
@@ -45,6 +44,13 @@ fn test_build_graph_for_project(storage: &Arc<StorageManager>, project_path: &st
     assert!(code_graph.is_some(), "Code graph should be available after analysis");
     
     let code_graph = code_graph.unwrap();
+    
+    // 调试：输出函数数量
+    println!("  [DEBUG] code_graph.functions count: {}", code_graph.functions.len());
+    for (id, func) in &code_graph.functions {
+        println!("  [DEBUG]   Function: {} ({}) - {:?}", id, func.name, func.language);
+    }
+    println!("  [DEBUG] code_graph.call_relations count: {}", code_graph.call_relations.len());
     
     // 验证代码图包含函数
     assert!(!code_graph.functions.is_empty(), "Code graph should contain functions");
@@ -98,7 +104,7 @@ fn test_build_graph_for_project(storage: &Arc<StorageManager>, project_path: &st
 /// 测试查询调用图功能
 #[test]
 fn test_query_call_graph_functionality() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let _temp_dir = TempDir::new().expect("Failed to create temp directory");
     let storage = Arc::new(StorageManager::new());
     
     // 测试Rust项目
@@ -301,7 +307,7 @@ fn find_source_files(project_dir: &PathBuf) -> Vec<PathBuf> {
 /// 测试完整的构建和查询流程
 #[test]
 fn test_complete_build_and_query_workflow() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let _temp_dir = TempDir::new().expect("Failed to create temp directory");
     let storage = Arc::new(StorageManager::new());
     
     // 选择Rust项目进行完整测试
@@ -377,8 +383,8 @@ fn test_complete_build_and_query_workflow() {
 /// 专门测试TypeScript项目的功能
 #[test]
 fn test_typescript_project_functionality() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let storage = Arc::new(StorageManager::new());
+    let _temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let _storage = Arc::new(StorageManager::new());
     
     let project_path = "tests/test_repos/simple_ts_project";
     let project_dir = PathBuf::from(project_path);
@@ -505,7 +511,7 @@ fn test_typescript_specific_queries(graph: &PetCodeGraph) {
 #[test]
 fn test_query_code_skeleton_batch_functionality() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let storage = Arc::new(StorageManager::new());
+    let _storage = Arc::new(StorageManager::new());
     
     // 创建测试文件
     let test_file1 = temp_dir.path().join("test1.rs");

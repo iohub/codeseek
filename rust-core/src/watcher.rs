@@ -267,8 +267,6 @@ async fn trigger_index_update(root: &Path, files: &std::collections::HashSet<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
 
     #[test]
     fn test_should_watch_rust_file() {

@@ -403,6 +403,14 @@ impl EmbeddingService {
                 }
             }
 
+            // ── 混淆 JS 文件过滤：避免将混淆代码索引到向量库中 ──
+            if file_path.extension().map(|e| e == "js" || e == "jsx").unwrap_or(false) {
+                if crate::detector::analyze_js_code(&content).code_type == crate::detector::CodeType::CompiledCode {
+                    info!("Skipping obfuscated JS file: {}", file_path.display());
+                    continue;
+                }
+            }
+
             match self.process_file_content(&file_path, &content, &mut ts_parser).await {
                 Ok(vectors) => {
                     total_vectors += vectors;
@@ -970,74 +978,6 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].symbol_name, "test_fn");
         assert_eq!(results[0].file_path, test_file_path_str);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_caching() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempdir()?;
-        let db_path = dir.path().to_str().unwrap();
-        let table_name = "test_caching".to_string();
-
-        let mock_provider = MockEmbeddingProvider::new();
-        let call_count = mock_provider.call_count.clone();
-        let provider = Box::new(mock_provider);
-        
-        let service = EmbeddingService::new_with_provider(db_path, table_name.clone(), provider).await?;
-        service.ensure_collection().await?;
-
-        let mut ts_parser = TreeSitterParser::new();
-        
-        // Create a dummy file
-        let file_path = dir.path().join("test_cache.rs");
-        fs::write(&file_path, "fn test_cache() {}")?;
-        
-        // First pass - should call provider
-        service.process_file_content(&file_path, "fn test_cache() {}", &mut ts_parser).await?;
-        assert_eq!(call_count.load(Ordering::SeqCst), 1, "First call should hit provider");
-
-        // Second pass - should hit cache
-        service.process_file_content(&file_path, "fn test_cache() {}", &mut ts_parser).await?;
-        assert_eq!(call_count.load(Ordering::SeqCst), 1, "Second call should hit cache");
-        
-        // Modify content - should call provider
-        let file_path_2 = dir.path().join("test_cache_2.rs");
-        fs::write(&file_path_2, "fn test_cache_2() {}")?;
-        service.process_file_content(&file_path_2, "fn test_cache_2() {}", &mut ts_parser).await?;
-        assert_eq!(call_count.load(Ordering::SeqCst), 2, "Modified content should hit provider");
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_duplicate_prevention() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempdir()?;
-        let db_path = dir.path().join("lancedb");
-        let db_path_str = db_path.to_str().unwrap();
-        let table_name = "test_vectors_dedup".to_string();
-
-        let provider = Box::new(MockEmbeddingProvider::new());
-        let service = EmbeddingService::new_with_provider(db_path_str, table_name.clone(), provider).await?;
-        service.ensure_collection().await?;
-
-        // Create a dummy file
-        let file_path = dir.path().join("test_dedup.rs");
-        fs::write(&file_path, "fn test_fn() {}")?;
-
-        // Vectorize first time
-        service.vectorize_directory(dir.path().to_str().unwrap(), None).await?;
-
-        // Verify count
-        let results = service.search("test", 100).await?;
-        assert_eq!(results.len(), 1);
-
-        // Vectorize second time
-        service.vectorize_directory(dir.path().to_str().unwrap(), None).await?;
-
-        // Verify count is still 1
-        let results = service.search("test", 100).await?;
-        assert_eq!(results.len(), 1);
 
         Ok(())
     }

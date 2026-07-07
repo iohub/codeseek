@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use parking_lot::RwLock;
 use tracing::{info, warn, debug};
+use crate::detector;
 
 use crate::codegraph::types::{
     EntityGraph, PetCodeGraph, SnippetIndex, FunctionInfo
@@ -47,12 +48,33 @@ impl RepositoryManager {
     pub fn initialize(&mut self) -> Result<(), String> {
         info!("Initializing repository analysis for: {}", self.repository_path.display());
 
-        // 扫描所有文件
+        // Scan all files
         let files = self.parser.scan_directory(&self.repository_path);
         info!("Found {} files to analyze", files.len());
 
-        // 分析每个文件
+        // Analyze each file (skip obfuscated JS files)
         for file_path in files {
+            // Check if this is an obfuscated JS file
+            let is_obfuscated = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("js") || e.eq_ignore_ascii_case("jsx"))
+                .unwrap_or(false)
+                && {
+                    match std::fs::read_to_string(&file_path) {
+                        Ok(content) => {
+                            let report = detector::analyze_js_code(&content);
+                            report.code_type == detector::CodeType::CompiledCode
+                        }
+                        Err(_) => false, // If read fails, let refresh_file report the error
+                    }
+                };
+
+            if is_obfuscated {
+                info!("Skipping obfuscated JS file during init: {}", file_path.display());
+                continue;
+            }
+
             if let Err(e) = self.refresh_file(&file_path) {
                 warn!("Failed to analyze file {}: {}", file_path.display(), e);
             }

@@ -10,6 +10,7 @@ use crate::codegraph::types::{
 };
 use crate::codegraph::graph::CodeGraph;
 use crate::codegraph::treesitter::TreeSitterParser;
+use crate::detector;
 
 /// 代码解析器，负责解析源代码文件并提取函数调用关系
 pub struct CodeParser {
@@ -34,6 +35,28 @@ impl CodeParser {
             file_index: FileIndex::default(),
             snippet_index: SnippetIndex::default(),
         }
+    }
+
+    /// Check whether a JS file is obfuscated/compiled code.
+    /// Non-JS files directly return Ok(false).
+    pub fn is_obfuscated_js_file(&self, file_path: &Path) -> Result<bool, String> {
+        // Only check JS/JSX files
+        let is_js = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("js") || e.eq_ignore_ascii_case("jsx"))
+            .unwrap_or(false);
+
+        if !is_js {
+            return Ok(false);
+        }
+
+        let content = std::fs::read_to_string(file_path).map_err(|e| {
+            format!("Failed to read file for obfuscation check '{}': {}", file_path.display(), e)
+        })?;
+
+        let report = detector::analyze_js_code(&content);
+        Ok(report.code_type == detector::CodeType::CompiledCode)
     }
 
     /// 扫描目录下的所有支持的文件
@@ -73,6 +96,7 @@ impl CodeParser {
                 "rs" |
                 "ts" |
                 "tsx" |
+                "js" | "jsx" |
                 "go"
             )
         } else {
@@ -380,6 +404,7 @@ impl CodeParser {
                 "rs" => "rust".to_string(),
                 "py" | "py3" | "pyx" => "python".to_string(),
                 "ts" | "tsx" => "typescript".to_string(),
+                "js" | "jsx" => "javascript".to_string(),
                 "java" => "java".to_string(),
                 "cpp" | "cc" | "cxx" | "c++" | "c" | "h" | "hpp" | "hxx" | "hh" => "cpp".to_string(),
                 "go" => "go".to_string(),
@@ -684,6 +709,10 @@ impl CodeParser {
 
     /// 构建完整的代码图（增量构建）
     pub fn build_code_graph(&mut self, dir: &Path) -> Result<CodeGraph, String> {
+        // 清空之前解析的函数数据，防止跨项目调用时数据残留
+        self.file_functions.clear();
+        self.function_registry.clear();
+        
         // 1. 尝试从本地数据库加载现有的图
         let mut code_graph = self._load_existing_code_graph(dir)?;
         let has_existing_data = code_graph.is_some();
@@ -701,8 +730,12 @@ impl CodeParser {
         let files = self.scan_directory(dir);
         info!("Found {} files to process", files.len());
         
-        // 3. 加载文件哈希值（如果存在）
-        let mut file_hashes = self._load_file_hashes(dir)?;
+        // 3. 加载文件哈希值（仅增量构建时使用，全量构建时忽略）
+        let mut file_hashes: HashMap<String, String> = if has_existing_data {
+            self._load_file_hashes(dir)?
+        } else {
+            HashMap::new()
+        };
         
         // 4. 逐个处理文件，检查是否需要重新解析
         let mut processed_files = 0;
@@ -710,6 +743,13 @@ impl CodeParser {
         
         for file_path in files {
             if self._should_skip_file(&file_path, &mut file_hashes)? {
+                skipped_files += 1;
+                continue;
+            }
+            
+            // Skip obfuscated JavaScript files
+            if self.is_obfuscated_js_file(&file_path)? {
+                info!("Skipping obfuscated JS file: {}", file_path.display());
                 skipped_files += 1;
                 continue;
             }
@@ -1651,8 +1691,8 @@ if __name__ == "__main__":
         assert!(stats.total_functions >= 2);
         
         // 检查是否有调用关系（即使是启发式的）
-        let callers = code_graph.get_callers(&func1.id);
-        let callees = code_graph.get_callees(&func1.id);
+        let _callers = code_graph.get_callers(&func1.id);
+        let _callees = code_graph.get_callees(&func1.id);
         
         // 由于没有真实的AST解析，可能只有启发式调用关系
         // 或者没有调用关系（取决于回退分析的实现）
@@ -1660,7 +1700,7 @@ if __name__ == "__main__":
     
     #[test]
     fn test_resolve_qualified_function_name() {
-        let mut parser = CodeParser::new();
+        let parser = CodeParser::new();
         let mut code_graph = PetCodeGraph::new();
         
         // 创建一个类方法

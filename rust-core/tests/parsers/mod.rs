@@ -17,8 +17,8 @@ use crate::codegraph::treesitter::structs::SymbolType;
 // Mock Document structure for testing
 #[derive(Clone)]
 struct Document {
-    doc_path: PathBuf,
-    doc_text: Option<Rope>,
+    _doc_path: PathBuf,
+    _doc_text: Option<Rope>,
 }
 
 // Mock ast module for testing
@@ -319,8 +319,8 @@ pub(crate) fn base_skeletonizer_test(lang: &LanguageId,
     let symbols = parser.parse(code, &file);
     let symbols_struct = symbols.iter().map(|s| s.read().symbol_info_struct()).collect();
     let doc = Document {
-        doc_path: file.clone(),
-        doc_text: Some(Rope::from_str(code)),
+        _doc_path: file.clone(),
+        _doc_text: Some(Rope::from_str(code)),
     };
     let guid_to_children: HashMap<Uuid, Vec<Uuid>> = symbols.iter().map(|s| (s.read().guid().clone(), s.read().childs_guid().clone())).collect();
     let ast_markup: FileASTMarkup = ast::lowlevel_file_markup(&doc, &symbols_struct).unwrap();
@@ -357,8 +357,8 @@ pub(crate) fn base_declaration_formatter_test(lang: &LanguageId,
     let symbols = parser.parse(code, &file);
     let symbols_struct = symbols.iter().map(|s| s.read().symbol_info_struct()).collect();
     let doc = Document {
-        doc_path: file.clone(),
-        doc_text: Some(Rope::from_str(code)),
+        _doc_path: file.clone(),
+        _doc_text: Some(Rope::from_str(code)),
     };
     let guid_to_children: HashMap<Uuid, Vec<Uuid>> = symbols.iter().map(|s| (s.read().guid().clone(), s.read().childs_guid().clone())).collect();
     let ast_markup: FileASTMarkup = ast::lowlevel_file_markup(&doc, &symbols_struct).unwrap();

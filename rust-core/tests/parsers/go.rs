@@ -8,9 +8,6 @@ mod tests {
     use crate::codegraph::treesitter::parsers::tests::{base_declaration_formatter_test, base_parser_test, base_skeletonizer_test};
     use crate::codegraph::treesitter::structs::SymbolType;
 
-    const MAIN_GO_CODE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cases/go/main.go"));
-    const MAIN_GO_SYMBOLS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cases/go/main.go.json"));
-
     const SHAPE_GO_CODE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cases/go/shape.go"));
     const SHAPE_GO_SKELETON: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cases/go/shape.go.skeleton"));
     const SHAPE_GO_DECLS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cases/go/shape.go.decl_json"));
