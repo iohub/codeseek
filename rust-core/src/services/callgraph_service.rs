@@ -55,7 +55,9 @@ pub fn execute_callgraph(
         let mut output = format!("Call graph for '{}' (depth={}):\n\n", center.name, depth);
 
         output.push_str(&format!("== Callers (upstream, depth={}) ==\n", depth));
-        let callers_text = collect_callers_text(graph, &center.id, depth, 1);
+        let mut visited_callers_text = HashSet::new();
+        visited_callers_text.insert(center.id);
+        let callers_text = collect_callers_text(graph, &center.id, depth, 1, &mut visited_callers_text);
         if callers_text.is_empty() {
             output.push_str("  (none)\n");
         } else {
@@ -63,7 +65,9 @@ pub fn execute_callgraph(
         }
 
         output.push_str(&format!("\n== Callees (downstream, depth={}) ==\n", depth));
-        let callees_text = collect_callees_text(graph, &center.id, depth, 1);
+        let mut visited_callees_text = HashSet::new();
+        visited_callees_text.insert(center.id);
+        let callees_text = collect_callees_text(graph, &center.id, depth, 1, &mut visited_callees_text);
         if callees_text.is_empty() {
             output.push_str("  (none)\n");
         } else {
@@ -154,6 +158,7 @@ pub fn collect_callers_text(
     function_id: &Uuid,
     depth: u32,
     indent: usize,
+    visited: &mut HashSet<Uuid>,
 ) -> String {
     if depth == 0 {
         return String::new();
@@ -163,11 +168,15 @@ pub fn collect_callers_text(
     let indent_str = "  ".repeat(indent);
 
     for (caller, relation) in graph.get_callers(function_id) {
+        if visited.contains(&caller.id) {
+            continue;
+        }
+        visited.insert(caller.id);
         output.push_str(&format!(
             "{}{} ({}:{})\n",
             indent_str, caller.name, caller.file_path.display(), relation.line_number
         ));
-        output.push_str(&collect_callers_text(graph, &caller.id, depth - 1, indent + 1));
+        output.push_str(&collect_callers_text(graph, &caller.id, depth - 1, indent + 1, visited));
     }
 
     output
@@ -179,6 +188,7 @@ pub fn collect_callees_text(
     function_id: &Uuid,
     depth: u32,
     indent: usize,
+    visited: &mut HashSet<Uuid>,
 ) -> String {
     if depth == 0 {
         return String::new();
@@ -188,11 +198,15 @@ pub fn collect_callees_text(
     let indent_str = "  ".repeat(indent);
 
     for (callee, relation) in graph.get_callees(function_id) {
+        if visited.contains(&callee.id) {
+            continue;
+        }
+        visited.insert(callee.id);
         output.push_str(&format!(
             "{}{} ({}:{})\n",
             indent_str, callee.name, callee.file_path.display(), relation.line_number
         ));
-        output.push_str(&collect_callees_text(graph, &callee.id, depth - 1, indent + 1));
+        output.push_str(&collect_callees_text(graph, &callee.id, depth - 1, indent + 1, visited));
     }
 
     output
@@ -734,7 +748,8 @@ mod tests {
         let graph = linear_graph();
         let funcs = graph.find_functions_by_name("B");
         assert!(!funcs.is_empty());
-        let result = collect_callers_text(&graph, &funcs[0].id, 0, 1);
+        let mut visited = HashSet::new();
+        let result = collect_callers_text(&graph, &funcs[0].id, 0, 1, &mut visited);
         assert!(result.is_empty());
     }
 
@@ -743,7 +758,8 @@ mod tests {
         let graph = linear_graph();
         let funcs = graph.find_functions_by_name("B");
         assert!(!funcs.is_empty());
-        let result = collect_callees_text(&graph, &funcs[0].id, 0, 1);
+        let mut visited = HashSet::new();
+        let result = collect_callees_text(&graph, &funcs[0].id, 0, 1, &mut visited);
         assert!(result.is_empty());
     }
 }
