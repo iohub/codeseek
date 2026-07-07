@@ -23,11 +23,12 @@ Before any Grep/Glob/Bash for code search, try CodeSeek tools first.\n\
 They give you AST-verified definitions with signatures and line numbers.\n\
 \n\
 Tool priority (use in this order):\n\
-1. codeseek_search(\"query\") — FIRST for finding code by name or behavior\n\
-2. codeseek_callers(\"fn\")   — REQUIRED before modifying any function\n\
-3. codeseek_callees(\"fn\")   — to understand internal dependencies\n\
-4. Grep — ONLY for exact strings (error messages, UUIDs, log formats)\n\
-5. Glob — ONLY when you already know the exact filename pattern\n\
+1. codeseek_search(\"query\")      — FIRST for finding code by name or behavior\n\
+2. codeseek_callers(\"fn\")        — REQUIRED before modifying any function\n\
+3. codeseek_callees(\"fn\")        — to understand internal dependencies\n\
+4. codeseek_callgraph(\"fn\", 2)   — to explore full calling context with depth\n\
+5. Grep — ONLY for exact strings (error messages, UUIDs, log formats)\n\
+6. Glob — ONLY when you already know the exact filename pattern\n\
 <!-- /CODESEEK_INJECTION -->\n";
 
 /// Target filenames for injection
