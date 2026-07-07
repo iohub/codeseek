@@ -191,7 +191,7 @@ fn handle_initialize(id: Option<Value>) -> Option<Value> {
                 "name": "codeseek",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": "Code intelligence CLI — AST-based call graph + semantic search. Automatically indexes your project on startup and watches for file changes in real-time.\n\nTools:\n- codeseek_search — find symbols by name\n- codeseek_callers — who calls this function?\n- codeseek_callees — what does this function call?\n- codeseek_init — manually trigger re-index\n- codeseek_status — check index health\n- codeseek_list — list indexed projects"
+            "instructions": "Code intelligence CLI — AST-based call graph + semantic search. Automatically indexes your project on startup and watches for file changes in real-time.\n\nTools:\n- codeseek_search — find symbols by name\n- codeseek_callers — who calls this function?\n- codeseek_callees — what does this function call?\n- codeseek_callgraph — query call graph with depth (bi-directional)\n- codeseek_init — manually trigger re-index\n- codeseek_status — check index health\n- codeseek_list — list indexed projects"
         }
     }))
 }
