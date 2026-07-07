@@ -225,6 +225,15 @@ fn handle_tools_call(id: Option<Value>, request: &Value) -> Option<Value> {
             let symbol = arguments.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
             run_cli(&["callees", symbol, "--json"])
         }
+        "codeseek_callgraph" => {
+            let symbol = arguments.get("function_name").and_then(|v| v.as_str()).unwrap_or("");
+            let depth = arguments.get("depth").and_then(|v| v.as_u64()).unwrap_or(1);
+            if symbol.is_empty() {
+                Err("Missing required argument: function_name".to_string())
+            } else {
+                run_cli(&["callgraph", symbol, "--depth", &depth.to_string(), "--json"])
+            }
+        }
         "codeseek_init" => {
             run_cli(&["init"])
         }

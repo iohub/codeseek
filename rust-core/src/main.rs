@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use codeseek::ui::progress::ProgressBar;
 use codeseek::mcp;
+use uuid::Uuid;
 
 /// 从当前工作目录检测项目根（向上找 .git/）
 fn detect_project() -> Result<PathBuf, String> {
@@ -363,6 +364,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Callgraph { symbol, depth, json } => {
+            let project_root = detect_project()?;
+            let (_, lock_path) = project_paths(&project_root);
+            let _lock = FileLock::shared(lock_path)?;
+            let project_hash = Config::compute_project_hash(&project_root);
+            let storage = Arc::new(StorageManager::new());
+            match storage.get_persistence().load_graph(&project_hash) {
+                Ok(Some(graph)) => {
+                    let results = execute_callgraph(&graph, symbol, *depth, *json)?;
+                    if !*json && results.trim().is_empty() {
+                        println!("No function found for '{}'", symbol);
+                    } else {
+                        print!("{}", results);
+                    }
+                }
+                _ => {
+                    println!("No index found. Run 'codeseek init' first.");
+                }
+            }
+        }
         Commands::Uninit { force } => {
             let project_root = detect_project()?;
             let (index_dir, lock_path) = project_paths(&project_root);
@@ -592,6 +613,199 @@ fn execute_callees(
     }
 
     Ok(output)
+}
+
+// ========== Callgraph 相关函数 ==========
+
+fn execute_callgraph(
+    graph: &PetCodeGraph,
+    symbol: &str,
+    depth: u32,
+    json: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let functions = graph.find_functions_by_name(symbol);
+
+    if functions.is_empty() {
+        if json {
+            return Ok("{}".to_string());
+        }
+        return Ok(format!("No function found for '{}'", symbol));
+    }
+
+    // Use the first matching function as the center node
+    let center = functions[0];
+
+    if json {
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(center.id);
+
+        let callers = collect_callers_json(graph, &center.id, depth, &mut visited);
+        visited.clear();
+        visited.insert(center.id);
+        let callees = collect_callees_json(graph, &center.id, depth, &mut visited);
+
+        let result = serde_json::json!({
+            "function_name": symbol,
+            "depth": depth,
+            "center": {
+                "name": center.name,
+                "file_path": center.file_path,
+                "line_start": center.line_start,
+                "line_end": center.line_end,
+                "signature": center.signature,
+                "namespace": center.namespace,
+                "language": center.language,
+            },
+            "callers": callers,
+            "callees": callees,
+        });
+
+        Ok(serde_json::to_string_pretty(&result)?)
+    } else {
+        let mut output = format!("Call graph for '{}' (depth={}):\n\n", center.name, depth);
+
+        output.push_str(&format!("== Callers (upstream, depth={}) ==\n", depth));
+        let callers_text = collect_callers_text(graph, &center.id, depth, 1);
+        if callers_text.is_empty() {
+            output.push_str("  (none)\n");
+        } else {
+            output.push_str(&callers_text);
+        }
+
+        output.push_str(&format!("\n== Callees (downstream, depth={}) ==\n", depth));
+        let callees_text = collect_callees_text(graph, &center.id, depth, 1);
+        if callees_text.is_empty() {
+            output.push_str("  (none)\n");
+        } else {
+            output.push_str(&callees_text);
+        }
+
+        Ok(output)
+    }
+}
+
+/// Recursively collect callers (upstream) as JSON values.
+fn collect_callers_json(
+    graph: &PetCodeGraph,
+    function_id: &Uuid,
+    depth: u32,
+    visited: &mut std::collections::HashSet<Uuid>,
+) -> Vec<serde_json::Value> {
+    if depth == 0 {
+        return vec![];
+    }
+
+    let mut results = vec![];
+    for (caller, relation) in graph.get_callers(function_id) {
+        let mut node = serde_json::json!({
+            "name": caller.name,
+            "file_path": caller.file_path,
+            "line_start": caller.line_start,
+            "line_end": caller.line_end,
+            "signature": caller.signature,
+            "call_line": relation.line_number,
+        });
+
+        if depth > 1 && !visited.contains(&caller.id) {
+            visited.insert(caller.id);
+            let sub_callers = collect_callers_json(graph, &caller.id, depth - 1, visited);
+            visited.remove(&caller.id);
+            node["callers"] = serde_json::Value::Array(sub_callers);
+        } else {
+            node["callers"] = serde_json::Value::Array(vec![]);
+        }
+
+        results.push(node);
+    }
+
+    results
+}
+
+/// Recursively collect callees (downstream) as JSON values.
+fn collect_callees_json(
+    graph: &PetCodeGraph,
+    function_id: &Uuid,
+    depth: u32,
+    visited: &mut std::collections::HashSet<Uuid>,
+) -> Vec<serde_json::Value> {
+    if depth == 0 {
+        return vec![];
+    }
+
+    let mut results = vec![];
+    for (callee, relation) in graph.get_callees(function_id) {
+        let mut node = serde_json::json!({
+            "name": callee.name,
+            "file_path": callee.file_path,
+            "line_start": callee.line_start,
+            "line_end": callee.line_end,
+            "signature": callee.signature,
+            "call_line": relation.line_number,
+        });
+
+        if depth > 1 && !visited.contains(&callee.id) {
+            visited.insert(callee.id);
+            let sub_callees = collect_callees_json(graph, &callee.id, depth - 1, visited);
+            visited.remove(&callee.id);
+            node["callees"] = serde_json::Value::Array(sub_callees);
+        } else {
+            node["callees"] = serde_json::Value::Array(vec![]);
+        }
+
+        results.push(node);
+    }
+
+    results
+}
+
+/// Recursively collect callers as indented text.
+fn collect_callers_text(
+    graph: &PetCodeGraph,
+    function_id: &Uuid,
+    depth: u32,
+    indent: usize,
+) -> String {
+    if depth == 0 {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    let indent_str = "  ".repeat(indent);
+
+    for (caller, relation) in graph.get_callers(function_id) {
+        output.push_str(&format!(
+            "{}{} ({}:{})\n",
+            indent_str, caller.name, caller.file_path.display(), relation.line_number
+        ));
+        output.push_str(&collect_callers_text(graph, &caller.id, depth - 1, indent + 1));
+    }
+
+    output
+}
+
+/// Recursively collect callees as indented text.
+fn collect_callees_text(
+    graph: &PetCodeGraph,
+    function_id: &Uuid,
+    depth: u32,
+    indent: usize,
+) -> String {
+    if depth == 0 {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    let indent_str = "  ".repeat(indent);
+
+    for (callee, relation) in graph.get_callees(function_id) {
+        output.push_str(&format!(
+            "{}{} ({}:{})\n",
+            indent_str, callee.name, callee.file_path.display(), relation.line_number
+        ));
+        output.push_str(&collect_callees_text(graph, &callee.id, depth - 1, indent + 1));
+    }
+
+    output
 }
 
 // ── MCP Install / Uninstall helpers ────────────────────────────────────
