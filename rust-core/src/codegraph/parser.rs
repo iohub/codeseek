@@ -1682,8 +1682,8 @@ if __name__ == "__main__":
         assert!(stats.total_functions >= 2);
         
         // 检查是否有调用关系（即使是启发式的）
-        let callers = code_graph.get_callers(&func1.id);
-        let callees = code_graph.get_callees(&func1.id);
+        let _callers = code_graph.get_callers(&func1.id);
+        let _callees = code_graph.get_callees(&func1.id);
         
         // 由于没有真实的AST解析，可能只有启发式调用关系
         // 或者没有调用关系（取决于回退分析的实现）
@@ -1691,7 +1691,7 @@ if __name__ == "__main__":
     
     #[test]
     fn test_resolve_qualified_function_name() {
-        let mut parser = CodeParser::new();
+        let parser = CodeParser::new();
         let mut code_graph = PetCodeGraph::new();
         
         // 创建一个类方法
