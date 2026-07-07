@@ -10,6 +10,7 @@ use crate::codegraph::types::{
 };
 use crate::codegraph::graph::CodeGraph;
 use crate::codegraph::treesitter::TreeSitterParser;
+use crate::detector;
 
 /// 代码解析器，负责解析源代码文件并提取函数调用关系
 pub struct CodeParser {
@@ -34,6 +35,28 @@ impl CodeParser {
             file_index: FileIndex::default(),
             snippet_index: SnippetIndex::default(),
         }
+    }
+
+    /// 检查 JS 文件是否为混淆/编译代码。
+    /// 非 JS 文件直接返回 Ok(false)。
+    pub fn is_obfuscated_js_file(&self, file_path: &Path) -> Result<bool, String> {
+        // 仅检查 JS/JSX 文件
+        let is_js = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("js") || e.eq_ignore_ascii_case("jsx"))
+            .unwrap_or(false);
+
+        if !is_js {
+            return Ok(false);
+        }
+
+        let content = std::fs::read_to_string(file_path).map_err(|e| {
+            format!("Failed to read file for obfuscation check '{}': {}", file_path.display(), e)
+        })?;
+
+        let report = detector::analyze_js_code(&content);
+        Ok(report.code_type == detector::CodeType::CompiledCode)
     }
 
     /// 扫描目录下的所有支持的文件
@@ -73,6 +96,7 @@ impl CodeParser {
                 "rs" |
                 "ts" |
                 "tsx" |
+                "js" | "jsx" |
                 "go"
             )
         } else {
@@ -710,6 +734,13 @@ impl CodeParser {
         
         for file_path in files {
             if self._should_skip_file(&file_path, &mut file_hashes)? {
+                skipped_files += 1;
+                continue;
+            }
+            
+            // 跳过混淆的 JavaScript 文件
+            if self.is_obfuscated_js_file(&file_path)? {
+                info!("Skipping obfuscated JS file: {}", file_path.display());
                 skipped_files += 1;
                 continue;
             }
