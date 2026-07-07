@@ -14,7 +14,6 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use codeseek::ui::progress::ProgressBar;
 use codeseek::mcp;
-use uuid::Uuid;
 
 /// 从当前工作目录检测项目根（向上找 .git/）
 fn detect_project() -> Result<PathBuf, String> {
@@ -615,58 +614,14 @@ fn execute_callees(
     Ok(output)
 }
 
-// Callgraph query functions delegated to services module
-use codeseek::services::{
-    execute_callgraph as callgraph_execute,
-    collect_callers_json as callgraph_collect_callers_json,
-    collect_callees_json as callgraph_collect_callees_json,
-    collect_callers_text as callgraph_collect_callers_text,
-    collect_callees_text as callgraph_collect_callees_text,
-};
-
+// Callgraph query function delegated to services module
 fn execute_callgraph(
     graph: &PetCodeGraph,
     symbol: &str,
     depth: u32,
     json: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    callgraph_execute(graph, symbol, depth, json)
-}
-
-fn collect_callers_json(
-    graph: &PetCodeGraph,
-    function_id: &Uuid,
-    depth: u32,
-    visited: &mut std::collections::HashSet<Uuid>,
-) -> Vec<serde_json::Value> {
-    callgraph_collect_callers_json(graph, function_id, depth, visited)
-}
-
-fn collect_callees_json(
-    graph: &PetCodeGraph,
-    function_id: &Uuid,
-    depth: u32,
-    visited: &mut std::collections::HashSet<Uuid>,
-) -> Vec<serde_json::Value> {
-    callgraph_collect_callees_json(graph, function_id, depth, visited)
-}
-
-fn collect_callers_text(
-    graph: &PetCodeGraph,
-    function_id: &Uuid,
-    depth: u32,
-    indent: usize,
-) -> String {
-    callgraph_collect_callers_text(graph, function_id, depth, indent)
-}
-
-fn collect_callees_text(
-    graph: &PetCodeGraph,
-    function_id: &Uuid,
-    depth: u32,
-    indent: usize,
-) -> String {
-    callgraph_collect_callees_text(graph, function_id, depth, indent)
+    codeseek::services::execute_callgraph(graph, symbol, depth, json)
 }
 
 // ── MCP Install / Uninstall helpers ────────────────────────────────────
