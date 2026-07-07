@@ -6,3 +6,4 @@ pub mod config;
 pub mod ui;
 pub mod mcp;
 pub mod watcher;
+pub mod detector;
