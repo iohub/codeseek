@@ -709,6 +709,10 @@ impl CodeParser {
 
     /// 构建完整的代码图（增量构建）
     pub fn build_code_graph(&mut self, dir: &Path) -> Result<CodeGraph, String> {
+        // 清空之前解析的函数数据，防止跨项目调用时数据残留
+        self.file_functions.clear();
+        self.function_registry.clear();
+        
         // 1. 尝试从本地数据库加载现有的图
         let mut code_graph = self._load_existing_code_graph(dir)?;
         let has_existing_data = code_graph.is_some();
@@ -726,8 +730,12 @@ impl CodeParser {
         let files = self.scan_directory(dir);
         info!("Found {} files to process", files.len());
         
-        // 3. 加载文件哈希值（如果存在）
-        let mut file_hashes = self._load_file_hashes(dir)?;
+        // 3. 加载文件哈希值（仅增量构建时使用，全量构建时忽略）
+        let mut file_hashes: HashMap<String, String> = if has_existing_data {
+            self._load_file_hashes(dir)?
+        } else {
+            HashMap::new()
+        };
         
         // 4. 逐个处理文件，检查是否需要重新解析
         let mut processed_files = 0;
