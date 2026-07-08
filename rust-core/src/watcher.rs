@@ -134,6 +134,7 @@ fn should_watch_file(path: &Path, root: &Path) -> bool {
         "dist/", "dist\\",
         "build/", "build\\",
         ".git/", ".git\\",
+        "out/", "out\\",  // esbuild/Vite output directory
     ];
 
     for prefix in &skip_prefixes {

@@ -60,6 +60,10 @@ pub fn analyze_js_code(code: &str) -> DetectionReport {
         "eval(function(p,a,c,k,e,d)",  // Dean Edwards packer
         "eval(function(p,a,c,k,e,r)",
         "[][(![]+",          // JSFuck characteristic
+        "__esmMin",           // esbuild ESM wrapper
+        "__commonJS",         // esbuild CommonJS wrapper
+        "var __defProp",      // esbuild defineProperty helper
+        "var __getOwnPropDesc", // esbuild getOwnPropertyDescriptor helper
     ];
 
     for fp in fingerprints.iter() {
@@ -85,8 +89,8 @@ pub fn analyze_js_code(code: &str) -> DetectionReport {
     let line_count = non_empty_lines.len();
     let avg_line_length = total_chars as f64 / line_count as f64;
 
-    // Empirical threshold: average line length > 400 chars indicates minified code
-    if avg_line_length > 400.0 {
+    // Empirical threshold: average line length > 250 chars indicates minified code
+    if avg_line_length > 250.0 {
         return DetectionReport {
             code_type: CodeType::CompiledCode,
             reason: format!("Code density too high, average line length: {:.0} chars", avg_line_length),

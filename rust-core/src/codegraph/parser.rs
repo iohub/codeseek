@@ -73,7 +73,7 @@ impl CodeParser {
                 if path.is_dir() {
                     // 跳过常见的忽略目录
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with('.') || name == "target" || name == "node_modules" || name == "__pycache__" {
+                        if name.starts_with('.') || name == "target" || name == "node_modules" || name == "__pycache__" || name == "out" {
                             continue;
                         }
                     }
