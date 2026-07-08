@@ -1034,54 +1034,6 @@ fn execute_snippet(
 
 // ── Utility functions ────────────────────────────────────────────────
 
-/// Resolve a file path to match the format stored in PetCodeGraph's file_functions keys.
-fn resolve_file_path(
-    input: &Path,
-    root: &Path,
-    file_functions: &HashMap<PathBuf, Vec<Uuid>>,
-) -> Option<PathBuf> {
-    // 1. Direct match
-    if file_functions.contains_key(input) {
-        return Some(input.to_path_buf());
-    }
-
-    // 2. If input is absolute, try stripping root prefix
-    if input.is_absolute() {
-        if let Ok(relative) = input.strip_prefix(root) {
-            if file_functions.contains_key(relative) {
-                return Some(relative.to_path_buf());
-            }
-        }
-    }
-
-    // 3. If input is relative, try prepending root
-    let rooted = root.join(input);
-    if file_functions.contains_key(&rooted) {
-        return Some(rooted);
-    }
-
-    // 4. Canonicalize input and try again
-    if let Ok(canonical) = input.canonicalize() {
-        if file_functions.contains_key(&canonical) {
-            return Some(canonical);
-        }
-        if let Ok(relative) = canonical.strip_prefix(root) {
-            if file_functions.contains_key(relative) {
-                return Some(relative.to_path_buf());
-            }
-        }
-    }
-
-    // 5. Suffix match — find a key whose PathBuf ends with the input
-    for key in file_functions.keys() {
-        if key.ends_with(input) {
-            return Some(key.clone());
-        }
-    }
-
-    None
-}
-
 /// Resolve the actual file path on disk from a FunctionInfo's file_path.
 fn resolve_source_path(file_path: &Path, root: &Path) -> PathBuf {
     if file_path.is_absolute() && file_path.exists() {
