@@ -24,7 +24,7 @@ use crate::config::Config;
 use crate::storage::traits_bm25::{TextSearchProvider, CodeChunk};
 
 use lancedb::table::OptimizeAction;
-use lance::dataset::optimize::CompactionOptions;
+use lance::dataset::optimize::{CompactionMode, CompactionOptions};
 use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::TimeDelta;
 
@@ -794,21 +794,21 @@ impl EmbeddingService {
 
         // ── Step 1: Compact ──
         // 合并小文件碎片，物理删除被标记为已删除的行
+        #[allow(deprecated)]
         let compact_options = CompactionOptions {
             target_rows_per_fragment: 1024 * 1024,  // ~1M 行每文件
             max_rows_per_group: 1024,                // 1K 行每组
             materialize_deletions: true,             // 强制物理删除软删除的行
             materialize_deletions_threshold: 0.1,    // 10% 删除阈值作为后备
             num_threads: Some(4),                    // 4 线程并行
-            // 以下为新版本必填字段
             max_bytes_per_file: None,
             batch_size: None,
             io_buffer_size: None,
             defer_index_remap: false,
-            compaction_mode: None,
+            compaction_mode: Some(CompactionMode::Reencode),
+            binary_copy_read_batch_bytes: None,
             enable_binary_copy: false,
             enable_binary_copy_force: false,
-            binary_copy_read_batch_bytes: Some(16 * 1024 * 1024),
             max_source_fragments: None,
             transaction_properties: None,
         };
