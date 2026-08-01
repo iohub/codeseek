@@ -124,4 +124,70 @@ pub enum Commands {
     },
     /// Install git hooks (post-commit, post-merge → codeseek init)
     InstallHooks,
+    /// Manage the persistent knowledge base (add/search/list/delete)
+    Knowledge {
+        #[clap(subcommand)]
+        action: KnowledgeCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum KnowledgeCommand {
+    /// Add a knowledge record to the knowledge base
+    Add {
+        /// Title (≤30 chars)
+        #[arg(long)]
+        title: String,
+        /// Content (≤500 chars)
+        #[arg(long)]
+        content: String,
+        /// Knowledge type: repo_retrieval | coding_modification
+        #[arg(long)]
+        r#type: String,
+        /// Tags, comma-separated
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        /// Related file paths, comma-separated
+        #[arg(long, value_delimiter = ',')]
+        related_files: Vec<String>,
+        /// Source agent: repo_agent | coding_agent
+        #[arg(long)]
+        source_agent: String,
+        /// Task ID
+        #[arg(long)]
+        task_id: String,
+        /// Confidence 0.0-1.0
+        #[arg(long, default_value_t = 0.8)]
+        confidence: f32,
+    },
+    /// Search the knowledge base
+    Search {
+        /// Query text
+        #[arg(long)]
+        query: String,
+        /// Max results
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+        /// Enable reranking (currently a no-op placeholder)
+        #[arg(long, action)]
+        rerank: bool,
+    },
+    /// List knowledge records
+    List {
+        /// Max results
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Filter by type
+        #[arg(long)]
+        r#type: Option<String>,
+        /// Filter by tag (match any)
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Delete a knowledge record by ID
+    Delete {
+        /// Record ID (kn_*)
+        #[arg(long)]
+        id: String,
+    },
 }

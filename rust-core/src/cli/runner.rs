@@ -68,6 +68,10 @@ impl CodeSeekRunner {
                 info!("install-hooks command - please use codeseek directly");
                 Ok(())
             }
+            Commands::Knowledge { action } => {
+                crate::knowledge::cli::handle_knowledge_command(action).await?;
+                Ok(())
+            }
         }
     }
 }

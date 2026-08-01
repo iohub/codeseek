@@ -537,6 +537,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Git hooks installed: post-commit, post-merge");
             println!("Each hook runs 'codeseek init' for incremental indexing.");
         }
+        Commands::Knowledge { action } => {
+            codeseek::knowledge::cli::handle_knowledge_command(action.clone()).await?;
+        }
     }
 
     Ok(())
