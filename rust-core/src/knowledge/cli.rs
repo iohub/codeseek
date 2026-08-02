@@ -7,7 +7,6 @@ use crate::cli::args::KnowledgeCommand;
 use crate::config::Config;
 use crate::knowledge::record::KnowledgeRecord;
 use crate::knowledge::store::KnowledgeStore;
-use crate::knowledge::search::KnowledgeSearchResult;
 
 /// Handle a `codeseek knowledge ...` subcommand.
 pub async fn handle_knowledge_command(cmd: KnowledgeCommand) -> Result<()> {

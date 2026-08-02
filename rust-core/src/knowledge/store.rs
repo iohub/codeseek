@@ -3,10 +3,7 @@
 //! Provides CRUD and hybrid search for [`KnowledgeRecord`] entries.
 
 use anyhow::{anyhow, Context};
-use arrow::array::{
-    Array, ArrayRef, FixedSizeListBuilder, Float32Builder, Int32Builder, ListBuilder, RecordBatch,
-    RecordBatchIterator, StringBuilder,
-};
+use arrow::array::{Array, FixedSizeListBuilder, Float32Builder, Int32Builder, ListBuilder, RecordBatch, RecordBatchIterator, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
 use lancedb::connect;
 use lancedb::query::{ExecutableQuery, QueryBase};
@@ -510,7 +507,7 @@ impl KnowledgeStore {
                     fused_score as f32,
                     None, // rerank_score: TODO (Phase 1 disabled)
                 ));
-            } else if let Some(ref bm25) = self.bm25 {
+            } else if self.bm25.is_some() {
                 // Fallback: fetch from BM25-only results (record may have been deleted from LanceDB).
                 // This is a best-effort path; in practice both indexes should stay in sync.
                 log::warn!("Record {} found in BM25 but not LanceDB, skipping", id);

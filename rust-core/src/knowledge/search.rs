@@ -1,6 +1,5 @@
 //! Hybrid search for knowledge entries: vector (LanceDB) + BM25 (Tantivy) + RRF fusion.
 
-use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
