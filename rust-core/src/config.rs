@@ -181,6 +181,16 @@ impl Config {
         Self::project_index_dir(project_hash).join("tantivy_bm25")
     }
 
+    /// 项目知识向量库目录: ~/.codeseek/projects/<project_hash>/knowledge/
+    pub fn knowledge_dir(project_hash: &str) -> PathBuf {
+        Self::project_index_dir(project_hash).join("knowledge")
+    }
+
+    /// 项目知识 BM25 全文索引目录: ~/.codeseek/projects/<project_hash>/knowledge_index/
+    pub fn knowledge_bm25_dir(project_hash: &str) -> PathBuf {
+        Self::project_index_dir(project_hash).join("knowledge_index")
+    }
+
     /// 加载全局配置
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         let config_path = Self::global_config_path();

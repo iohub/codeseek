@@ -21,9 +21,9 @@ use crate::knowledge::search::{build_result, rrf_fuse, KnowledgeSearchResult};
 use crate::knowledge::tantivy::KnowledgeTantivyIndex;
 use crate::services::embedding_service::{EmbeddingProvider, OpenAICompatibleEmbeddingProvider};
 
-/// Global knowledge store: LanceDB for vectors + Tantivy for BM25.
+/// Project-level knowledge store: LanceDB for vectors + Tantivy for BM25.
 pub struct KnowledgeStore {
-    /// Path to the LanceDB database directory (~/.codeseek/knowledge).
+    /// Path to the LanceDB database directory (~/.codeseek/projects/<project_hash>/knowledge).
     db_path: PathBuf,
     /// Table name within the LanceDB database.
     table_name: String,
@@ -32,11 +32,10 @@ pub struct KnowledgeStore {
 }
 
 impl KnowledgeStore {
-    /// Open (or create) the knowledge store at `~/.codeseek/knowledge`.
-    pub fn new() -> anyhow::Result<Self> {
-        let home = dirs::home_dir().context("cannot resolve home directory")?;
-        let db_path = home.join(".codeseek").join("knowledge");
-        let bm25_dir = home.join(".codeseek").join("knowledge_index");
+    /// Open (or create) the knowledge store at `~/.codeseek/projects/<project_hash>/knowledge`.
+    pub fn new(project_hash: &str) -> anyhow::Result<Self> {
+        let db_path = Config::knowledge_dir(project_hash);
+        let bm25_dir = Config::knowledge_bm25_dir(project_hash);
 
         std::fs::create_dir_all(&db_path)
             .context("failed to create knowledge DB directory")?;

@@ -4,13 +4,17 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 
 use crate::cli::args::KnowledgeCommand;
+use crate::config::Config;
 use crate::knowledge::record::KnowledgeRecord;
 use crate::knowledge::store::KnowledgeStore;
 use crate::knowledge::search::KnowledgeSearchResult;
 
 /// Handle a `codeseek knowledge ...` subcommand.
 pub async fn handle_knowledge_command(cmd: KnowledgeCommand) -> Result<()> {
-    let store = KnowledgeStore::new().context("failed to initialize knowledge store")?;
+    let project_root = Config::detect_project_root()
+        .ok_or_else(|| anyhow!("No project found. Run codeseek from within a git repository."))?;
+    let project_hash = Config::compute_project_hash(&project_root);
+    let store = KnowledgeStore::new(&project_hash).context("failed to initialize knowledge store")?;
 
     match cmd {
         KnowledgeCommand::Add { title, content, r#type, tags, related_files, source_agent, task_id, confidence } => {
