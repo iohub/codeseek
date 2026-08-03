@@ -345,6 +345,13 @@ fn handle_tools_call(id: Option<Value>, request: &Value) -> Option<Value> {
             let rerank = arguments.get("rerank").and_then(|v| v.as_bool()).unwrap_or(true);
             let mut cli_args: Vec<String> = vec!["knowledge".into(), "search".into(), "--query".into(), query.into(), "--limit".into(), limit.to_string()];
             if rerank { cli_args.push("--rerank".into()); }
+            if let Some(Value::Array(arr)) = arguments.get("domains") {
+                let domains: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                if !domains.is_empty() {
+                    cli_args.push("--domains".into());
+                    cli_args.push(domains.join(","));
+                }
+            }
             let args_refs: Vec<&str> = cli_args.iter().map(|s| s.as_str()).collect();
             run_cli(&args_refs)
         }

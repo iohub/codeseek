@@ -32,8 +32,8 @@ pub async fn handle_knowledge_command(cmd: KnowledgeCommand) -> Result<()> {
             let saved = store.add(record).await.context("failed to add knowledge")?;
             println!("{}", serde_json::to_string_pretty(&saved)?);
         }
-        KnowledgeCommand::Search { query, limit, rerank } => {
-            let results = store.search(&query, limit, rerank).await.context("knowledge search failed")?;
+        KnowledgeCommand::Search { query, limit, rerank, domains } => {
+            let results = store.search(&query, limit, rerank, &domains).await.context("knowledge search failed")?;
             // KnowledgeSearchResult 本身可 Serialize（record 是 #[serde(flatten)]），直接输出
             println!("{}", serde_json::to_string_pretty(&results)?);
         }

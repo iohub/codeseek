@@ -207,6 +207,11 @@ pub fn all_tools() -> Vec<Tool> {
                         "type": "boolean",
                         "default": true,
                         "description": "Enable reranking (currently a no-op)"
+                    },
+                    "domains": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Domain filter: repo and/or coding. Empty = all domains."
                     }
                 },
                 "required": ["query"]

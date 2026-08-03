@@ -64,3 +64,19 @@ pub fn build_result(
         rerank_score,
     }
 }
+
+/// Map domain names to knowledge type values used for filtering.
+/// - "repo" → "repo_retrieval"
+/// - "coding" → "coding_modification"
+/// Unknown values are passed through unchanged (supports passing raw type values).
+pub fn domain_to_type_values(domains: &[String]) -> Vec<String> {
+    let mut types = Vec::with_capacity(domains.len());
+    for d in domains {
+        match d.as_str() {
+            "repo" => types.push("repo_retrieval".to_string()),
+            "coding" => types.push("coding_modification".to_string()),
+            other => types.push(other.to_string()),
+        }
+    }
+    types
+}

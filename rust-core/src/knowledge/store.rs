@@ -412,10 +412,13 @@ impl KnowledgeStore {
         query: &str,
         limit: usize,
         _rerank: bool,
+        domains: &[String],
     ) -> anyhow::Result<Vec<KnowledgeSearchResult>> {
         if query.is_empty() {
             return Ok(Vec::new());
         }
+
+        let type_values = crate::knowledge::search::domain_to_type_values(domains);
 
         let provider = self
             .build_provider()
@@ -446,7 +449,7 @@ impl KnowledgeStore {
         let mut results_stream = table
             .query()
             .nearest_to(query_vector)?
-            .limit(limit.saturating_mul(2))
+            .limit(limit.saturating_mul(4))
             .execute()
             .await
             .with_context(|| "failed to execute vector search")?;
@@ -469,6 +472,14 @@ impl KnowledgeStore {
                     .unwrap_or_default();
                 let distance = dist_col.map(|c| c.value(i)).unwrap_or(0.0);
                 let score = 1.0 / (1.0 + distance);
+
+                if !type_values.is_empty() {
+                    let rec = self.record_from_batch(&batch, i);
+                    if !type_values.iter().any(|t| t == &rec.type_) {
+                        continue;
+                    }
+                }
+
                 vector_results.push((id.clone(), score));
 
                 if !record_map.contains_key(&id) {
@@ -483,7 +494,7 @@ impl KnowledgeStore {
         let mut bm25_results: Vec<(String, f32)> = Vec::new();
         if let Some(ref bm25) = self.bm25 {
             bm25_results = bm25
-                .search(query, limit.saturating_mul(2))
+                .search(query, limit.saturating_mul(4), domains)
                 .unwrap_or_default();
         }
 
@@ -681,10 +692,8 @@ mod tests {
             "repo_retrieval".to_string(),
             "repo_agent".to_string(),
             "task-001".to_string(),
-        );
-        let record = record
-            .sanitize()
-            .embed_text();
+        )
+        .sanitize();
         let _record = store.add(record).await;
         // Note: embedding API will be called; in tests with no API token this may fail.
         // The test is a structural check; actual integration requires a real API token.

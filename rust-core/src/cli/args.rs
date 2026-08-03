@@ -171,6 +171,9 @@ pub enum KnowledgeCommand {
         /// Enable reranking (currently a no-op placeholder)
         #[arg(long, action)]
         rerank: bool,
+        /// Domain filter: repo, coding (comma-separated; empty = all domains)
+        #[arg(long, value_delimiter = ',')]
+        domains: Vec<String>,
     },
     /// List knowledge records
     List {

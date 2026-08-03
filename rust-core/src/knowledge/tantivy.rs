@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use std::path::Path;
 use std::sync::Arc;
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::{Schema, STORED, STRING, TEXT};
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 use std::sync::Mutex;
@@ -116,7 +116,7 @@ impl KnowledgeTantivyIndex {
     }
 
     /// Search the index and return sorted (id, bm25_score) pairs.
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<(String, f32)>> {
+    pub fn search(&self, query: &str, limit: usize, domains: &[String]) -> Result<Vec<(String, f32)>> {
         if query.is_empty() {
             return Ok(Vec::new());
         }
@@ -140,8 +140,28 @@ impl KnowledgeTantivyIndex {
             }
         });
 
+        let final_query: Box<dyn tantivy::query::Query> = if domains.is_empty() {
+            parsed_query
+        } else {
+            let type_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = domains
+                .iter()
+                .map(|d| {
+                    let tv = crate::knowledge::search::domain_to_type_values(std::slice::from_ref(d));
+                    let term = Term::from_field_text(self.type_field, &tv[0]);
+                    let tq = Box::new(TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic))
+                        as Box<dyn tantivy::query::Query>;
+                    (Occur::Should, tq)
+                })
+                .collect();
+            let or_query = BooleanQuery::new(type_queries);
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Must, parsed_query),
+                (Occur::Must, Box::new(or_query) as Box<dyn tantivy::query::Query>),
+            ]))
+        };
+
         let top_docs = searcher
-            .search(&parsed_query, &TopDocs::with_limit(limit.max(1)))
+            .search(final_query.as_ref(), &TopDocs::with_limit(limit.max(1)))
             .map_err(|e| anyhow!("Tantivy search error: {}", e))?;
 
         let mut results = Vec::new();
@@ -160,5 +180,56 @@ impl KnowledgeTantivyIndex {
     pub fn document_count(&self) -> Result<usize> {
         let reader = self.index.reader().map_err(|e| anyhow!("Tantivy reader error: {}", e))?;
         Ok(reader.searcher().num_docs() as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::knowledge::record::KnowledgeRecord;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_search_with_domain_filter() {
+        let dir = tempdir().unwrap();
+        let index = KnowledgeTantivyIndex::open_or_create(dir.path()).unwrap();
+
+        // Add a repo_retrieval record with "JWT" keyword
+        let repo_record = KnowledgeRecord::new(
+            "JWT Auth Pattern".to_string(),
+            "Using JWT tokens for authentication in REST APIs".to_string(),
+            "repo_retrieval".to_string(),
+            "repo_agent".to_string(),
+            "task-001".to_string(),
+        )
+        .sanitize();
+        index.add_document(&repo_record).unwrap();
+
+        // Add a coding_modification record with "JWT" keyword
+        let coding_record = KnowledgeRecord::new(
+            "JWT Token Fix".to_string(),
+            "Fixed JWT token expiration handling in auth module".to_string(),
+            "coding_modification".to_string(),
+            "coding_agent".to_string(),
+            "task-002".to_string(),
+        )
+        .sanitize();
+        index.add_document(&coding_record).unwrap();
+
+        // Filter by "repo" domain → should only return repo record
+        let repo_results = index.search("JWT", 10, &["repo".to_string()]).unwrap();
+        assert_eq!(repo_results.len(), 1, "Expected 1 repo result, got {}", repo_results.len());
+
+        // Filter by "coding" domain → should only return coding record
+        let coding_results = index.search("JWT", 10, &["coding".to_string()]).unwrap();
+        assert_eq!(coding_results.len(), 1, "Expected 1 coding result, got {}", coding_results.len());
+
+        // Filter by both domains → should return 2 results
+        let both_results = index.search("JWT", 10, &["repo".to_string(), "coding".to_string()]).unwrap();
+        assert_eq!(both_results.len(), 2, "Expected 2 results for both domains, got {}", both_results.len());
+
+        // No filter (empty domains) → should return 2 results
+        let all_results = index.search("JWT", 10, &[]).unwrap();
+        assert_eq!(all_results.len(), 2, "Expected 2 results with no filter, got {}", all_results.len());
     }
 }
