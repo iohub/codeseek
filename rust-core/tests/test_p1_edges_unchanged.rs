@@ -1093,9 +1093,22 @@ const MODE_BRANCH_FNS: &[&str] = &["_analyze_file_calls", "_find_callee_function
 /// "incremental.rs 里出现了共享件的调用点"（等价替代：仍然是同一个 legacy 语义，
 /// 只是只剩一份实现）；first-wins 代码本身由下面的
 /// [`FIRST_WINS_ABSENCE_MARKERS`] 反向钉住"不许再长出第二份"。
+///
+/// ⚠ **Phase P3 收口 B 再改写一次**（上一条"委托调用点"已经随死链路一起消失了）：
+/// 收口 A 判定 `IncrementalManager::refresh_file` 整条产边链路**零调用者**并删掉它，
+/// ⇒ "incremental.rs 里有一个共享件调用点"这条正向特征不再成立（收口 A 没跑测试，
+/// 所以是本轮才发现）。现在的真实结构是：
+///  - `src/storage/incremental.rs` = **纯记账**（MD5/索引 save/load），**不产边**，
+///    由 [`FIRST_WINS_ABSENCE_MARKERS`] 里那组 `emit_*` / `extract_file_entities` /
+///    `fn refresh_file` 的**零出现**断言钉死；
+///  - 唯一的委托调用点搬到了 `src/codegraph/parser.rs`（下面那条**字面完全不变**、
+///    只是换了文件名的 `emit_legacy_call_edges_for_file(&self.ts_parser` 特征），
+///    legacy 全量档仍由 `_analyze_file_calls_for_petgraph` 独立实现
+///    （登记理由见 `parser.rs` 顶部与 `docs/call-graph-resolution.md`）。
+/// 也就是说"正向证明委托存在 + 反向证明第二份实现不存在"两条都仍然在，只是各自换了位置。
 const FIRST_WINS_MARKERS: &[(&str, &str)] = &[
     (
-        "src/storage/incremental.rs",
+        "src/codegraph/parser.rs",
         "emit_legacy_call_edges_for_file(&self.ts_parser",
     ),
     ("src/codegraph/parser.rs", "global_functions.first().map(|f| f.id)"),
@@ -1110,8 +1123,8 @@ const FIRST_WINS_MARKERS: &[(&str, &str)] = &[
     ("src/codegraph/parser.rs", "for function in current_functions"),
 ];
 
-/// Phase P3 交付物 1 的**收敛证明**：这些 first-wins 字面特征在 `src/storage/incremental.rs`
-/// 里的出现次数必须恒为 0 —— 即增量链路只允许委托，不许留第二份实现。
+/// Phase P3 交付物 1 的**收敛证明**：这些 first-wins / 产边 / 引擎特征在
+/// `src/storage/incremental.rs` 里的出现次数必须恒为 0 —— 该文件只剩记账。
 const FIRST_WINS_ABSENCE_MARKERS: &[(&str, &str)] = &[
     ("src/storage/incremental.rs", "global_functions.first().map(|f| f.id)"),
     ("src/storage/incremental.rs", "fn _find_callee_function"),
@@ -1121,6 +1134,17 @@ const FIRST_WINS_ABSENCE_MARKERS: &[(&str, &str)] = &[
         "build_resolution_index_from_graph",
     ),
     ("src/storage/incremental.rs", "resolve_call_with_config"),
+    // ---- Phase P3 收口 B：记账版 IncrementalManager 不得再持有任何产边能力 ----
+    ("src/storage/incremental.rs", "fn refresh_file"),
+    (
+        "src/storage/incremental.rs",
+        "emit_legacy_call_edges_for_file",
+    ),
+    (
+        "src/storage/incremental.rs",
+        "emit_layered_call_edges_for_file",
+    ),
+    ("src/storage/incremental.rs", "extract_file_entities"),
 ];
 
 /// 计算每个 `fn` 的行区间 `(名字, 起始行, 结束行)`（0-based，含首尾）。
@@ -1409,12 +1433,36 @@ fn p2b_engine_entries_are_referenced_only_from_layered_branches() {
                 "P3 唯一真源必须存在：src/codegraph/parser.rs 里找不到 `{shared}`"
             );
         }
-        // `IncrementalManager` 必须只保留"委托"级别的 ctx 记账，不再自己产实体。
+        // `IncrementalManager` 的定位（Phase P3 收口 A/B 之后）：**纯记账**，
+        // 既不再自己产实体/产边，也不"委托"产边 —— 因为它那条产边链路本来就没有调用者，
+        // 真实的刷新/增量链路一直在 `CodeParser` 里。
+        // 改造前这里断言的是 `inc.contains("extract_file_entities(")` +
+        // `inc.contains("emit_layered_call_edges_for_file(")`（"增量链路必须委托共享件"），
+        // 收口 A 删掉死链路之后该断言不再成立（且收口 A 没跑测试 ⇒ 本轮才暴露），
+        // 于是把"委托确实存在"的证明搬到**真正的委托者** `CodeParser` 上，
+        // 同时把 `IncrementalManager` 钉成"只剩记账面"。
         let inc = std::fs::read_to_string(manifest.join("src/storage/incremental.rs")).unwrap_or_default();
-        assert!(
-            inc.contains("extract_file_entities(") && inc.contains("emit_layered_call_edges_for_file("),
-            "增量链路必须委托 extract_file_entities / emit_layered_call_edges_for_file"
-        );
+        for bookkeeping in [
+            "fn needs_update",
+            "fn compute_file_md5",
+            "fn save_state",
+            "fn load_state",
+        ] {
+            assert!(
+                inc.contains(bookkeeping),
+                "记账面必须留在 src/storage/incremental.rs：找不到 `{bookkeeping}`（repository.rs 依赖它）"
+            );
+        }
+        for delegated in [
+            "extract_file_entities(\n            &self.ts_parser,",
+            "emit_legacy_call_edges_for_file(&self.ts_parser",
+            "emit_layered_call_edges_for_file(",
+        ] {
+            assert!(
+                text.contains(delegated),
+                "P3 唯一真源的**委托点**必须在 src/codegraph/parser.rs：找不到 `{delegated}`"
+            );
+        }
     }
 
     // ---- 汇总 ----

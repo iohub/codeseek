@@ -1186,8 +1186,11 @@ fn p2a_incremental_skipped_files_still_feed_index_and_ctx_can_be_rebuilt() {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .expect("临时项目目录必须有目录名");
+        // 第一轮用的是 `CodeParser::new()` 的**默认档位**（Phase P3 起 = layered，
+        // 候选上限 8），所以这里的戳必须一致，否则第二轮 `_load_existing_graph` 的
+        // 档位门禁会把刚种下的图判成失效 ⇒ 本用例要钉的"哈希命中即跳过"就复现不出来。
         codeseek::storage::PersistenceManager::new()
-            .save_graph(&name_id, &graph)
+            .save_graph(&name_id, &graph, "layered", 8)
             .expect("图缓存落盘失败（构造合法增量态）");
     }
     let mut incremental = CodeParser::new();

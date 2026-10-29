@@ -498,7 +498,8 @@ mod tests {
 
     #[test]
     fn test_both_missing_both_returns_none() {
-        let result = PersistenceManager::read_both_with_fallback(|| Ok(None), || Ok(None))
+        // 两侧闭包都只给 `None` ⇒ `T` 推不出来，必须显式标注（这里就是真实消费类型）
+        let result = PersistenceManager::read_both_with_fallback::<PetCodeGraph>(|| Ok(None), || Ok(None))
             .expect("两个缓存都不存在时应为 Ok(None)（缓存 miss）");
         assert!(result.is_none());
     }
@@ -507,7 +508,7 @@ mod tests {
     fn test_both_degrades_json_error_to_cache_miss() {
         // 关键用例：两侧都是 Err（例如旧 bincode + 旧 JSON）也只能得到 Ok(None)，
         // 上层 `_load_existing_graph` 据此走全量重建，绝不 panic、绝不上抛致命错误。
-        let result = PersistenceManager::read_both_with_fallback(
+        let result = PersistenceManager::read_both_with_fallback::<PetCodeGraph>(
             || Err(io_err("schema 版本不匹配")),
             || Err(io_err("missing field `schema_version`")),
         );

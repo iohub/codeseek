@@ -19,12 +19,20 @@ impl CodeSeekRunner {
         // 否则"关掉 L5"这类逐层诊断结论建立在错误的配置上。
         let resolver = cli.resolver;
         let max_candidates = cli.max_candidates;
+        // Phase P3 收口 B（交付物 1）：`--levels` 取**非默认值**却没带 `--force-reindex`
+        // ⇒ 直接失败。理由：`--levels` 改变产边结果，但它不在图缓存的解析档位戳里
+        // （戳只有 `resolver_mode` / `max_candidates`），复用旧缓存会静默得到混档图。
+        // 守卫本体在 `cli::args::Cli::validate_levels_against_cache`（与 `main.rs` 同一条），
+        // 返回可读 Err 而非 panic；权威说明见 `docs/call-graph-resolution.md`。
+        // 顺序说明：本条只看 `enabled_levels` 是否偏离默认，**语法非法**的 spec 在这里被判
+        // "不是非默认"（不触发本条），错误仍由下面的语法校验给出，两条错误不会互相盖掉。
+        if let Err(message) = cli.validate_levels_against_cache() {
+            return Err(message.into());
+        }
         let levels = if cli.levels.trim().is_empty() {
             None
         } else {
-            if crate::codegraph::resolution::resolver::ResolutionConfig::from_levels_spec(&cli.levels)
-                .is_none()
-            {
+            if cli.levels_spec_is_invalid() {
                 return Err(format!(
                     "--levels 取值非法: {:?}（可用 all/p1/none/l1..l8/l2-l6/all,-l6/max=N，逗号分隔）",
                     cli.levels

@@ -921,13 +921,13 @@ fn p3_default_resolver_is_layered() {
 /// `build_petgraph_code_graph` 自己只写 `file_hashes.json`，图的落盘在另一条链路
 /// （真实 CLI：`main.rs` 的 `persistence.save_graph(...)` + `codegraph::repository::save_state()`）。
 /// `_load_existing_graph` 认的 project_id 是**目录名**，所以这里必须用目录名存。
-fn persist_graph_as_cache(project_dir: &Path, graph: &PetCodeGraph) {
+fn persist_graph_as_cache(project_dir: &Path, graph: &PetCodeGraph, resolver_mode: &str, max_candidates: u16) {
     let name_id = project_dir
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .expect("临时项目目录必须有目录名");
     codeseek::storage::PersistenceManager::new()
-        .save_graph(&name_id, graph)
+        .save_graph(&name_id, graph, resolver_mode, max_candidates)
         .expect("图缓存落盘失败");
 }
 
@@ -959,7 +959,8 @@ fn p2b_hash_skip_contract_feeds_index_without_reparsing() {
     assert!(!e1.is_empty(), "R1 必须产出边，否则后面的对照是空的");
 
     // 把磁盘状态摆成真实 CLI 跑完第一轮之后的样子：图 + 哈希都在。
-    persist_graph_as_cache(&dir, &g1);
+    // R1 是 layered/8 产出的图 ⇒ 戳必须写 layered/8，R2 才可能命中档位门禁（P3 收口）。
+    persist_graph_as_cache(&dir, &g1, "layered", 8);
 
     // R2：同一套配置、非 force ⇒ 哈希全命中。
     let mut p2 = CodeParser::new();

@@ -794,13 +794,13 @@ fn test_baseline_aggregate_metrics_over_all_resolution_fixtures() {
 /// `storage.get_persistence().save_graph(&project_hash, &pet_graph)` 与
 /// `codegraph::repository::save_state()`）。`_load_existing_graph` 认的 project_id 是
 /// **目录名**，所以这里必须用目录名存。
-fn persist_graph_as_cache(project_dir: &Path, graph: &PetCodeGraph) {
+fn persist_graph_as_cache(project_dir: &Path, graph: &PetCodeGraph, resolver_mode: &str, max_candidates: u16) {
     let name_id = project_dir
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .expect("临时项目目录必须有目录名");
     codeseek::storage::PersistenceManager::new()
-        .save_graph(&name_id, graph)
+        .save_graph(&name_id, graph, resolver_mode, max_candidates)
         .expect("图缓存落盘失败");
 }
 
@@ -885,7 +885,9 @@ fn test_force_reindex_escape_hatch_bypasses_all_caches() {
     // ---- R2：非 force，且**哈希与图都在**（合法增量态）⇒ 跳过契约必须生效 ----
     // R1 已经把文件哈希写进 `file_hashes.json`；这里补上真实 CLI 的另一半（图的落盘），
     // 把磁盘状态摆成 `main.rs` 那一轮跑完之后的样子：有图 + 有哈希。
-    persist_graph_as_cache(&project_dir, &first_graph);
+    // 本用例的解析器显式钉了 `Legacy`（见上面的 `build`），戳必须同为 legacy/8，
+    // 否则第 2 轮的档位门禁会把图判失效并全量重解析，"跳过"契约就测不到了。
+    persist_graph_as_cache(&project_dir, &first_graph, "legacy", 8);
     let (second_nodes, second_edges, second_counts, _) = build(false);
     // (a) 原断言消息说的那件事，直接断言它本身：本轮**没有重新解析任何文件**。
     assert_eq!(

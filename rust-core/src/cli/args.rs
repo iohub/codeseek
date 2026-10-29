@@ -110,16 +110,102 @@ pub struct Cli {
     /// 语法见 `codegraph::resolution::resolver::ResolutionConfig::from_levels_spec`：
     /// `all` / `p1` / `none` / `l1,l5` / `l2-l6` / `all,-l6` / `max=4`，逗号分隔、大小写不敏感。
     /// 非法取值会**直接报错退出**，绝不静默退回全开 —— 否则"关掉某层"的诊断结论不可信。
+    ///
+    /// ⚠ **缓存约束（Phase P3 收口 B）**：`--levels` 会改变产出的调用边，但它**不在**
+    /// 图缓存的解析档位戳里（戳只有 `resolver_mode` / `max_candidates`），因此取**非默认值**
+    /// （默认 = 全层开启）时**必须同时传 `--force-reindex`**，否则 CLI 在建图之前就报错退出。
+    /// 正确用法：`codeseek --levels=l1,l7 --force-reindex init`（详见
+    /// `rust-core/docs/call-graph-resolution.md` 的「--levels 的 fail-fast 契约」一节）。
     #[clap(
         long,
         default_value = "",
-        help = "只启用指定解析层（空=全开）：all/p1/none/l1..l8/l2-l6/all,-l6；仅对 --resolver=layered 生效"
+        help = "只启用指定解析层（空=全开）：all/p1/none/l1..l8/l2-l6/all,-l6；仅对 --resolver=layered 生效。⚠ 非默认取值必须同时传 --force-reindex（它不入图缓存档位戳，否则会复用旧档位建出的缓存图）"
     )]
     pub levels: String,
 
     #[clap(subcommand)]
     pub command: Commands,
 }
+
+impl Cli {
+    /// `--levels` 的取值是否**偏离默认**（默认 = 空串 = 全层开启）。
+    ///
+    /// 判定只看 `enabled_levels`，不看 `max_candidates`：`--levels=` 里的 `max=N` 会被
+    /// `CodeParser::resolution_config()` 用 `--max-candidates` 覆盖掉，因此真正影响产边的
+    /// 只有层位掩码。等价于全开的写法（`all`、`l1-l8`）都判为"默认"⇒ 不触发 fail-fast。
+    ///
+    /// ⚠ 比较时**忽略 bit0（`Unresolved` 占位层）**：那一层是"没解析出来"的占位，
+    /// 引擎判定从不消费它，写 `l1-l8`（掩码 `0x01FE`）与写 `all`（`0x01FF`）产边完全相同，
+    /// 因此不能被误判成"非默认"而逼用户多传一个 `--force-reindex`。
+    ///
+    /// 非法 spec 在这里判为"默认"（即不触发本条守卫）：它的报错由既有语法校验负责
+    /// （`cli/runner.rs` 与本文件 [`Cli::levels_spec_is_invalid`]），两条错误不该混成一条。
+    pub fn levels_deviates_from_default(&self) -> bool {
+        use crate::codegraph::resolution::resolver::ResolutionConfig;
+        let spec = self.levels.trim();
+        if spec.is_empty() {
+            return false;
+        }
+        // 参与比较的有效层位：L1..L8（bit0 = `Unresolved` 占位层，恒不参与）
+        const EFFECTIVE_LEVELS: u16 = ResolutionConfig::ALL_LEVELS & !0b1u16;
+        match ResolutionConfig::from_levels_spec(spec) {
+            Some(cfg) => cfg.enabled_levels & EFFECTIVE_LEVELS != EFFECTIVE_LEVELS,
+            None => false,
+        }
+    }
+
+    /// `--levels` 是否**语法非法**（非空、且 `from_levels_spec` 解析不出来）。
+    pub fn levels_spec_is_invalid(&self) -> bool {
+        let spec = self.levels.trim();
+        !spec.is_empty()
+            && crate::codegraph::resolution::resolver::ResolutionConfig::from_levels_spec(spec)
+                .is_none()
+    }
+
+    /// Phase P3 收口 B（交付物 1）：**`--levels` 的缓存陈旧风险用 fail-fast 关掉**。
+    ///
+    /// ## 为什么是 fail-fast，而不是再升一次 schema
+    /// `--levels` 改变产边结果，但图缓存的解析档位戳只有 `resolver_mode` +
+    /// `max_candidates`（`storage::petgraph_storage::PetGraphStorage`）。两条可选修法：
+    ///  - **(A) 把 levels 掩码也写进戳** ⇒ 必须再升 `GRAPH_SCHEMA_VERSION` 3→4，
+    ///    代价是**所有用户刚重建过的缓存整体作废**，而且日常不使用 `--levels` 的人
+    ///    也跟着付一次全量重建的账（诊断开关不该有这种辐射面）；
+    ///  - **(B) 非默认 `--levels` 必须配 `--force-reindex`**（本函数）⇒ 缓存格式零变更，
+    ///    只有**真的在做逐层诊断**的那次运行被要求强制全量重建，代价落在唯一需要它的人身上。
+    /// 本任务选定 **(B)**。
+    ///
+    /// ## 语义
+    /// 只在**会读写图缓存的子命令**（`init`）上生效；其它子命令不建图，拒绝它们没有任何
+    /// 收益，只会把一个纯诊断 flag 变成全局可用性障碍。判定条件严格照任务口径：
+    /// `--levels` 取非默认值 **且** 未传 `--force-reindex` ⇒ 返回**可操作的用户错误**
+    /// （`Err(String)`，由调用方 `return Err(...)` 走 CLI 的正常失败路径，**绝不 panic**）。
+    pub fn validate_levels_against_cache(&self) -> Result<(), String> {
+        // 只有 `init` 会读/写图缓存（其余子命令既不产边也不落缓存）
+        let builds_graph = matches!(self.command, Commands::Init { .. });
+        if !builds_graph {
+            return Ok(());
+        }
+        if !self.levels_deviates_from_default() {
+            return Ok(());
+        }
+        if self.force_reindex {
+            return Ok(());
+        }
+        Err(format!(
+            "`--levels` 是分层解析器的诊断开关，会改变产出的调用边，但它不在图缓存的解析档位戳里\
+             （戳只有 `resolver_mode` / `max_candidates`）。\
+             当前 `--levels=\"{levels}\"` 偏离默认（全层开启），而本轮没有传 `--force-reindex`：\
+             继续复用已有图缓存会得到\"半新半旧\"的混档图，逐层诊断的结论不可信。\n\
+             请二选一：\n\
+             \x20 1) 同时传 `--force-reindex` 以获得一致结果（推荐）：\n\
+             \x20    codeseek --levels={levels} --force-reindex init\n\
+             \x20 2) 去掉 `--levels`（= 全层开启，可用缓存）：\n\
+             \x20    codeseek init",
+            levels = self.levels.trim(),
+        ))
+    }
+}
+
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {

@@ -52,6 +52,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     tracing_subscriber::fmt().with_env_filter(filter_layer).init();
 
+    // Phase P3 收口 B（交付物 1）：`--levels` 的**缓存陈旧** fail-fast。
+    // 必须在这里（任何缓存/图读取之前）就拦住：`--levels` 会改变产出的调用边，但它
+    // **不在**图缓存的解析档位戳里（戳只有 `resolver_mode` / `max_candidates`），
+    // 所以"改了 `--levels` 却复用旧缓存"会静默得到一张混档图。
+    // 返回的是**用户可读的 Err**（非 panic、非 unwrap），文案自带正确用法示例。
+    // 为什么不给 `--levels` 再升一次 schema（3→4）：那会让所有用户刚重建过的缓存整体作废，
+    // 而代价只该由"真的在做逐层诊断"的那次运行付 —— 见
+    // `rust-core/docs/call-graph-resolution.md` 的「--levels 的 fail-fast 契约」。
+    if let Err(message) = cli.validate_levels_against_cache() {
+        return Err(message.into());
+    }
+
     let config = Config::load().ok();
 
     match &cli.command {

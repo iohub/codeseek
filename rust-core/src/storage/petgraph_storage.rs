@@ -562,6 +562,15 @@ mod tests {
 
     use super::*;
 
+    /// 本模块统一使用的"解析档位戳"实参。
+    ///
+    /// Phase P3 收口：`from_petgraph` / `save_to_json` / `save_to_file` / `save_to_binary`
+    /// 都强制要求传入本轮的档位（`resolver_mode`）与候选上限（`max_candidates`），
+    /// 单元测试因此必须显式交代这两个值 —— 而不是留一个"默认戳"把契约淡化掉：
+    /// 戳一旦缺失，读回时 `validate_resolution_stamp` 必然判失效 ⇒ 每次全量重建。
+    const TEST_STAMP_MODE: &str = "layered";
+    const TEST_STAMP_MAX: u16 = 8;
+
     /// 构造一个「字段尽量填满」的样例图：
     /// 4 个函数节点（其中 1 个是未解析调用的临时幽灵节点）分布在 2 个文件，
     /// 2 条已解析边（含 1 条跨文件边）+ 1 条未解析边。
@@ -795,7 +804,7 @@ mod tests {
     #[test]
     fn test_from_petgraph_writes_current_schema_version() {
         let graph = sample_graph();
-        let storage = PetGraphStorage::from_petgraph(&graph);
+        let storage = PetGraphStorage::from_petgraph(&graph, TEST_STAMP_MODE, TEST_STAMP_MAX);
 
         // 版本字段必须由 from_petgraph 自动写入当前常量，任何调用方都不该手填
         assert_eq!(storage.schema_version, GRAPH_SCHEMA_VERSION);
@@ -807,9 +816,9 @@ mod tests {
     #[test]
     fn test_json_roundtrip_preserves_all_fields() {
         let graph = sample_graph();
-        let original_storage = PetGraphStorage::from_petgraph(&graph);
+        let original_storage = PetGraphStorage::from_petgraph(&graph, TEST_STAMP_MODE, TEST_STAMP_MAX);
 
-        let json = PetGraphStorageManager::save_to_json(&graph).expect("JSON 序列化应成功");
+        let json = PetGraphStorageManager::save_to_json(&graph, TEST_STAMP_MODE, TEST_STAMP_MAX).expect("JSON 序列化应成功");
         // JSON 是自描述格式：版本必须以可见的键存在
         let value: serde_json::Value = serde_json::from_str(&json).expect("save_to_json 必须产出合法 JSON");
         assert_eq!(
@@ -822,7 +831,7 @@ mod tests {
         assert_graphs_equivalent(&restored, &graph);
 
         // 往返之后重新落盘，存储结构本身也要逐字段一致
-        let restored_storage = PetGraphStorage::from_petgraph(&restored);
+        let restored_storage = PetGraphStorage::from_petgraph(&restored, TEST_STAMP_MODE, TEST_STAMP_MAX);
         assert_eq!(restored_storage.schema_version, original_storage.schema_version);
         assert_eq!(
             norm_functions(&restored_storage.functions),
@@ -837,7 +846,7 @@ mod tests {
         let path = dir.path().join("graph.json");
         let graph = sample_graph();
 
-        PetGraphStorageManager::save_to_file(&graph, &path).expect("JSON 落盘应成功");
+        PetGraphStorageManager::save_to_file(&graph, &path, TEST_STAMP_MODE, TEST_STAMP_MAX).expect("JSON 落盘应成功");
         let restored = PetGraphStorageManager::load_from_file(&path).expect("当前版本 JSON 文件应加载成功");
         assert_graphs_equivalent(&restored, &graph);
     }
@@ -848,7 +857,7 @@ mod tests {
         let path = dir.path().join("graph.bin");
         let graph = sample_graph();
 
-        PetGraphStorageManager::save_to_binary(&graph, &path).expect("bincode 落盘应成功");
+        PetGraphStorageManager::save_to_binary(&graph, &path, TEST_STAMP_MODE, TEST_STAMP_MAX).expect("bincode 落盘应成功");
 
         // 文件头必须是 magic + 当前版本的小端编码
         let bytes = fs::read(&path).expect("读回缓存文件失败");
@@ -866,7 +875,7 @@ mod tests {
     #[test]
     fn test_json_schema_version_mismatch_is_rejected_as_cache_miss() {
         let graph = sample_graph();
-        let json = PetGraphStorageManager::save_to_json(&graph).expect("JSON 序列化应成功");
+        let json = PetGraphStorageManager::save_to_json(&graph, TEST_STAMP_MODE, TEST_STAMP_MAX).expect("JSON 序列化应成功");
 
         // 伪造一个「未来版本」的缓存（模拟后续阶段加了字段但忘了递增旧缓存）
         let mut value: serde_json::Value = serde_json::from_str(&json).expect("save_to_json 必须产出合法 JSON");
@@ -888,7 +897,7 @@ mod tests {
     #[test]
     fn test_json_without_schema_version_field_is_rejected() {
         let graph = sample_graph();
-        let json = PetGraphStorageManager::save_to_json(&graph).expect("JSON 序列化应成功");
+        let json = PetGraphStorageManager::save_to_json(&graph, TEST_STAMP_MODE, TEST_STAMP_MAX).expect("JSON 序列化应成功");
 
         // 模拟「P0 之前遗留的旧 JSON 缓存」：完全没有 schema_version 键。
         // serde(default) 会把它补成 0，0 != GRAPH_SCHEMA_VERSION，因此必须被门禁拒掉。
@@ -906,7 +915,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("创建临时目录失败");
         let path = dir.path().join("graph.bin");
         let graph = sample_graph();
-        PetGraphStorageManager::save_to_binary(&graph, &path).expect("bincode 落盘应成功");
+        PetGraphStorageManager::save_to_binary(&graph, &path, TEST_STAMP_MODE, TEST_STAMP_MAX).expect("bincode 落盘应成功");
 
         // 只改写文件头里的版本号，载荷保持原样 —— 证明门禁在解码载荷之前就生效
         let mut bytes = fs::read(&path).expect("读回缓存文件失败");
@@ -924,7 +933,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("创建临时目录失败");
         let path = dir.path().join("graph.bin");
         let graph = sample_graph();
-        PetGraphStorageManager::save_to_binary(&graph, &path).expect("bincode 落盘应成功");
+        PetGraphStorageManager::save_to_binary(&graph, &path, TEST_STAMP_MODE, TEST_STAMP_MAX).expect("bincode 落盘应成功");
 
         // 剥掉 8 字节文件头，就得到「P0 之前」的裸 bincode 缓存形状。
         // 这种文件绝不能进 bincode 载荷解析：错位的字节会被当作 Vec 长度而分配天文数字内存。
@@ -947,7 +956,7 @@ mod tests {
     #[test]
     fn test_validate_schema_version_gate_on_storage_struct() {
         let graph = sample_graph();
-        let mut storage = PetGraphStorage::from_petgraph(&graph);
+        let mut storage = PetGraphStorage::from_petgraph(&graph, TEST_STAMP_MODE, TEST_STAMP_MAX);
 
         assert!(storage.validate_schema_version().is_ok(), "当前版本必须通过门禁");
 
@@ -968,7 +977,7 @@ mod tests {
         let path = dir.path().join("graph.bin");
 
         let small = sample_graph();
-        PetGraphStorageManager::save_to_binary(&small, &path).expect("首次落盘应成功");
+        PetGraphStorageManager::save_to_binary(&small, &path, TEST_STAMP_MODE, TEST_STAMP_MAX).expect("首次落盘应成功");
         let small_len = fs::read(&path).expect("读回失败").len();
 
         // 造一个明显更大的图，让"截断重写"的窗口足够宽
@@ -990,7 +999,7 @@ mod tests {
         large.update_stats();
         // 先量出"大图"的完整尺寸（写到旁边的路径，不干扰被测文件）
         let side_path = dir.path().join("sized.bin");
-        PetGraphStorageManager::save_to_binary(&large, &side_path).expect("测量尺寸落盘应成功");
+        PetGraphStorageManager::save_to_binary(&large, &side_path, TEST_STAMP_MODE, TEST_STAMP_MAX).expect("测量尺寸落盘应成功");
         let large_len = fs::read(&side_path).expect("读回尺寸样本失败").len();
         assert!(
             large_len > small_len + 1000,
@@ -1016,8 +1025,8 @@ mod tests {
         });
 
         for _ in 0..8 {
-            PetGraphStorageManager::save_to_binary(&large, &path).expect("反复覆写大图应成功");
-            PetGraphStorageManager::save_to_binary(&small, &path).expect("反复覆写小图应成功");
+            PetGraphStorageManager::save_to_binary(&large, &path, TEST_STAMP_MODE, TEST_STAMP_MAX).expect("反复覆写大图应成功");
+            PetGraphStorageManager::save_to_binary(&small, &path, TEST_STAMP_MODE, TEST_STAMP_MAX).expect("反复覆写小图应成功");
         }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let torn_sizes = reader.join().expect("读者线程不应 panic");

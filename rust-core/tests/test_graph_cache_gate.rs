@@ -52,7 +52,10 @@ fn make_graph(function_names: &[&str]) -> PetCodeGraph {
 fn legacy_binary_payload(graph: &PetCodeGraph) -> Vec<u8> {
     let staging = tempfile::TempDir::new().expect("创建暂存目录失败");
     let path = staging.path().join("graph.bin");
-    PetGraphStorageManager::save_to_binary(graph, &path).expect("暂存落盘失败");
+    // 档位戳在这里**无关紧要**：本函数产出的是"没有 8 字节版本头"的旧格式载荷，
+    // 读侧在解码载荷之前就被文件头拦下（`GRAPH_BINARY_HEADER_LEN`/magic 校验）。
+    // 传当前档位只是为了满足 `save_to_binary` 的强制签名（戳不许缺）。
+    PetGraphStorageManager::save_to_binary(graph, &path, "layered", 8).expect("暂存落盘失败");
     let bytes = std::fs::read(&path).expect("读回暂存文件失败");
     assert_eq!(&bytes[..4], b"CGSP", "新格式必须以 CGSP magic 开头");
     // 剥掉 8 字节文件头 = 旧格式（纯 bincode 载荷）
@@ -61,7 +64,9 @@ fn legacy_binary_payload(graph: &PetCodeGraph) -> Vec<u8> {
 
 /// 产出一个"没有 schema_version 键"的 JSON —— 即 P0 之前遗留的 `graph.json` 形状。
 fn legacy_json_payload(graph: &PetCodeGraph) -> String {
-    let json = PetGraphStorageManager::save_to_json(graph).expect("JSON 序列化失败");
+    // 同上：本函数随后要删掉 `schema_version` 键，载荷在版本门禁处就被判失效，
+    // 档位戳取当前值仅为满足强制签名。
+    let json = PetGraphStorageManager::save_to_json(graph, "layered", 8).expect("JSON 序列化失败");
     let mut value: serde_json::Value = serde_json::from_str(&json).expect("save_to_json 必须产出合法 JSON");
     assert!(value
         .as_object_mut()
@@ -79,7 +84,7 @@ fn test_current_version_cache_still_hits_through_persistence() {
 
     let manager = PersistenceManager::with_storage_mode(StorageMode::Both, base_dir.path().to_path_buf());
     let graph = make_graph(&["alpha", "beta"]);
-    manager.save_graph(&project_id, &graph).expect("Both 模式落盘应成功");
+    manager.save_graph(&project_id, &graph, "layered", 8).expect("Both 模式落盘应成功");
 
     // 磁盘形状：graph.bin 头部是 magic + 当前版本号；graph.json 里带同名键
     let bin = std::fs::read(dir.join("graph.bin")).expect("读 graph.bin 失败");
