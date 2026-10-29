@@ -174,7 +174,15 @@ impl FileScopeCtx {
                 a.span()
                     .cmp(&b.span())
                     .then_with(|| b.decl_line.cmp(&a.decl_line))
-                    .then_with(|| a.guid.as_u128().cmp(&b.guid.as_u128()))
+                    // Phase P3 收口 C：末位改用源码派生字段（`guid` 每次建图都是新 Uuid ⇒
+                    // 只保证同进程可复现，不保证同一份源码两次独立建图可复现）。
+                    .then_with(|| {
+                        (&a.type_name, a.scope_start, a.scope_end).cmp(&(
+                            &b.type_name,
+                            b.scope_start,
+                            b.scope_end,
+                        ))
+                    })
             })
     }
 
@@ -367,14 +375,17 @@ fn collect_typed_bindings(symbols: &[AstSymbolInstanceArc], scopes: &ScopeTree) 
             a.scope_start,
             a.scope_end,
             a.decl_line,
-            a.guid.as_u128(),
+            // Phase P3 收口 C：末位用源码派生字段（`type_name`）而不是 `guid`——
+            // guid 每次建图都是新 Uuid，用它补位等于把"同一份源码两次独立建图"
+            // 的绑定顺序交给随机数。
+            &a.type_name,
         )
             .cmp(&(
                 &b.name,
                 b.scope_start,
                 b.scope_end,
                 b.decl_line,
-                b.guid.as_u128(),
+                &b.type_name,
             ))
     });
     out
@@ -468,7 +479,19 @@ pub fn layered_caller_node(
                 if let Some(node) = funcs
                     .iter()
                     .filter(|f| f.name == scope.name && f.line_start == scope.line_start)
-                    .min_by_key(|f| f.id.as_u128())
+                    // Phase P3 收口 C：tie-break 换成源码派生字段。`id` 是每次建图重新生成的
+                    // Uuid ⇒ 同名同起始行的两个函数（压缩 JS 里整仓都在第 2 行，极常见）
+                    // 会在两次独立建图里被选成不同的 caller，caller 的文件一变，
+                    // L1（同文件词法命中）/ L7（全仓同名唯一）就跟着翻转。
+                    .min_by(|a, b| {
+                        (
+                            &a.file_path,
+                            a.line_end,
+                            &a.namespace,
+                            &a.qualified_name,
+                        )
+                            .cmp(&(&b.file_path, b.line_end, &b.namespace, &b.qualified_name))
+                    })
                 {
                     return Some(node.clone());
                 }
@@ -485,7 +508,11 @@ pub fn layered_caller_node(
             span_a
                 .cmp(&span_b)
                 .then_with(|| b.line_start.cmp(&a.line_start))
-                .then_with(|| a.id.as_u128().cmp(&b.id.as_u128()))
+                // Phase P3 收口 C：末位用源码派生字段代替 `id`（每次建图都是新 Uuid）。
+                .then_with(|| {
+                    (&a.file_path, &a.name, a.line_end, &a.namespace)
+                        .cmp(&(&b.file_path, &b.name, b.line_end, &b.namespace))
+                })
         })
         .cloned()
 }

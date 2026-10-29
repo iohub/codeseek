@@ -180,13 +180,35 @@ impl ResolutionIndex {
     ) -> Self {
         let mut index = Self::default();
 
-        // 先把输入按 (file, line_start, name, id) 排成确定顺序：
+        // 先把输入按 (file, line_start, name, ...) 排成确定顺序：
         // `functions` 来自 HashMap 迭代，顺序随机；不排序的话 by_qualified 的
         // "冲突保留哪一条"就会随进程变化（当前 first-wins 的病灶之一）。
+        //
+        // Phase P3 收口 C：**末位 tie-break 不再是 `id.as_u128()`**。
+        // `FunctionInfo.id` 是每次建图重新生成的 v4，用它只能保证"同一进程内可复现"，
+        // 保证不了"同一份源码两次独立建图可复现"（实测见 `tag_source_key` 的注释）。
+        // 现在键覆盖到投影看得见的全部源码派生字段；键完全相同的两个函数在可观测层面
+        // 等价，谁先谁后都不再改变输出。
         let mut ordered: Vec<&FunctionInfo> = functions.iter().collect();
         ordered.sort_by(|a, b| {
-            (&a.file_path, a.line_start, &a.name, a.id.as_u128())
-                .cmp(&(&b.file_path, b.line_start, &b.name, b.id.as_u128()))
+            (
+                &a.file_path,
+                a.line_start,
+                &a.name,
+                a.line_end,
+                &a.namespace,
+                &a.qualified_name,
+                &a.module_path,
+            )
+                .cmp(&(
+                    &b.file_path,
+                    b.line_start,
+                    &b.name,
+                    b.line_end,
+                    &b.namespace,
+                    &b.qualified_name,
+                    &b.module_path,
+                ))
         });
 
         for function in ordered {
@@ -322,8 +344,9 @@ impl ResolutionIndex {
             .flat_map(|(_, tags)| tags.iter())
             .collect();
         out.sort_by(|a, b| {
-            (&a.module_path, &a.name, a.line_start, a.id.as_u128())
-                .cmp(&(&b.module_path, &b.name, b.line_start, b.id.as_u128()))
+            (&a.module_path, &a.name, a.line_start)
+                .cmp(&(&b.module_path, &b.name, b.line_start))
+                .then_with(|| tag_source_key(a).cmp(&tag_source_key(b)))
         });
         out
     }
@@ -363,7 +386,9 @@ impl ResolutionIndex {
             .filter(|tag| tag.file == file)
             .collect();
         out.sort_by(|a, b| {
-            (a.line_start, &a.name, a.id.as_u128()).cmp(&(b.line_start, &b.name, b.id.as_u128()))
+            (a.line_start, &a.name)
+                .cmp(&(b.line_start, &b.name))
+                .then_with(|| tag_source_key(a).cmp(&tag_source_key(b)))
         });
         out
     }
@@ -406,17 +431,44 @@ impl ResolutionIndex {
     }
 }
 
-/// 候选的**确定性排序键**：`(module_path, name, line_start, id)`。
+/// 候选的**确定性排序键**：`(module_path, name, line_start, file, qualified_name)`。
 ///
 /// 抽出成自由函数，供 `candidates_under_module` / `candidates_in_file` /
 /// `member_candidates_by_name` 共用 —— 同一个仓库里三套"自己排自己的序"正是
 /// 当前 first-wins 病灶的形态，P2a 在数据层先收敛成一个键。
-fn tag_sort_key(tag: &FunctionTag) -> (String, String, usize, u128) {
+///
+/// Phase P3 收口 C：末位的 `id.as_u128()` 换成源码派生字段，理由见 [`tag_source_key`]。
+fn tag_sort_key(tag: &FunctionTag) -> (String, String, usize, PathBuf, String) {
     (
         tag.module_path.clone(),
         tag.name.clone(),
         tag.line_start,
-        tag.id.as_u128(),
+        tag.file.clone(),
+        tag.qualified_name.clone(),
+    )
+}
+
+/// Phase P3 收口 C：候选的**源码派生全序键**（取代"每次建图都重新生成"的 Uuid tie-break）。
+///
+/// `FunctionTag.id` 就是 `FunctionInfo.id` —— 每次建图都是新的 Uuid v4。拿它做末位
+/// tie-break 只保证"同一进程内可复现"，**不保证"同一份源码、两次独立建图可复现"**。
+/// 实测（`tests/test_p3_final.rs::p3b_layered_is_deterministic_over_all_four_repos` 在
+/// `simple_js_project` 那个被压成单行的 JS 上）：同一份源码、两个互相独立的沙箱、两次全量
+/// 建图，每次运行翻转的边都不一样，甚至 caller 归属会在 `onClick` 与 `Va` 之间来回跳 ——
+/// 因为几十个函数同处第 2 行且同名，比较器一路走到 Uuid 那一位才被拆开。
+///
+/// 本键覆盖投影里**看得见**的全部源码派生字段：两候选键相同 ⇒ 它们在可观测层面完全等价，
+/// 谁先谁后都不再改变任何一条边/一个节点，因此不需要 Uuid 补位。
+fn tag_source_key(
+    tag: &FunctionTag,
+) -> (PathBuf, usize, String, String, String, Option<String>) {
+    (
+        tag.file.clone(),
+        tag.line_start,
+        tag.name.clone(),
+        tag.qualified_name.clone(),
+        tag.module_path.clone(),
+        tag.enclosing_type.clone(),
     )
 }
 

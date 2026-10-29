@@ -547,6 +547,15 @@ impl CodeParser {
     pub fn scan_directory(&mut self, dir: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         self._scan_directory_recursive(dir, &mut files);
+        // Phase P3 收口 C：**文件处理顺序必须与文件系统无关**。
+        // `fs::read_dir` 的返回顺序是目录物理布局决定的，同一份源码被复制到两个不同目录
+        // （典型场景：CI 沙箱、临时副本）时顺序就可能不同 ⇒ 节点入图顺序不同 →
+        // legacy 的同名 first-wins 与 layered 的"幽灵先查再建"落在不同文件上，
+        // 于是"同一份源码两次独立建图"产出的图不再逐字段相等
+        // （实测 `tests/test_p3_final.rs::p3b_layered_is_deterministic_over_all_four_repos`
+        // 在 `simple_js_project` 上每次都有若干条边的 `resolution_level` 在 1/7 之间翻转）。
+        // 排序只改**顺序**，不改集合：节点数/边数与文件数都与此前完全一致。
+        files.sort();
         files
     }
 
@@ -613,6 +622,26 @@ impl CodeParser {
         // （顺序不能反，否则刷新过的文件反而查不到 ctx）。
         let fresh_ctx = self.file_scopes.remove(file_path);
 
+        // Phase P3 收口 C（真缺陷修复）：删除之前先快照**指向本文件**的调用边。
+        //
+        // `_remove_file_entities` 走 `remove_function` / `remove_functions_by_file`，而 petgraph
+        // 删节点会连带删除**所有入射边** —— 其中包含"未改动文件的 caller → 本文件 callee"的边。
+        // 这些 caller 本轮不重新解析，之后没有任何路径会把它们补回来 ⇒ 增量图比"同一份源码
+        // 从零重建"少边。实测（`tests/test_p3_final.rs::p3b_full_vs_incremental_are_equivalent_over_four_repos_both_modes`）：
+        // `simple_rust_project`/layered 少 2 条 —— `src/lib.rs::complex_calculation` 打到
+        // `src/math.rs::{add,multiply}` 的两条边在刷新后凭空消失。
+        // 下面在本文件节点重建之后把快照的边接到**新节点**上；匹配不到（函数被改名/删除）
+        // 就保持原语义：边随 callee 一起失效。
+        let orphaned_incoming: Vec<(String, usize, CallRelation)> = call_graph
+            .get_all_call_relations()
+            .into_iter()
+            .filter_map(|relation| {
+                let callee = call_graph.get_function_by_id(&relation.callee_id)?;
+                (callee.file_path == *file_path)
+                    .then(|| (callee.name.clone(), callee.line_start, relation.clone()))
+            })
+            .collect();
+
         // 移除旧的实体和函数
         self._remove_file_entities(file_path, entity_graph, call_graph);
 
@@ -641,6 +670,45 @@ impl CodeParser {
         // 分析调用关系
         self._analyze_file_calls(file_path, call_graph)?;
 
+        // Phase P3 收口 C：把上面快照的跨文件入边接回**本轮重建**的节点（说明见快照处注释）。
+        // 匹配顺序：先按 `(名字, 起始行)` 精确命中，再退化到按名字命中 ——
+        // 前者覆盖"编辑没有挪动这个函数"（绝大多数情况），后者覆盖"因插入/删除行而整体位移"。
+        // 只用图里可比的源码派生字段做键，不依赖每次建图都重新生成的 Uuid。
+        {
+            let callee_identity: Vec<(String, usize, Uuid)> = self
+                .file_functions
+                .get(file_path)
+                .map(|funcs| {
+                    funcs
+                        .iter()
+                        .map(|f| (f.name.clone(), f.line_start, f.id))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut relinked = 0usize;
+            for (name, line_start, mut relation) in orphaned_incoming {
+                let new_callee_id = callee_identity
+                    .iter()
+                    .find(|(n, l, _)| *n == name && *l == line_start)
+                    .or_else(|| callee_identity.iter().find(|(n, _, _)| *n == name))
+                    .map(|(_, _, id)| *id);
+                let Some(id) = new_callee_id else { continue };
+                relation.callee_id = id;
+                // 走既有唯一入口 `add_call_relation`：它自己按 `(caller, callee, line)` 去重，
+                // 并负责 resolved/unresolved 统计，因此这里不碰统计、不直接 add_edge。
+                if call_graph.add_call_relation(relation).is_ok() {
+                    relinked += 1;
+                }
+            }
+            if relinked > 0 {
+                debug!(
+                    "refresh_file: 重新接回 {} 条指向本文件的跨文件调用边 ({})",
+                    relinked,
+                    file_path.display()
+                );
+            }
+        }
+
         // 更新索引
         self.file_index.rebuild_for_file(file_path, class_ids.clone(), function_ids.clone());
 
@@ -651,6 +719,43 @@ impl CodeParser {
         Ok(())
     }
 
+    /// Phase P2b 交付物 1 / Phase P3 收口 C：**layered 档节点身份的唯一写入点**。
+    ///
+    /// `module_path` 取自 `FileScopeCtx`，`qualified_name = module_path + 分隔符 + 函数名`。
+    /// **legacy 档逐字节不变**：这两个字段一律保持 `None`（红线 1），所以整段被 mode 守卫。
+    ///
+    /// 全量（`parse_file`）与增量（`_extract_entities_from_file`）两条链路都必须走这里：
+    /// 收口 C 之前只有全量走，于是 `refresh_file` 过的文件在图里退化成"无身份节点"
+    /// （`qualified_name`/`module_path` 双双为 `None`），实测 4 个整仓 × 两档的
+    /// 节点投影全部对不上"同一份源码从零重建"（`tests/test_p3_final.rs::p3b_full_vs_incremental_*`）。
+    fn _apply_layered_node_identity(
+        &self,
+        file_path: &PathBuf,
+        language: &str,
+        functions: &mut Vec<FunctionInfo>,
+    ) {
+        if self.resolver_mode != ResolverMode::Layered {
+            return;
+        }
+        let Some(ctx) = self.file_scopes.get(file_path) else {
+            return;
+        };
+        let separator = module_separator(language);
+        for function in functions.iter_mut() {
+            if ctx.module_path.is_empty() {
+                // module path 推不出来（root 缺失）⇒ 只给裸名限定，绝不拼假前缀。
+                function.module_path = None;
+                function.qualified_name = Some(function.name.clone());
+            } else {
+                function.module_path = Some(ctx.module_path.clone());
+                function.qualified_name = Some(format!(
+                    "{}{}{}",
+                    ctx.module_path, separator, function.name
+                ));
+            }
+        }
+    }
+
     /// 从文件提取实体
     ///
     /// Phase P3 交付物 1：实现本体已上提到
@@ -659,7 +764,7 @@ impl CodeParser {
     fn _extract_entities_from_file(&mut self, file_path: &PathBuf) -> Result<(Vec<ClassInfo>, Vec<FunctionInfo>), String> {
         let language = self._detect_language(file_path);
         let namespace = self._extract_namespace(file_path);
-        let (classes, functions, ctx) = extract_file_entities(
+        let (classes, mut functions, ctx) = extract_file_entities(
             &self.ts_parser,
             file_path,
             self.resolution_root.as_deref(),
@@ -667,6 +772,8 @@ impl CodeParser {
             &namespace,
         )?;
         self.file_scopes.insert(file_path.clone(), ctx);
+        // Phase P3 收口 C：增量链路也必须补节点身份，口径与 `parse_file` 完全一致。
+        self._apply_layered_node_identity(file_path, &language, &mut functions);
         Ok((classes, functions))
     }
 
@@ -1040,25 +1147,10 @@ impl CodeParser {
 
         // Phase P2b 交付物 1：layered 路径给 `FunctionInfo` 补上节点身份
         // （`module_path` 来自 `FileScopeCtx`，`qualified_name` = `module_path + sep + name`）。
-        // **legacy 路径逐字节不变**：这两个字段一律保持 `None`（红线 1），所以整段被 mode 守卫。
-        if self.resolver_mode == ResolverMode::Layered {
-            if let Some(ctx) = self.file_scopes.get(file_path) {
-                let separator = module_separator(&language);
-                for function in functions.iter_mut() {
-                    if ctx.module_path.is_empty() {
-                        // module path 推不出来（root 缺失）⇒ 只给裸名限定，绝不拼假前缀。
-                        function.module_path = None;
-                        function.qualified_name = Some(function.name.clone());
-                    } else {
-                        function.module_path = Some(ctx.module_path.clone());
-                        function.qualified_name = Some(format!(
-                            "{}{}{}",
-                            ctx.module_path, separator, function.name
-                        ));
-                    }
-                }
-            }
-        }
+        // Phase P3 收口 C：本体下提到 [`CodeParser::_apply_layered_node_identity`]，
+        // 与增量链路 `_extract_entities_from_file` **共用同一份实现**（否则刷新过的文件
+        // 会丢掉节点身份，增量图与"同一份源码从零重建"不再等价）。
+        self._apply_layered_node_identity(file_path, &language, &mut functions);
 
         // 注册函数到全局注册表
         for function in &functions {

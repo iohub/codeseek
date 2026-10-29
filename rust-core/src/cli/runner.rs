@@ -23,7 +23,8 @@ impl CodeSeekRunner {
         // ⇒ 直接失败。理由：`--levels` 改变产边结果，但它不在图缓存的解析档位戳里
         // （戳只有 `resolver_mode` / `max_candidates`），复用旧缓存会静默得到混档图。
         // 守卫本体在 `cli::args::Cli::validate_levels_against_cache`（与 `main.rs` 同一条），
-        // 返回可读 Err 而非 panic；权威说明见 `docs/call-graph-resolution.md`。
+        // 返回可读 Err 而非 panic；端到端行为由
+        // `tests/test_p3_final.rs::p3b_levels_flag_fail_fast_requires_force_reindex` 钉住。
         // 顺序说明：本条只看 `enabled_levels` 是否偏离默认，**语法非法**的 spec 在这里被判
         // "不是非默认"（不触发本条），错误仍由下面的语法校验给出，两条错误不会互相盖掉。
         if let Err(message) = cli.validate_levels_against_cache() {

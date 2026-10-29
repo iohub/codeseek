@@ -263,7 +263,26 @@ impl ScopeTree {
                             items[*a]
                                 .span()
                                 .cmp(&items[*b].span())
-                                .then_with(|| items[*a].guid.as_u128().cmp(&items[*b].guid.as_u128()))
+                                // Phase P3 收口 C：tie-break 用源码派生字段，不用 guid。
+                                // guid 是每次建图重新生成的 Uuid ⇒ 只保证同进程可复现，
+                                // 不保证"同一份源码两次独立建图可复现"（压缩 JS 里几十个
+                                // 作用域同 span、同名，比较结果整条落到 guid 那一位）。
+                                .then_with(|| {
+                                    (
+                                        &items[*a].name,
+                                        items[*a].line_start,
+                                        items[*a].line_end,
+                                        items[*a].param_count,
+                                        items[*a].has_body,
+                                    )
+                                        .cmp(&(
+                                            &items[*b].name,
+                                            items[*b].line_start,
+                                            items[*b].line_end,
+                                            items[*b].param_count,
+                                            items[*b].has_body,
+                                        ))
+                                })
                         });
                         Some(candidates[0])
                     }
@@ -395,7 +414,12 @@ impl ScopeTree {
             sb.span()
                 .cmp(&sa.span())
                 .then_with(|| sb.depth.cmp(&sa.depth))
-                .then_with(|| sa.guid.as_u128().cmp(&sb.guid.as_u128()))
+                // Phase P3 收口 C：末位改用源码派生字段（`guid` 每次建图都是新 Uuid，
+                // 只保证同进程可复现，不保证同一份源码两次独立建图可复现）。
+                .then_with(|| {
+                    (&sa.name, sa.line_start, sa.line_end, sa.param_count, sa.has_body)
+                        .cmp(&(&sb.name, sb.line_start, sb.line_end, sb.param_count, sb.has_body))
+                })
         });
         hits
     }
@@ -414,7 +438,13 @@ impl ScopeTree {
                 a.span()
                     .cmp(&b.span())
                     .then_with(|| b.depth.cmp(&a.depth))
-                    .then_with(|| a.guid.as_u128().cmp(&b.guid.as_u128()))
+                    // Phase P3 收口 C：末位改用源码派生字段（`guid` 每次建图都是新 Uuid ⇒
+                    // 同一份源码两次独立建图可能把调用点归到不同 caller，实测压缩 JS 里
+                    // caller 会在 `onClick` 与 `Va` 之间来回跳）。
+                    .then_with(|| {
+                        (&a.name, a.line_start, a.line_end, a.param_count, a.has_body)
+                            .cmp(&(&b.name, b.line_start, b.line_end, b.param_count, b.has_body))
+                    })
             })
             .map(|scope| scope.id)
     }

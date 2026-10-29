@@ -29,6 +29,24 @@
 //!   稳定的测试。出处：`tests/fixtures/resolution/README.md` 的「legacy 抖动实测」与
 //!   `tests/test_p1_edges_unchanged.rs` 守卫 4 的 (c)/(c2)。
 //!   被放开那一维由"其余 11 维（含 4 个元信息标量）逐条锁死 + 节点投影"补回强度。
+//! * **Phase P3 收口 C：legacy 档另外再放开两样东西，理由同上，不是新造规则**
+//!   1. `is_resolved`：**legacy 档它是 first-wins 命中结果的函数，不是独立语义维**。
+//!      `CallRelation::legacy`（`src/codegraph/types.rs:108` 起）的 `is_resolved` 由调用方
+//!      按旧语义直接传入（四个分层标量恒为 0），取值含义就是"这次有没有在索引里撞到同名
+//!      节点"。同一个 `trim()` 调用点，本轮若撞到**别的文件**先造好的同名幽灵 ⇒ `true`；
+//!      若按另一顺序先解析自己 ⇒ 在**本文件**新造幽灵 ⇒ `false`。这两种产出的 callee 身份
+//!      本来就不同（正是被丢掉的那两维），所以只丢身份维、留着 `is_resolved`，等于把同一个
+//!      随机量的另一个投影又锁回去。出处：`tests/fixtures/resolution/README.md`
+//!      「legacy 抖动实测」—— 该节明确"甚至同进程内每轮建图"都会翻。
+//!      ⚠ 只在 **legacy 投影**里放开；`layered` 仍走 `EdgeKey` **全 13 维**（含
+//!      `is_resolved`），因为 `is_resolved = (resolution_level > 0 && candidate_count == 1)`
+//!      在 layered 侧是按派生式重算的语义真值（`src/codegraph/types.rs:145` 起）。
+//!   2. **节点投影里的幽灵节点**：幽灵的**存在与归属文件**由同一个 first-wins 随机选择
+//!      决定 ⇒ 整文件重解析必然带来节点/边集合的条数差。出处：
+//!      `tests/fixtures/resolution/README.md:106-107`「幽灵合并粒度」一节已明文定性：
+//!      "只要任一条边/节点的落点发生变化，整文件重解析必然带来边与节点集合的差值 ——
+//!      它不是可比较的性质"。因此 legacy 档的节点投影只锁**真定义**
+//!      （`namespace != "unresolved"`），逐字段与 layered 一样严。
 //! * **layered 档用全维度**（含 callee 身份）逐条比较。
 //! * 判据一律**不依赖** `~/.codeseek` 的历史状态：每个用例把仓复制到唯一命名的临时目录，
 //!   建图后按"目录名的 MD5"与"目录名"两个 project_id 清掉自己写进 home 的缓存
@@ -243,9 +261,22 @@ struct EdgeKey {
     confidence: u8,
     rank: u8,
     candidate_count: u8,
+    /// callee 节点是不是**幽灵**（`namespace == "unresolved"`）。
+    ///
+    /// 不参与 `layered` 的全维度比较（那里连 callee 身份一起锁），只给 legacy 投影做
+    /// 过滤用：命中"哪个同名幽灵/要不要新造一个幽灵"与 `callee_file`/`callee_line_start`
+    /// 是同一个 first-wins 随机量的投影，依据见文件头「口径」第 2 条。
+    /// 因此它**不进** `StructuralEdgeKey`，只用于"这条边是否属于不可比较的那一批"。
+    callee_is_ghost: bool,
 }
 
-/// 去掉 **callee 身份维**之后的结构投影（legacy 专用，理由见文件头）。
+/// 去掉 **callee 身份维**与 **`is_resolved`** 之后的结构投影（legacy 专用，理由见文件头）。
+///
+/// Phase P3 收口 C 从 11 维减到 10 维：`is_resolved` 在 legacy 档就是"这次 first-wins
+/// 撞没撞到同名节点"，与被丢掉的 `callee_file`/`callee_line_start` 是**同一个随机量的两个
+/// 投影**（依据见文件头「口径」第 2 条与 `tests/fixtures/resolution/README.md`）。
+/// 其余 10 维照旧逐条锁死：caller 的身份 3 维 + callee 裸名 + 调用行 + 边上的 callee_name
+/// + `resolution_level`/`confidence`/`rank`/`candidate_count` 4 个元信息标量。
 type StructuralEdgeKey = (
     String, // caller_file
     String, // caller_name
@@ -253,7 +284,6 @@ type StructuralEdgeKey = (
     String, // callee_name
     usize,  // line_number
     String, // edge_callee_name
-    bool,   // is_resolved
     u8,     // resolution_level
     u8,     // confidence
     u8,     // rank
@@ -269,7 +299,6 @@ impl EdgeKey {
             self.callee_name.clone(),
             self.line_number,
             self.edge_callee_name.clone(),
-            self.is_resolved,
             self.resolution_level,
             self.confidence,
             self.rank,
@@ -307,6 +336,10 @@ fn edge_multiset(graph: &PetCodeGraph, root: &Path) -> Vec<EdgeKey> {
                 confidence: rel_edge.confidence,
                 rank: rel_edge.rank,
                 candidate_count: rel_edge.candidate_count,
+                callee_is_ghost: callee
+                    .as_ref()
+                    .map(|f| f.namespace == "unresolved")
+                    .unwrap_or(false),
             }
         })
         .collect();
@@ -315,7 +348,18 @@ fn edge_multiset(graph: &PetCodeGraph, root: &Path) -> Vec<EdgeKey> {
 }
 
 fn structural_multiset(edges: &[EdgeKey]) -> Vec<StructuralEdgeKey> {
-    let mut v: Vec<StructuralEdgeKey> = edges.iter().map(|k| k.without_callee_identity()).collect();
+    // legacy 档**只比较"打到真定义"的边**：callee 是幽灵的边，其存在性取决于
+    // "本轮有没有先撞到同名幽灵 / 要不要新造一个"，与被丢掉的 callee 身份维
+    // （以及 legacy 的 `is_resolved`）是同一个 first-wins 随机量的投影。
+    // 依据：`tests/fixtures/resolution/README.md`「legacy 抖动实测」与「幽灵合并粒度」两节
+    // —— 后者已明文"整文件重解析必然带来边与节点集合的差值，它不是可比较的性质"。
+    // 补回强度的做法：打到**真定义**的边仍然 10 维逐条锁死；ghost 边的 caller 侧 4 个
+    // 元信息标量在 legacy 恒为 0，本来也不携带信息（`legacy_ghost` 构造器写死）。
+    let mut v: Vec<StructuralEdgeKey> = edges
+        .iter()
+        .filter(|k| !k.callee_is_ghost)
+        .map(|k| k.without_callee_identity())
+        .collect();
     v.sort();
     v
 }
@@ -325,9 +369,31 @@ fn node_multiset(
     graph: &PetCodeGraph,
     root: &Path,
 ) -> Vec<(String, String, usize, usize, String, String, bool)> {
+    node_multiset_inner(graph, root, true)
+}
+
+/// legacy 档用的节点投影：**只锁真定义**（`namespace != "unresolved"`）。
+///
+/// 依据见文件头「口径」第 2 条第 2 点：legacy 的幽灵节点在哪个文件、有几条，
+/// 与 callee 身份维是同一个 first-wins 随机量的投影；
+/// `tests/fixtures/resolution/README.md`「幽灵合并粒度」一节已把"整文件重解析带来的
+/// 节点/边集合差值"定性为**不是可比较的性质**。真定义的 7 个字段照旧逐条锁死。
+fn real_node_multiset(
+    graph: &PetCodeGraph,
+    root: &Path,
+) -> Vec<(String, String, usize, usize, String, String, bool)> {
+    node_multiset_inner(graph, root, false)
+}
+
+fn node_multiset_inner(
+    graph: &PetCodeGraph,
+    root: &Path,
+    include_ghosts: bool,
+) -> Vec<(String, String, usize, usize, String, String, bool)> {
     let mut out: Vec<(String, String, usize, usize, String, String, bool)> = graph
         .get_all_functions()
         .into_iter()
+        .filter(|f: &&FunctionInfo| include_ghosts || f.namespace != "unresolved")
         .map(|f: &FunctionInfo| {
             (
                 rel_of(root, &f.file_path),
@@ -466,10 +532,25 @@ fn p3b_full_vs_incremental_are_equivalent_over_four_repos_both_modes() {
                     ));
                 }
             } else {
-                // legacy：丢掉 callee 身份维（`callee_file` + `callee_line_start`），
-                // 其余 11 维（含 4 个元信息标量）照旧逐条锁死 —— 口径见文件头。
+                // legacy：丢掉 callee 身份维（`callee_file` + `callee_line_start`）、
+                // `is_resolved` 以及"打到幽灵"的那批边（三条依据都在文件头「口径」第 2 条），
+                // 其余 10 维（含 4 个元信息标量）照旧逐条锁死 + 真定义节点投影全锁。
                 let si = structural_multiset(&inc_edges);
                 let sf = structural_multiset(&fresh_edges);
+                let ghost_i = inc_edges.iter().filter(|k| k.callee_is_ghost).count();
+                let ghost_f = fresh_edges.iter().filter(|k| k.callee_is_ghost).count();
+                println!(
+                    "[{repo}/legacy] 真定义边 {} vs {}（另有 {} vs {} 条打到幽灵的边不参与比较）",
+                    si.len(),
+                    sf.len(),
+                    ghost_i,
+                    ghost_f
+                );
+                // 防止"过滤把断言过滤空了"：真定义边必须非空，否则本比较是假的。
+                assert!(
+                    !si.is_empty() && !sf.is_empty(),
+                    "[{repo}/legacy] 真定义边投影为空 ⇒ 本用例的比较是空的（{si:?} vs {sf:?}）"
+                );
                 if si != sf {
                     failures.push(format!(
                         "{}",
@@ -484,11 +565,11 @@ fn p3b_full_vs_incremental_are_equivalent_over_four_repos_both_modes() {
                         )
                     ));
                 }
-                let (na, nb) = (node_multiset(&refreshed, &dir), node_multiset(&rebuilt, &dir));
+                let (na, nb) = (real_node_multiset(&refreshed, &dir), real_node_multiset(&rebuilt, &dir));
                 if na != nb {
                     failures.push(format!(
                         "{}",
-                        diff_report(&na, &nb, &format!("{repo}/legacy 整图节点·投影"))
+                        diff_report(&na, &nb, &format!("{repo}/legacy 整图节点·投影（真定义）"))
                     ));
                 }
             }
@@ -636,7 +717,14 @@ fn compare_round(
     round: &str,
 ) {
     let (got_edges, full_edges) = (edge_multiset(got, dir), edge_multiset(full, dir));
-    let (got_nodes, full_nodes) = (node_multiset(got, dir), node_multiset(full, dir));
+    // 节点投影按档位选口径：layered 含幽灵、全 7 维逐条锁；legacy 只锁真定义
+    // （依据见文件头「口径」第 2 条第 2 点与 `tests/fixtures/resolution/README.md`
+    // 「幽灵合并粒度」一节 —— 幽灵的条数与归属在 legacy 档不是可比较的性质）。
+    let (got_nodes, full_nodes) = if layered {
+        (node_multiset(got, dir), node_multiset(full, dir))
+    } else {
+        (real_node_multiset(got, dir), real_node_multiset(full, dir))
+    };
     assert_eq!(
         got_nodes.len(),
         full_nodes.len(),

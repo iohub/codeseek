@@ -114,8 +114,10 @@ pub struct Cli {
     /// ⚠ **缓存约束（Phase P3 收口 B）**：`--levels` 会改变产出的调用边，但它**不在**
     /// 图缓存的解析档位戳里（戳只有 `resolver_mode` / `max_candidates`），因此取**非默认值**
     /// （默认 = 全层开启）时**必须同时传 `--force-reindex`**，否则 CLI 在建图之前就报错退出。
-    /// 正确用法：`codeseek --levels=l1,l7 --force-reindex init`（详见
-    /// `rust-core/docs/call-graph-resolution.md` 的「--levels 的 fail-fast 契约」一节）。
+    /// 正确用法：`codeseek --levels=l1,l7 --force-reindex init`。守卫本体就是本文件的
+    /// [`Cli::validate_levels_against_cache`]（在 `src/main.rs` 与 `src/cli/runner.rs`
+    /// 两处派发点各调用一次，都早于任何缓存读取），端到端行为由
+    /// `tests/test_p3_final.rs::p3b_levels_flag_fail_fast_requires_force_reindex` 钉住。
     #[clap(
         long,
         default_value = "",

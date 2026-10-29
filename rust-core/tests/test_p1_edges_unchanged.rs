@@ -1104,7 +1104,8 @@ const MODE_BRANCH_FNS: &[&str] = &["_analyze_file_calls", "_find_callee_function
 ///  - 唯一的委托调用点搬到了 `src/codegraph/parser.rs`（下面那条**字面完全不变**、
 ///    只是换了文件名的 `emit_legacy_call_edges_for_file(&self.ts_parser` 特征），
 ///    legacy 全量档仍由 `_analyze_file_calls_for_petgraph` 独立实现
-///    （登记理由见 `parser.rs` 顶部与 `docs/call-graph-resolution.md`）。
+///    （登记理由见 `parser.rs` 顶部三个共用件的注释，以及
+///    `tests/fixtures/resolution/README.md` 的「legacy 抖动实测」一节）。
 /// 也就是说"正向证明委托存在 + 反向证明第二份实现不存在"两条都仍然在，只是各自换了位置。
 const FIRST_WINS_MARKERS: &[(&str, &str)] = &[
     (

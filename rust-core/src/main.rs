@@ -58,8 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 所以"改了 `--levels` 却复用旧缓存"会静默得到一张混档图。
     // 返回的是**用户可读的 Err**（非 panic、非 unwrap），文案自带正确用法示例。
     // 为什么不给 `--levels` 再升一次 schema（3→4）：那会让所有用户刚重建过的缓存整体作废，
-    // 而代价只该由"真的在做逐层诊断"的那次运行付 —— 见
-    // `rust-core/docs/call-graph-resolution.md` 的「--levels 的 fail-fast 契约」。
+    // 而代价只该由"真的在做逐层诊断"的那次运行付。守卫本体见
+    // `cli::args::Cli::validate_levels_against_cache`（与本文件、`cli/runner.rs` 同一条）。
     if let Err(message) = cli.validate_levels_against_cache() {
         return Err(message.into());
     }

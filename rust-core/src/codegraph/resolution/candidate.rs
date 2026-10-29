@@ -251,8 +251,11 @@ pub fn rank_candidates(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
             .then_with(|| b.arity_match.cmp(&a.arity_match))
             // ---- Phase P2a：源码事实 tie-break（跨重建稳定）----
             .then_with(|| a.source_key.cmp(&b.source_key))
-            // ---- 最终 tie-break：与 P1 完全一致（同一文件同一行同名的极端情况才用到）----
-            .then_with(|| a.callee_id.as_u128().cmp(&b.callee_id.as_u128()))
+            // Phase P3 收口 C：**去掉 `callee_id.as_u128()` 这一位**。
+            // `source_key = (文件, 起始行, 名字)` 已经覆盖候选在投影里看得见的全部源码事实；
+            // 走到这里还相等的两个候选，产出的边在可观测层面逐字段相同，谁在前都不改变输出。
+            // 反之留着 Uuid 才是问题：它每次建图都重新生成 ⇒ "同一份源码两次独立建图"
+            // 的 rank 归属会翻转（实测见 `tests/test_p3_final.rs::p3b_layered_is_deterministic_*`）。
     });
     // 重编 rank，保证与排序结果一致（0 = 最优）。
     for (idx, candidate) in candidates.iter_mut().enumerate() {
@@ -323,19 +326,59 @@ mod tests {
     }
 
     #[test]
-    fn ranking_is_deterministic_by_confidence_then_level_then_uuid() {
-        // 同置信度（同一层级）时，callee_id 小者在前 —— 与 HashMap 迭代顺序无关。
-        let a = Candidate::new(id(9), ResolutionLevel::GlobalUnique, 0, ResolutionReason::AmbiguousSameName);
-        let b = Candidate::new(id(2), ResolutionLevel::GlobalUnique, 0, ResolutionReason::AmbiguousSameName);
-        let ordered = rank_candidates(vec![a.clone(), b.clone()]);
-        assert_eq!(ordered[0].callee_id, id(2));
-        assert_eq!(ordered[1].callee_id, id(9));
+    fn ranking_is_deterministic_by_confidence_then_level_then_source_key() {
+        // Phase P3 收口 C：末位 tie-break 从 `callee_id`(Uuid) 换成**源码派生的 `source_key`**。
+        // Uuid 每次建图都重新生成，用它补位只保证"同进程可复现"，不保证"同一份源码两次
+        // 独立建图可复现"（正是 `tests/test_p3_final.rs::p3b_layered_is_deterministic_*`
+        // 在 `simple_js_project` 上抓到的 rank/层级翻转）。
+        // 本守卫因此改判：**排序结果由 source_key 决定，与 Uuid 大小无关**。
+        let small_key = Candidate::new(
+            id(9), // 故意给一个"大" Uuid
+            ResolutionLevel::GlobalUnique,
+            0,
+            ResolutionReason::AmbiguousSameName,
+        )
+        .with_source_key("a.rs", 1, "pick");
+        let large_key = Candidate::new(
+            id(2), // "小" Uuid，但 source_key 更大
+            ResolutionLevel::GlobalUnique,
+            0,
+            ResolutionReason::AmbiguousSameName,
+        )
+        .with_source_key("b.rs", 1, "pick");
+
+        // 输入顺序刻意是 (large_key, small_key)：结果仍必须按 source_key 排。
+        let ordered = rank_candidates(vec![large_key.clone(), small_key.clone()]);
+        assert_eq!(ordered[0].callee_id, id(9), "排序必须按 source_key，不能按 Uuid");
+        assert_eq!(ordered[1].callee_id, id(2));
         assert_eq!(ordered[0].rank, 0);
         assert_eq!(ordered[1].rank, 1);
 
         // 再打乱输入顺序，结果必须完全一致。
-        let again = rank_candidates(vec![b.clone(), a.clone()]);
+        let again = rank_candidates(vec![small_key.clone(), large_key.clone()]);
         assert_eq!(ordered, again, "排序不能依赖输入顺序");
+
+        // `source_key` 完全相同（同文件、同行、同名）⇒ 两个候选在可观测层面等价：
+        // 这里只要求"同样的输入给同样的输出"，不再断言谁在前。
+        let x = Candidate::new(
+            id(5),
+            ResolutionLevel::SameModule,
+            0,
+            ResolutionReason::AmbiguousSameName,
+        )
+        .with_source_key("c.rs", 7, "dup");
+        let y = Candidate::new(
+            id(3),
+            ResolutionLevel::SameModule,
+            0,
+            ResolutionReason::AmbiguousSameName,
+        )
+        .with_source_key("c.rs", 7, "dup");
+        assert_eq!(
+            rank_candidates(vec![x.clone(), y.clone()]),
+            rank_candidates(vec![x.clone(), y.clone()]),
+            "source_key 相同的候选必须给出稳定结果"
+        );
     }
 
     #[test]

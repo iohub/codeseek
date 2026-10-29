@@ -501,13 +501,26 @@ pub fn call_sites_from_symbols_with_source(
         sites.push(site);
     }
     // 输出顺序 = 符号在列表里的顺序（tree-sitter 产出顺序，同一份源码稳定）；
-    // 为了让"两次运行结果逐字段相等"不依赖符号产出顺序，再按 (line, callee_name, guid) 重排。
+    // 为了让"两次独立建图结果逐字段相等"不依赖符号产出顺序，再按源码派生字段重排。
+    //
+    // Phase P3 收口 C：末位**不再是 `symbol_guid`** —— guid 每次建图都是新的 Uuid，
+    // 用它补位意味着"同一份源码的两次独立建图"可能以不同顺序发射同一行的调用点。
     sites.sort_by(|a, b| {
-        (a.line, a.callee_name.clone(), a.symbol_guid.unwrap_or_else(Uuid::nil).as_u128())
+        (
+            a.line,
+            &a.callee_name,
+            &a.file,
+            &a.qualified_components,
+            &a.receiver,
+            a.arg_count,
+        )
             .cmp(&(
                 b.line,
-                b.callee_name.clone(),
-                b.symbol_guid.unwrap_or_else(Uuid::nil).as_u128(),
+                &b.callee_name,
+                &b.file,
+                &b.qualified_components,
+                &b.receiver,
+                b.arg_count,
             ))
     });
     sites

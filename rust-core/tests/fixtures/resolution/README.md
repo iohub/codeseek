@@ -104,5 +104,9 @@ layered 复用幽灵节点的条件是"同文件 + 同裸名 + 同调用行"，�
 ⇒ 同一批未解析调用点在 layered 下拆得更细（每条调用点自己的幽灵），
 `unresolved` 边数随之上升（`simple_js` 200→797 与候选展开同源）。
 边覆盖（有边调用点数）两模式在四个整仓上实测**完全相等**，已由
-`p2b_precision_report_legacy_vs_layered` 断言。是否统一幽灵合并粒度留给 P3。
+`p2b_precision_report_legacy_vs_layered` 断言。幽灵合并粒度**已在 P3 收口 A 统一为
+「同裸名复用」**（实现见 `src/codegraph/resolution/mod.rs` 的 `emit_layered_resolution`
+先查再建分支：同一裸名在全仓只留一个幽灵节点，忽略文件与行号），
+该口径的跨轮稳定性由 `tests/test_p3_final.rs::p3b_layered_is_deterministic_over_all_four_repos`
+与 `::p3b_full_vs_incremental_are_equivalent_over_four_repos_both_modes` 守住。
 

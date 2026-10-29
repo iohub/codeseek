@@ -31,8 +31,11 @@ use crate::codegraph::types::{FileIndex, FileMetadata, SnippetIndex};
 ///     正好与这里的方法面一一对应）。
 ///
 /// ⚠ **这里绝不产边、绝不解析源码**。任何"再加一个 `refresh_file`"的冲动都必须先读
-/// `rust-core/docs/call-graph-resolution.md` 的「唯一真源」一节：产边只允许走
-/// `codegraph::parser` 的那一条链路。
+/// `codegraph/parser.rs` 顶部的三个共用件（`extract_file_entities` /
+/// `emit_legacy_call_edges_for_file` / `emit_layered_call_edges_for_file`）——产边只允许走
+/// 那一条链路，且写边只允许经由 `codegraph::types::PetCodeGraph::upsert_call_site_edges`；
+/// 本文件的"零产边"由 `tests/test_p1_edges_unchanged.rs` 的
+/// `FIRST_WINS_ABSENCE_MARKERS` 反向断言钉死。
 #[derive(Debug)]
 pub struct IncrementalManager {
     /// 文件元数据（路径 -> MD5/大小/语言/更新时间），只由 `load_state` 填充
