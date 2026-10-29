@@ -5,9 +5,9 @@
 
 use crate::services::embedding_service::{EmbeddingService, SearchResult};
 use crate::services::reranker_service::RerankerService;
-use crate::storage::traits_bm25::{CandidateSource, FusedCandidate, TextSearchProvider, TextSearchResult};
+use crate::storage::traits_bm25::{CandidateSource, CodeChunk, FusedCandidate, TextSearchProvider, TextSearchResult};
 use anyhow::{Result, anyhow};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -65,36 +65,90 @@ impl Default for HybridSearchConfig {
 ///      │
 ///      └──→ (Optional) Cross-Encoder Reranker ──→ Final Results
 /// ```
-///
-/// Internal metadata structure used to track line info during RRF fusion.
-#[derive(Clone)]
-struct DenseMeta {
-    file_path: String,
-    symbol_name: String,
-    code_block: String,
-    line_start: usize,
-    line_end: usize,
-}
-
-impl From<&SearchResult> for DenseMeta {
-    fn from(sr: &SearchResult) -> Self {
-        let line_count = sr.code_block.lines().count();
-        Self {
-            file_path: sr.file_path.clone(),
-            symbol_name: sr.symbol_name.clone(),
-            code_block: sr.code_block.clone(),
-            line_start: 0,
-            line_end: line_count,
-        }
-    }
-}
-
 pub struct HybridSearchService {
     dense: Arc<EmbeddingService>,
     sparse: Arc<dyn TextSearchProvider>,
     config: HybridSearchConfig,
     /// 可选的 Cross-Encoder Reranker 服务（RRF 融合后执行精排）
     reranker: Option<RerankerService>,
+}
+
+/// Internal metadata structure used to track line info during RRF fusion.
+///
+/// Filled from either channel: the dense channel carries the real `code_block` /
+/// line range / language, the sparse (BM25) channel only carries path, symbol,
+/// language and (when available) `line_start`. Missing pieces are merged from the
+/// other channel via [`FusionMeta::merge_missing`].
+#[derive(Clone, Default)]
+struct FusionMeta {
+    file_path: String,
+    symbol_name: String,
+    language: String,
+    code_block: String,
+    line_start: usize,
+    line_end: usize,
+}
+
+impl From<&SearchResult> for FusionMeta {
+    fn from(sr: &SearchResult) -> Self {
+        Self {
+            file_path: sr.file_path.clone(),
+            symbol_name: sr.symbol_name.clone(),
+            language: sr.language.clone(),
+            code_block: sr.code_block.clone(),
+            line_start: sr.line_start,
+            line_end: sr.line_end,
+        }
+    }
+}
+
+impl From<&TextSearchResult> for FusionMeta {
+    fn from(sr: &TextSearchResult) -> Self {
+        Self {
+            file_path: sr.file_path.clone(),
+            symbol_name: sr.symbol_name.clone(),
+            language: sr.language.clone(),
+            // BM25 通道不存储正文（content 非 STORED），保持为空串
+            code_block: String::new(),
+            line_start: sr.line_start,
+            // BM25 通道不存储结束行
+            line_end: 0,
+        }
+    }
+}
+
+impl FusionMeta {
+    /// Fill only the fields this side is missing from `other`.
+    ///
+    /// "Missing" means empty string for text fields and `0` for line numbers,
+    /// so real data already present is never overwritten by a placeholder.
+    fn merge_missing(&mut self, other: &Self) {
+        if self.file_path.is_empty() {
+            self.file_path = other.file_path.clone();
+        }
+        if self.symbol_name.is_empty() {
+            self.symbol_name = other.symbol_name.clone();
+        }
+        if self.language.is_empty() {
+            self.language = other.language.clone();
+        }
+        if self.code_block.is_empty() {
+            self.code_block = other.code_block.clone();
+        }
+        if self.line_start == 0 {
+            self.line_start = other.line_start;
+        }
+        if self.line_end == 0 {
+            self.line_end = other.line_end;
+        }
+    }
+}
+
+/// Build the snippet id of a dense result using the very same scheme as the
+/// Tantivy index (`CodeChunk::generate_id`), so both ranked lists can be merged
+/// by id. Format: `{file_path}#{line_start}#{symbol_name}`.
+fn dense_snippet_id(sr: &SearchResult) -> String {
+    CodeChunk::generate_id(&sr.file_path, sr.line_start, &sr.symbol_name)
 }
 
 impl HybridSearchService {
@@ -182,13 +236,13 @@ impl HybridSearchService {
                     dense_raw
                         .into_iter()
                         .map(|sr| FusedCandidate {
-                            snippet_id: format!("{}#{}", sr.file_path, sr.symbol_name),
+                            snippet_id: dense_snippet_id(&sr),
                             final_score: sr.score as f64,
                             file_path: sr.file_path,
                             symbol_name: sr.symbol_name,
-                            language: String::new(),
-                            line_start: 0,
-                            line_end: 0,
+                            language: sr.language,
+                            line_start: sr.line_start,
+                            line_end: sr.line_end,
                             code_block: sr.code_block,
                             source: CandidateSource::DenseOnly,
                         })
@@ -223,37 +277,65 @@ impl HybridSearchService {
     /// in a ranked list, and the sum is over all channels that returned d.
     ///
     /// Documents appearing in both channels get a higher fused score.
+    ///
+    /// 两个通道的 id 统一由 [`CodeChunk::generate_id`] 生成（三段式
+    /// `{file_path}#{line_start}#{symbol_name}`），因此「只被 BM25 命中」的片段
+    /// 也会作为 `CandidateSource::SparseOnly` 候选保留，不再被静默丢弃。
     fn reciprocal_rank_fusion(
         &self,
         dense: Vec<SearchResult>,
         sparse: Vec<TextSearchResult>,
         limit: usize,
     ) -> Vec<FusedCandidate> {
-        let k = self.config.rrf_k;
+        Self::fuse(dense, sparse, &self.config, limit)
+    }
 
-        // Accumulate scores per snippet_id, along with metadata
+    /// Pure RRF fusion core.
+    ///
+    /// 只依赖入参与 `config`（不触碰 `self.dense` / `self.sparse`），因此无需构造
+    /// EmbeddingService 或 Tantivy 索引即可单测。
+    fn fuse(
+        dense: Vec<SearchResult>,
+        sparse: Vec<TextSearchResult>,
+        config: &HybridSearchConfig,
+        limit: usize,
+    ) -> Vec<FusedCandidate> {
+        let k = config.rrf_k;
+
+        // Accumulate scores per snippet_id, along with metadata from whichever
+        // channel(s) produced it. ids 记录在 set 里，供后面判定候选来源。
         let mut score_map: HashMap<String, f64> = HashMap::new();
-        let mut meta_map: HashMap<String, DenseMeta> = HashMap::new();
+        let mut meta_map: HashMap<String, FusionMeta> = HashMap::new();
+        let mut dense_ids: HashSet<String> = HashSet::new();
+        let mut sparse_ids: HashSet<String> = HashSet::new();
 
         // Process dense channel
         for (rank, dr) in dense.iter().enumerate() {
-            let snippet_id = format!("{}#{}", dr.file_path, dr.symbol_name);
+            let snippet_id = dense_snippet_id(dr);
             let rrf_score = 1.0 / (k + rank as f64 + 1.0);
             *score_map.entry(snippet_id.clone()).or_insert(0.0) += rrf_score;
-            meta_map.entry(snippet_id).or_insert_with(|| DenseMeta::from(dr));
+
+            let dense_meta = FusionMeta::from(dr);
+            let meta = meta_map
+                .entry(snippet_id.clone())
+                .or_insert_with(|| dense_meta.clone());
+            meta.merge_missing(&dense_meta);
+
+            dense_ids.insert(snippet_id);
         }
 
-        // Process sparse channel — fill in line_start from sparse results
+        // Process sparse channel — 纯 BM25 命中本身就是合法候选
         for (rank, sr) in sparse.iter().enumerate() {
             let rrf_score = 1.0 / (k + rank as f64 + 1.0);
             *score_map.entry(sr.snippet_id.clone()).or_insert(0.0) += rrf_score;
 
-            // If sparse has line info but dense doesn't, merge it
-            if let Some(meta) = meta_map.get_mut(&sr.snippet_id) {
-                if meta.line_start == 0 && sr.line_start > 0 {
-                    meta.line_start = sr.line_start;
-                }
-            }
+            let sparse_meta = FusionMeta::from(sr);
+            let meta = meta_map
+                .entry(sr.snippet_id.clone())
+                .or_insert_with(|| sparse_meta.clone());
+            meta.merge_missing(&sparse_meta);
+
+            sparse_ids.insert(sr.snippet_id.clone());
         }
 
         // Sort by fused score descending
@@ -265,30 +347,33 @@ impl HybridSearchService {
             .into_iter()
             .take(limit)
             .filter_map(|(snippet_id, fused_score)| {
-                // Determine source
-                let dense_count = dense.iter().any(|dr| {
-                    format!("{}#{}", dr.file_path, dr.symbol_name) == snippet_id
-                }) as u32;
-                let sparse_count = sparse.iter().any(|sr| sr.snippet_id == snippet_id) as u32;
-                let source = match (dense_count > 0, sparse_count > 0) {
+                // Determine source from the ids recorded while walking each channel
+                let in_dense = dense_ids.contains(&snippet_id);
+                let in_sparse = sparse_ids.contains(&snippet_id);
+                let source = match (in_dense, in_sparse) {
                     (true, true) => CandidateSource::Fused,
                     (true, false) => CandidateSource::DenseOnly,
                     (false, true) => CandidateSource::SparseOnly,
                     (false, false) => return None,
                 };
 
-                   // Get metadata from dense result
+                // Both channels insert metadata, so every candidate has one here
                 let meta = meta_map.get(&snippet_id)?;
-                
-                // P1: Apply short code penalty
-                let code_len = meta.code_block.trim().chars().count();
-                let final_score = if code_len < self.config.short_code_threshold {
-                    let ratio = code_len as f64 / self.config.short_code_threshold as f64;
-                    let penalty_factor = 1.0 - (1.0 - ratio) * self.config.short_code_penalty;
-                    let penalty_factor = penalty_factor.max(0.0); // clamp to [0, 1]
-                    fused_score * penalty_factor
-                } else {
+
+                // P1: Apply short code penalty — 仅在真的有正文时计算，
+                // 否则纯 BM25 候选（content 未存储）会被当成 0 长度代码而腰斩分数
+                let final_score = if meta.code_block.trim().is_empty() {
                     fused_score
+                } else {
+                    let code_len = meta.code_block.trim().chars().count();
+                    if code_len < config.short_code_threshold {
+                        let ratio = code_len as f64 / config.short_code_threshold as f64;
+                        let penalty_factor = 1.0 - (1.0 - ratio) * config.short_code_penalty;
+                        let penalty_factor = penalty_factor.max(0.0); // clamp to [0, 1]
+                        fused_score * penalty_factor
+                    } else {
+                        fused_score
+                    }
                 };
                 
                 Some(FusedCandidate {
@@ -296,7 +381,7 @@ impl HybridSearchService {
                     final_score,
                     file_path: meta.file_path.clone(),
                     symbol_name: meta.symbol_name.clone(),
-                    language: String::new(),
+                    language: meta.language.clone(),
                     line_start: meta.line_start,
                     line_end: meta.line_end,
                     code_block: meta.code_block.clone(),
@@ -352,5 +437,97 @@ impl HybridSearchService {
                 Ok(fallback)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 60+ chars — 超过 default 的 short_code_threshold(30)，避免惩罚干扰断言
+    const CODE_BLOCK: &str = "fn foo() {\n    let mut v = Vec::new();\n    v.push(1);\n    v\n}\n";
+
+    fn make_dense(file_path: &str, symbol: &str, line_start: usize, line_end: usize) -> SearchResult {
+        SearchResult {
+            file_path: file_path.to_string(),
+            symbol_name: symbol.to_string(),
+            code_block: CODE_BLOCK.to_string(),
+            score: 0.9,
+            symbol_type: "function".to_string(),
+            language: "rust".to_string(),
+            line_start,
+            line_end,
+        }
+    }
+
+    fn make_sparse(snippet_id: &str, file_path: &str, symbol: &str, line_start: usize) -> TextSearchResult {
+        TextSearchResult {
+            snippet_id: snippet_id.to_string(),
+            score: 3.5,
+            file_path: file_path.to_string(),
+            symbol_name: symbol.to_string(),
+            language: "rust".to_string(),
+            line_start,
+        }
+    }
+
+    #[test]
+    fn sparse_only_candidate_survives_fusion() {
+        let id = CodeChunk::generate_id("/tmp/a.rs", 10, "foo");
+        let sparse = vec![make_sparse(&id, "/tmp/a.rs", "foo", 0)];
+        let config = HybridSearchConfig::default();
+
+        let fused = HybridSearchService::fuse(Vec::new(), sparse, &config, 10);
+
+        assert_eq!(fused.len(), 1, "纯 BM25 命中不应被丢弃");
+        let c = &fused[0];
+        assert_eq!(c.snippet_id, id);
+        assert_eq!(c.source, CandidateSource::SparseOnly);
+        assert_eq!(c.file_path, "/tmp/a.rs");
+        assert_eq!(c.symbol_name, "foo");
+        assert_eq!(c.language, "rust");
+        assert_eq!(c.line_start, 0);
+        assert_eq!(c.line_end, 0);
+        assert!(c.code_block.is_empty());
+        // 没有正文 ⇒ 不施加短代码惩罚，分数就是未惩罚的 1/(k+rank+1)
+        let expected = 1.0 / (config.rrf_k + 0.0 + 1.0);
+        assert!((c.final_score - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fused_ids_align_and_scores_sum() {
+        let dense = vec![make_dense("/tmp/a.rs", "foo", 10, 20)];
+        let id = CodeChunk::generate_id("/tmp/a.rs", 10, "foo");
+        let sparse = vec![make_sparse(&id, "/tmp/a.rs", "foo", 10)];
+        let config = HybridSearchConfig::default();
+
+        let fused = HybridSearchService::fuse(dense, sparse, &config, 10);
+
+        assert_eq!(fused.len(), 1, "两个通道的 id 必须对齐为同一条候选");
+        let c = &fused[0];
+        assert_eq!(c.snippet_id, id);
+        assert_eq!(c.source, CandidateSource::Fused);
+        let expected = 1.0 / (config.rrf_k + 1.0) + 1.0 / (config.rrf_k + 1.0);
+        assert!((c.final_score - expected).abs() < 1e-9);
+        assert_eq!(c.line_start, 10);
+        assert_eq!(c.line_end, 20);
+        assert_eq!(c.language, "rust");
+        assert!(!c.code_block.is_empty());
+    }
+
+    #[test]
+    fn dense_only_candidate_keeps_real_line_info() {
+        let dense = vec![make_dense("/tmp/a.rs", "foo", 5, 9)];
+        let config = HybridSearchConfig::default();
+
+        let fused = HybridSearchService::fuse(dense, Vec::new(), &config, 10);
+
+        assert_eq!(fused.len(), 1);
+        let c = &fused[0];
+        assert_eq!(c.source, CandidateSource::DenseOnly);
+        assert_eq!(c.snippet_id, CodeChunk::generate_id("/tmp/a.rs", 5, "foo"));
+        assert_eq!(c.line_start, 5);
+        assert_eq!(c.line_end, 9);
+        assert_eq!(c.language, "rust");
     }
 }
