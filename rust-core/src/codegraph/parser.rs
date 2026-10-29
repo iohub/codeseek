@@ -12,6 +12,13 @@ use crate::codegraph::graph::CodeGraph;
 use crate::codegraph::treesitter::TreeSitterParser;
 use crate::detector;
 
+/// 全仓函数名索引：函数名 -> 函数信息。
+///
+/// 每轮调用关系分析 pass 开始前一次性预建（见 `_build_function_name_index`），
+/// 把原本"每个 FunctionCall 符号都遍历全部文件 × 全部函数"的 O(calls × N_total)
+/// 降为 O(1) 查询。
+type FunctionNameIndex<'a> = HashMap<&'a str, &'a FunctionInfo>;
+
 /// 代码解析器，负责解析源代码文件并提取函数调用关系
 pub struct CodeParser {
     /// 文件路径 -> 函数列表映射
@@ -126,6 +133,12 @@ impl CodeParser {
         // 移除旧的实体和函数
         self._remove_file_entities(file_path, entity_graph, call_graph);
 
+        // 关键：把本次解析出的函数写回 parser 自己的索引，与 parse_file 的数据源保持一致。
+        // `_analyze_file_calls` / `_update_snippet_index` 都依赖 file_functions 才能拿到
+        // 当前文件刚生成的函数（否则 caller 永远解析不到、增量刷新会丢调用边）。
+        // functions 随后会被 move 进 call_graph，所以这里必须先 clone。
+        self.file_functions.insert(file_path.clone(), functions.clone());
+
         // 添加到图中
         let class_ids: Vec<Uuid> = classes.iter().map(|c| c.id).collect();
         let function_ids: Vec<Uuid> = functions.iter().map(|f| f.id).collect();
@@ -139,7 +152,7 @@ impl CodeParser {
         }
 
         // 分析调用关系
-        self._analyze_file_calls(file_path, &function_ids, call_graph)?;
+        self._analyze_file_calls(file_path, call_graph)?;
 
         // 更新索引
         self.file_index.rebuild_for_file(file_path, class_ids.clone(), function_ids.clone());
@@ -209,11 +222,19 @@ impl CodeParser {
     fn _analyze_file_calls(
         &self,
         file_path: &PathBuf,
-        function_ids: &[Uuid],
         call_graph: &mut PetCodeGraph,
     ) -> Result<(), String> {
         let symbols = self.ts_parser.parse_file(file_path)
             .map_err(|e| format!("Failed to parse file for call analysis: {:?}", e))?;
+
+        // 一次性取本文件函数列表（refresh_file 已在调用本方法前写回 file_functions）。
+        // 之后所有 caller/callee 查找都只在这一个切片上做，复杂度 O(calls × k)，
+        // 不再出现原来 O(calls × k × N_total) 的全仓嵌套扫描。
+        let funcs: &[FunctionInfo] = self
+            .file_functions
+            .get(file_path)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
 
         for symbol in symbols {
             let symbol_guard = symbol.read();
@@ -224,11 +245,11 @@ impl CodeParser {
                 let call_line = symbol_ref.full_range().start_point.row + 1;
 
                 // 查找调用者函数
-                if let Some(caller_id) = self._find_caller_function(file_path, call_line, function_ids) {
+                if let Some(caller_id) = self._find_caller_function(file_path, call_line, funcs) {
                     // 查找被调用函数（先在本文件，再全局）
-                    if let Some(callee_id) = self._find_callee_function(call_name, function_ids, call_graph) {
+                    if let Some(callee_id) = self._find_callee_function(call_name, funcs, call_graph) {
                         let relation = CallRelation {
-                            caller_id: *caller_id,
+                            caller_id,
                             callee_id,
                             caller_name: "".to_string(), // 会在add_call_relation中填充
                             callee_name: call_name.to_string(),
@@ -242,7 +263,7 @@ impl CodeParser {
                         }
                     } else {
                         // 未解析的调用
-                        self._handle_unresolved_call(caller_id, call_name, file_path, call_line, call_graph);
+                        self._handle_unresolved_call(&caller_id, call_name, file_path, call_line, call_graph);
                     }
                 }
             }
@@ -252,42 +273,33 @@ impl CodeParser {
     }
 
     /// 查找调用者函数
-    fn _find_caller_function<'a>(&self, file_path: &PathBuf, call_line: usize, function_ids: &'a [Uuid]) -> Option<&'a Uuid> {
-        // 根据行号范围查找包含调用行的函数
-        for function_id in function_ids {
-            if let Some(function) = self._get_function_by_id(function_id) {
-                if function.file_path == *file_path && 
-                   call_line >= function.line_start && 
-                   call_line <= function.line_end {
-                    return Some(function_id);
-                }
+    ///
+    /// 只在当前文件的函数切片上单趟扫描（原实现逐个 id 走全仓扫描，O(k × N_total)）。
+    /// 保持"按切片顺序第一个命中即返回"的语义 —— 不做排序/二分，以免改变嵌套函数
+    /// 场景下 caller 的归属结果。
+    fn _find_caller_function(
+        &self,
+        file_path: &PathBuf,
+        call_line: usize,
+        functions: &[FunctionInfo],
+    ) -> Option<Uuid> {
+        for function in functions {
+            if function.file_path == *file_path
+                && call_line >= function.line_start
+                && call_line <= function.line_end
+            {
+                return Some(function.id);
             }
         }
         None
     }
-
-    /// 根据ID获取函数信息
-    fn _get_function_by_id(&self, function_id: &Uuid) -> Option<&FunctionInfo> {
-        for (_file_path, functions) in &self.file_functions {
-            for function in functions {
-                if function.id == *function_id {
-                    return Some(function);
-                }
-            }
-        }
-        None
-    }
-
-
 
     /// 查找被调用函数
-    fn _find_callee_function(&self, call_name: &str, function_ids: &[Uuid], call_graph: &PetCodeGraph) -> Option<Uuid> {
-        // 先在本文件查找
-        for &func_id in function_ids {
-            if let Some(func) = call_graph.get_function_by_id(&func_id) {
-                if func.name == call_name {
-                    return Some(func_id);
-                }
+    fn _find_callee_function(&self, call_name: &str, functions: &[FunctionInfo], call_graph: &PetCodeGraph) -> Option<Uuid> {
+        // 先在本文件查找（按切片顺序 first-wins，与原 function_ids 顺序一致）
+        for function in functions {
+            if function.name == call_name {
+                return Some(function.id);
             }
         }
 
@@ -347,6 +359,9 @@ impl CodeParser {
         // 清理索引
         self.file_index.remove_file(file_path);
         self.snippet_index.clear_file_cache(file_path);
+        // 必须同时清除本文件的函数索引：调用关系分析现在直接依赖 file_functions，
+        // 残留的陈旧条目会产生"幽灵 caller"（指向已从图中移除的函数）。
+        self.file_functions.remove(file_path);
     }
 
     /// 更新代码片段索引
@@ -378,13 +393,26 @@ impl CodeParser {
         }
 
         // 为函数添加代码片段
+        // 从本文件的函数索引一次性构造 id -> 行范围（O(k)），取代原来"每个 id 全仓扫描"
+        // 的 O(k × N_total)。行为保持不变：只有 id 命中时才 add_snippet。
+        let function_lines: HashMap<Uuid, (usize, usize)> = self
+            .file_functions
+            .get(file_path)
+            .map(|funcs| {
+                funcs
+                    .iter()
+                    .map(|function| (function.id, (function.line_start, function.line_end)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         for &function_id in function_ids {
-            if let Some(function) = self._get_function_by_id(&function_id) {
-                let snippet_content = self._extract_code_snippet(&lines, function.line_start, function.line_end);
+            if let Some((line_start, line_end)) = function_lines.get(&function_id) {
+                let snippet_content = self._extract_code_snippet(&lines, *line_start, *line_end);
                 let snippet_info = crate::codegraph::types::SnippetInfo {
                     file_path: file_path.clone(),
-                    line_start: function.line_start,
-                    line_end: function.line_end,
+                    line_start: *line_start,
+                    line_end: *line_end,
                     cached_content: Some(snippet_content),
                 };
                 self.snippet_index.add_snippet(function_id, snippet_info);
@@ -1054,12 +1082,34 @@ impl CodeParser {
         }
     }
 
+    /// 预建全仓函数名索引（每轮调用关系分析 pass 只构建一次）
+    ///
+    /// first-wins 语义与现状等价：原 `_find_function_by_name_global` 遍历的是
+    /// `HashMap<PathBuf, Vec<FunctionInfo>>`，同名函数存在多个候选时返回哪一个取决于
+    /// HashMap 的迭代顺序 —— 本身就是不确定的，所以这里不要求稳定顺序，只做
+    /// "已存在的键不覆盖"（`or_insert`）以保持"任意命中一个"的既有行为。
+    fn _build_function_name_index(&self) -> FunctionNameIndex<'_> {
+        let total_functions: usize = self.file_functions.values().map(|funcs| funcs.len()).sum();
+        let mut index: FunctionNameIndex<'_> = HashMap::with_capacity(total_functions);
+        for functions in self.file_functions.values() {
+            for function in functions {
+                index.entry(function.name.as_str()).or_insert(function);
+            }
+        }
+        index
+    }
+
     /// 分析调用关系 
     fn _analyze_call_relations(&self, code_graph: &mut CodeGraph) {
+        // 预建一次名称索引：原实现在每个 FunctionCall 符号上都调用
+        // `_find_function_by_name_global` 做全仓双重扫描，整体 O(calls × N_total)，
+        // 是大仓库全量建索引变慢的主要原因之一。
+        let name_index = self._build_function_name_index();
+
         // 使用TreeSitter解析器分析每个文件的调用关系
         for (file_path, functions) in &self.file_functions {
             if let Ok(symbols) = self.ts_parser.parse_file(file_path) {
-                self._analyze_file_call_relations(&symbols, functions, code_graph);
+                self._analyze_file_call_relations(&symbols, functions, code_graph, &name_index);
             } else {
                 warn!("Failed to parse file for call analysis: {}", file_path.display());
             }
@@ -1071,7 +1121,8 @@ impl CodeParser {
         &self, 
         symbols: &[crate::codegraph::treesitter::AstSymbolInstanceArc], 
         functions: &[FunctionInfo], 
-        code_graph: &mut CodeGraph
+        code_graph: &mut CodeGraph,
+        name_index: &FunctionNameIndex<'_>,
     ) {
         // 分析每个AST符号
         for symbol in symbols {
@@ -1104,7 +1155,7 @@ impl CodeParser {
                     }
                 }
                 // 2. 跨文件查找被调用函数
-                if let Some(callee) = self._find_function_by_name_global(call_name) {
+                if let Some(callee) = self._find_function_by_name_global(name_index, call_name) {
                     // 查找调用者函数（通过分析调用位置）
                     if let Some(caller_idx) = self._find_caller_function_by_line(call_file, call_line, functions) {
                         let caller = &functions[caller_idx];
@@ -1183,34 +1234,27 @@ impl CodeParser {
         }
     }
     
-    /// 根据函数名查找函数
-    fn _find_function_by_name(&self, name: &str) -> Option<&FunctionInfo> {
-        for (_file_path, functions) in &self.file_functions {
-            for function in functions {
-                if function.name == name {
-                    return Some(function);
-                }
-            }
-        }
-        None
+    /// 根据函数名查找函数（在预建名称索引中 O(1) 查找）
+    ///
+    /// 命中语义与原全仓扫描等价：同名多候选时返回索引中已有的那一个（first-wins，
+    /// 见 `_build_function_name_index` 的注释）；原实现依赖 HashMap 迭代顺序，本来
+    /// 就不保证稳定顺序，因此这里同样不引入排序。
+    fn _find_function_by_name<'a>(&self, name_index: &FunctionNameIndex<'a>, name: &str) -> Option<&'a FunctionInfo> {
+        name_index.get(name).copied()
     }
 
-    /// 全局查找函数名（跨文件）
-    fn _find_function_by_name_global(&self, name: &str) -> Option<FunctionInfo> {
-        for (_file_path, functions) in &self.file_functions {
-            for function in functions {
-                if function.name == name {
-                    return Some(function.clone());
-                }
-            }
-        }
-        None
+    /// 全局查找函数名（跨文件），从预建名称索引取值
+    fn _find_function_by_name_global(&self, name_index: &FunctionNameIndex<'_>, name: &str) -> Option<FunctionInfo> {
+        self._find_function_by_name(name_index, name).cloned()
     }
 
     /// 分析petgraph调用关系（完整实现）
     fn _analyze_petgraph_call_relations(&self, code_graph: &mut PetCodeGraph) {
         info!("Starting petgraph call relation analysis for {} files", self.file_functions.len());
         
+        // 预建一次名称索引，避免 `_resolve_callee_function` 在每个调用点上做全仓双重扫描
+        let name_index = self._build_function_name_index();
+
         let mut total_calls = 0;
         let mut resolved_calls = 0;
         let mut unresolved_calls = 0;
@@ -1228,7 +1272,8 @@ impl CodeParser {
                         &symbols, 
                         functions, 
                         code_graph,
-                        file_path
+                        file_path,
+                        &name_index
                     );
                     total_calls += file_calls.total;
                     resolved_calls += file_calls.resolved;
@@ -1253,6 +1298,7 @@ impl CodeParser {
         functions: &[FunctionInfo],
         code_graph: &mut PetCodeGraph,
         file_path: &PathBuf,
+        name_index: &FunctionNameIndex<'_>,
     ) -> CallAnalysisStats {
         let mut stats = CallAnalysisStats::default();
         
@@ -1276,7 +1322,8 @@ impl CodeParser {
                         call_name, 
                         file_path, 
                         functions, 
-                        code_graph
+                        code_graph,
+                        name_index
                     ) {
                         // 创建已解析的调用关系
                         let relation = CallRelation {
@@ -1320,6 +1367,7 @@ impl CodeParser {
         _current_file: &PathBuf,
         current_functions: &[FunctionInfo],
         code_graph: &PetCodeGraph,
+        name_index: &FunctionNameIndex<'_>,
     ) -> Option<FunctionInfo> {
         // 1. 先在本文件查找
         for function in current_functions {
@@ -1328,8 +1376,8 @@ impl CodeParser {
             }
         }
         
-        // 2. 在全局函数注册表中查找
-        if let Some(global_func) = self._find_function_by_name_global(call_name) {
+        // 2. 在全局函数名索引（本次 pass 预建）中查找
+        if let Some(global_func) = self._find_function_by_name_global(name_index, call_name) {
             return Some(global_func);
         }
         
@@ -1779,5 +1827,132 @@ pub fn new_function() {
 
         // 清理
         temp_dir.close().unwrap();
+    }
+
+    /// 回归测试：增量刷新（refresh_file）必须保留调用边与函数级代码片段。
+    ///
+    /// 历史缺陷：`refresh_file` 全程不写 `self.file_functions`，而
+    /// `_find_caller_function` / `_update_snippet_index` 都依赖它，于是
+    /// "当前文件刚生成的函数 id"必然查不到 → caller 为 None → 调用边被静默丢弃，
+    /// 函数片段也不会写入。此处同时锁住这两条链路。
+    #[test]
+    fn test_refresh_file_keeps_call_edges_and_function_snippets() {
+        let mut parser = CodeParser::new();
+        let temp_dir = tempdir().unwrap();
+        let test_file = temp_dir.path().join("calls.rs");
+
+        // 一个含真实调用关系的 Rust 文件：compute 调用 helper
+        let rust_code = r#"
+pub fn helper(x: i32) -> i32 {
+    x + 1
+}
+
+pub fn compute(y: i32) -> i32 {
+    helper(y)
+}
+"#;
+        fs::write(&test_file, rust_code).unwrap();
+
+        // 先做一次全量解析，让 file_functions/snippet_index 处于真实使用状态
+        parser
+            .parse_file(&test_file)
+            .expect("parse_file should succeed");
+
+        // 再走增量刷新链路：refresh_file -> _analyze_file_calls / _update_snippet_index
+        let mut entity_graph = EntityGraph::new();
+        let mut call_graph = PetCodeGraph::new();
+        parser
+            .refresh_file(&test_file, &mut entity_graph, &mut call_graph)
+            .expect("refresh_file should succeed");
+
+        let functions = parser
+            .file_functions
+            .get(&test_file)
+            .expect("refresh_file must populate file_functions for the refreshed file");
+        assert_eq!(
+            functions.len(),
+            2,
+            "stale function entries must not survive refresh (expected exactly helper + compute)"
+        );
+
+        let find_id = |name: &str| -> Uuid {
+            functions
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("function '{}' missing after refresh", name))
+                .id
+        };
+        let helper_id = find_id("helper");
+        let compute_id = find_id("compute");
+
+        // file_functions 与 call_graph 必须是同一批函数（无幽灵条目）
+        for function in functions {
+            assert!(
+                call_graph.get_function_by_id(&function.id).is_some(),
+                "file_functions holds a function absent from call_graph: {}",
+                function.name
+            );
+        }
+
+        // 1) 刷新后必须产生调用边：compute -> helper
+        let callees = call_graph.get_callees(&compute_id);
+        assert!(
+            !callees.is_empty(),
+            "regression: refresh_file lost call edges (no callee found for 'compute')"
+        );
+        assert!(
+            callees.iter().any(|(func, _)| func.name == "helper"),
+            "callee of 'compute' should be 'helper'"
+        );
+
+        let callers = call_graph.get_callers(&helper_id);
+        assert!(
+            !callers.is_empty(),
+            "regression: get_callers('helper') is empty after refresh"
+        );
+        assert!(
+            callers.iter().any(|(func, _)| func.name == "compute"),
+            "caller of 'helper' should be 'compute'"
+        );
+
+        let stats = call_graph.get_stats();
+        assert!(
+            stats.resolved_calls > 0,
+            "regression: resolved_calls should be > 0 after refresh, got {}",
+            stats.resolved_calls
+        );
+
+        // 2) 刷新后函数级片段可取到且缓存内容非空
+        for function in functions {
+            let snippet_info = parser
+                .snippet_index
+                .get_snippet_info(&function.id)
+                .unwrap_or_else(|| panic!("no snippet info for function {}", function.name));
+            let content = snippet_info
+                .cached_content
+                .as_ref()
+                .unwrap_or_else(|| panic!("no cached content for function {}", function.name));
+            assert!(
+                !content.is_empty(),
+                "empty snippet content for function {}",
+                function.name
+            );
+            assert_eq!(snippet_info.file_path, test_file);
+        }
+
+        // helper 的片段应包含其函数体
+        let helper_snippet = parser
+            .snippet_index
+            .get_snippet_info(&helper_id)
+            .expect("helper snippet should exist");
+        let helper_content = helper_snippet
+            .cached_content
+            .as_ref()
+            .expect("helper snippet content should be cached");
+        assert!(
+            helper_content.contains("x + 1"),
+            "helper snippet content mismatch: {:?}",
+            helper_content
+        );
     }
 }
