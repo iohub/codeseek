@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::fs;
 use uuid::Uuid;
@@ -18,6 +18,20 @@ use crate::detector;
 /// 把原本"每个 FunctionCall 符号都遍历全部文件 × 全部函数"的 O(calls × N_total)
 /// 降为 O(1) 查询。
 type FunctionNameIndex<'a> = HashMap<&'a str, &'a FunctionInfo>;
+
+/// 函数去重键：`(文件路径, 起始行, 结束行)` 三元组。
+///
+/// 与增量合并（`_merge_new_functions` / `_merge_new_functions_to_code_graph`）
+/// 原有的判定条件**完全一致**，只是把它从"每个候选函数都线性扫一遍全图"改成
+/// "一次遍历预建集合 + O(1) 查表"。
+///
+/// 这里用 **owned `PathBuf`** 而不是 `&'a Path`：`seen` 需要在整个合并循环内存活，
+/// 而循环体内要 `code_graph.add_function(...)` 可变借用同一个图；若 `seen` 借用了
+/// 图内节点权重（`code_graph.functions.values()` / `graph.node_weights()`），
+/// 会与可变借用冲突。借用 `self.file_functions` 一侧不冲突，但同一个集合必须
+/// 用统一的所有权形式，所以两边都克隆 PathBuf —— 成本 O(路径长度)，换来
+/// 由 O(k_new × N_total) 降到 O(k_new + N_total)。
+type FunctionKey = (PathBuf, usize, usize);
 
 /// 代码解析器，负责解析源代码文件并提取函数调用关系
 pub struct CodeParser {
@@ -943,18 +957,31 @@ impl CodeParser {
     }
 
     /// 合并新解析的函数到现有CodeGraph中
+    ///
+    /// 复杂度：原实现每个待合并函数都线性扫一遍 `code_graph.functions`，
+    /// 即 O(k_new × N_total)（大仓库二次/增量构建时为平方级）；
+    /// 现在改为一次遍历预建 `(file_path, line_start, line_end)` 去重集合，
+    /// 循环内 O(1) 查表，整体 O(k_new + N_total)。去重键与判定条件未变。
     fn _merge_new_functions_to_code_graph(&self, code_graph: &mut CodeGraph) {
-        for (_file_path, functions) in &self.file_functions {
+        // 一次性遍历现有图构造去重集合（原实现是在每个候选函数的循环内做全图扫描）
+        let mut seen: HashSet<FunctionKey> = code_graph
+            .functions
+            .values()
+            .map(|existing_func| {
+                (existing_func.file_path.clone(), existing_func.line_start, existing_func.line_end)
+            })
+            .collect();
+
+        for functions in self.file_functions.values() {
             for function in functions {
+                let key = (function.file_path.clone(), function.line_start, function.line_end);
+
                 // 检查函数是否已存在（基于文件路径和行号）
-                let exists = code_graph.functions.values().any(|existing_func| {
-                    existing_func.file_path == function.file_path &&
-                    existing_func.line_start == function.line_start &&
-                    existing_func.line_end == function.line_end
-                });
-                
-                if !exists {
+                if !seen.contains(&key) {
                     code_graph.add_function(function.clone());
+                    // 必须回填：原实现里 add_function 会立刻改变图内容，
+                    // 因此同批次内的重复三元组会被判为 exists 而只添加一次。
+                    seen.insert(key);
                 }
             }
         }
@@ -1065,18 +1092,31 @@ impl CodeParser {
     }
 
     /// 合并新解析的函数到现有图中
+    ///
+    /// 复杂度：与 `_merge_new_functions_to_code_graph` 同一缺陷 ——
+    /// 原实现对每个待合并函数调用一次 `graph.node_weights()` 线性扫描，
+    /// 即 O(k_new × N_total)；现在一次遍历预建去重集合后 O(1) 查表，
+    /// 整体 O(k_new + N_total)。去重键 `(file_path, line_start, line_end)` 未变。
     fn _merge_new_functions(&self, code_graph: &mut PetCodeGraph) {
-        for (_file_path, functions) in &self.file_functions {
+        // 一次性遍历现有图构造去重集合（原实现是在每个候选函数的循环内做全图扫描）
+        let mut seen: HashSet<FunctionKey> = code_graph
+            .graph
+            .node_weights()
+            .map(|existing_func| {
+                (existing_func.file_path.clone(), existing_func.line_start, existing_func.line_end)
+            })
+            .collect();
+
+        for functions in self.file_functions.values() {
             for function in functions {
+                let key = (function.file_path.clone(), function.line_start, function.line_end);
+
                 // 检查函数是否已存在（基于文件路径和行号）
-                let exists = code_graph.graph.node_weights().any(|existing_func| {
-                    existing_func.file_path == function.file_path &&
-                    existing_func.line_start == function.line_start &&
-                    existing_func.line_end == function.line_end
-                });
-                
-                if !exists {
+                if !seen.contains(&key) {
                     code_graph.add_function(function.clone());
+                    // 必须回填：原实现里 add_function 会立刻改变图内容，
+                    // 因此同批次内的重复三元组会被判为 exists 而只添加一次。
+                    seen.insert(key);
                 }
             }
         }
@@ -1953,6 +1993,173 @@ pub fn compute(y: i32) -> i32 {
             helper_content.contains("x + 1"),
             "helper snippet content mismatch: {:?}",
             helper_content
+        );
+    }
+
+    /// 回归测试：增量合并必须按 `(file_path, line_start, line_end)` 三元组去重，
+    /// 且**同批次内的重复项只允许添加一次**。
+    ///
+    /// 背景：`_merge_new_functions` / `_merge_new_functions_to_code_graph` 从
+    /// "每个候选函数线性扫全图"改为"预建 HashSet + O(1) 查表"后，如果忘记在
+    /// `add_function` 之后把 key 回填进集合，同批重复的三元组就会被重复插入
+    /// （原实现因为每次都是实时扫描图内容，天然不会重复）。
+    /// 本测试用"两条完全相同的三元组 + 一条不同的"锁住这一语义。
+    #[test]
+    fn test_merge_new_functions_dedupes_by_file_and_line() {
+        let shared_file = PathBuf::from("merge_target.rs");
+
+        // 现有图中已有的函数 f：(merge_target.rs, 10, 20)
+        let existing = FunctionInfo {
+            id: Uuid::new_v4(),
+            name: "existing".to_string(),
+            file_path: shared_file.clone(),
+            line_start: 10,
+            line_end: 20,
+            namespace: "global".to_string(),
+            language: "rust".to_string(),
+            signature: Some("fn existing()".to_string()),
+        };
+
+        // 本批次待合并：dup_a / dup_b 与 existing 三元组完全一致（id 不同，模拟同批重复），
+        // unique 的三元组不同，应当被添加。
+        let dup_a = FunctionInfo {
+            id: Uuid::new_v4(),
+            name: "dup_a".to_string(),
+            file_path: shared_file.clone(),
+            line_start: 10,
+            line_end: 20,
+            namespace: "global".to_string(),
+            language: "rust".to_string(),
+            signature: Some("fn dup_a()".to_string()),
+        };
+        let dup_b = FunctionInfo {
+            id: Uuid::new_v4(),
+            name: "dup_b".to_string(),
+            file_path: shared_file.clone(),
+            line_start: 10,
+            line_end: 20,
+            namespace: "global".to_string(),
+            language: "rust".to_string(),
+            signature: Some("fn dup_b()".to_string()),
+        };
+        let unique = FunctionInfo {
+            id: Uuid::new_v4(),
+            name: "unique".to_string(),
+            file_path: shared_file.clone(),
+            line_start: 30,
+            line_end: 40,
+            namespace: "global".to_string(),
+            language: "rust".to_string(),
+            signature: Some("fn unique()".to_string()),
+        };
+        // pair_c / pair_d 的三元组 (50, 60) 在现有图中**不存在**，且本批次内出现两次。
+        // 这一组才是"同批重复只添加一次"语义的关键：若忘记在 add_function 后回填 seen，
+        // 两个都会被插入（原实现因为每次实时扫描图内容，第二个必然被判为 exists）。
+        let pair_c = FunctionInfo {
+            id: Uuid::new_v4(),
+            name: "pair_c".to_string(),
+            file_path: shared_file.clone(),
+            line_start: 50,
+            line_end: 60,
+            namespace: "global".to_string(),
+            language: "rust".to_string(),
+            signature: Some("fn pair_c()".to_string()),
+        };
+        let pair_d = FunctionInfo {
+            id: Uuid::new_v4(),
+            name: "pair_d".to_string(),
+            file_path: shared_file.clone(),
+            line_start: 50,
+            line_end: 60,
+            namespace: "global".to_string(),
+            language: "rust".to_string(),
+            signature: Some("fn pair_d()".to_string()),
+        };
+
+        // ---------- PetCodeGraph 版本 ----------
+        let mut parser = CodeParser::new();
+        parser.file_functions.insert(
+            shared_file.clone(),
+            vec![
+                dup_a.clone(),
+                dup_b.clone(),
+                unique.clone(),
+                pair_c.clone(),
+                pair_d.clone(),
+            ],
+        );
+
+        let mut pet_graph = PetCodeGraph::new();
+        pet_graph.add_function(existing.clone());
+        assert_eq!(pet_graph.graph.node_count(), 1);
+        assert_eq!(pet_graph.get_stats().total_functions, 1);
+
+        parser._merge_new_functions(&mut pet_graph);
+
+        // 合并后应只有 3 个函数：existing(10,20) + unique(30,40) + pair_{c,d} 中的一个(50,60)。
+        // dup_a / dup_b 都命中现有图的 (10,20) 被跳过；pair_c / pair_d 只允许进一个。
+        let count_pet = |start: usize, end: usize| -> usize {
+            pet_graph
+                .graph
+                .node_weights()
+                .filter(|f| f.file_path == shared_file && f.line_start == start && f.line_end == end)
+                .count()
+        };
+        assert_eq!(
+            pet_graph.graph.node_count(),
+            3,
+            "regression: same-batch duplicates were inserted (expected +2 functions only: unique and one of pair_c/pair_d)"
+        );
+        assert_eq!(pet_graph.get_stats().total_functions, 3);
+        assert_eq!(
+            count_pet(10, 20),
+            1,
+            "de-dup key must stay (file_path, line_start, line_end), not id/name"
+        );
+        assert_eq!(
+            count_pet(50, 60),
+            1,
+            "regression: seen backfill missing -> same-batch duplicate (50,60) inserted twice"
+        );
+        let names: Vec<&str> = pet_graph.graph.node_weights().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"existing"), "pre-existing function must survive merge");
+        assert!(names.contains(&"unique"), "new function must be merged");
+        assert_eq!(
+            usize::from(names.contains(&"pair_c")) + usize::from(names.contains(&"pair_d")),
+            1,
+            "exactly one of the same-batch duplicates (50,60) must be inserted"
+        );
+
+        // ---------- CodeGraph 版本 ----------
+        let mut code_graph = CodeGraph::new();
+        code_graph.add_function(existing.clone());
+        assert_eq!(code_graph.functions.len(), 1);
+        assert_eq!(code_graph.stats.total_functions, 1);
+
+        parser._merge_new_functions_to_code_graph(&mut code_graph);
+
+        let count_cg = |start: usize, end: usize| -> usize {
+            code_graph
+                .functions
+                .values()
+                .filter(|f| f.file_path == shared_file && f.line_start == start && f.line_end == end)
+                .count()
+        };
+        assert_eq!(
+            code_graph.functions.len(),
+            3,
+            "regression: same-batch duplicates were inserted into CodeGraph (expected +2 functions only)"
+        );
+        assert_eq!(code_graph.stats.total_functions, 3);
+        assert_eq!(
+            count_cg(10, 20),
+            1,
+            "CodeGraph de-dup key must stay (file_path, line_start, line_end)"
+        );
+        assert_eq!(
+            count_cg(50, 60),
+            1,
+            "regression: seen backfill missing in CodeGraph merge -> (50,60) inserted twice"
         );
     }
 }
