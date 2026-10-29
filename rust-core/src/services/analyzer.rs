@@ -21,6 +21,13 @@ impl CodeAnalyzer {
         }
     }
 
+    /// 设置"强制全量重建"开关（对应 CLI 的 `--force-reindex`），转发给内部的 `CodeParser`。
+    ///
+    /// 默认关闭；`analyze_directory` 因此照旧走增量缓存路径，既有调用方行为不变。
+    pub fn set_force_reindex(&mut self, force_reindex: bool) {
+        self.parser.set_force_reindex(force_reindex);
+    }
+
     /// 分析目录并构建代码图
     pub fn analyze_directory(&mut self, dir: &Path) -> Result<&CodeGraph, String> {
         info!("Starting code graph analysis for directory: {}", dir.display());

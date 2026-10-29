@@ -24,6 +24,13 @@ pub struct Cli {
     #[clap(short, long, action)]
     pub verbose: bool,
 
+    /// 忽略所有已持久化的缓存（图缓存 + 文件 MD5 哈希），强制全量重新分析后重新落盘。
+    ///
+    /// 这是图缓存 schema 版本门禁的**逃生口**：当缓存被判定为失效、或怀疑缓存与源码
+    /// 不一致时，用 `codeseek --force-reindex init` 保证一次干净的从零构建。
+    #[clap(long, action)]
+    pub force_reindex: bool,
+
     #[clap(subcommand)]
     pub command: Commands,
 }

@@ -67,12 +67,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let storage = Arc::new(StorageManager::new());
 
             // Try loading existing graph for incremental update
-            let existing_graph = storage.get_persistence().load_graph(&project_hash).ok().flatten();
+            // `--force-reindex`：跳过已有图缓存，本次一定是干净的从零构建。
+            let existing_graph = if cli.force_reindex {
+                info!("--force-reindex 已置位：跳过已有图缓存，强制全量重建");
+                None
+            } else {
+                storage.get_persistence().load_graph(&project_hash).ok().flatten()
+            };
 
             // Phase 1: Parse files (0→70%)
             let pb = ProgressBar::start("Scanning & parsing source files");
             pb.set_pct(5);
             let mut analyzer = CodeAnalyzer::new();
+            // 把 `--force-reindex` 传进解析器：三个缓存读取点（已有图 / 文件 MD5 哈希）
+            // 一律返回"缓存 miss"，保证本次全量重新解析。
+            analyzer.set_force_reindex(cli.force_reindex);
             let result = analyzer.analyze_directory(&project_root);
             let code_graph = match result {
                 Ok(g) => g,

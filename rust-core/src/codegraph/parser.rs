@@ -45,6 +45,13 @@ pub struct CodeParser {
     file_index: FileIndex,
     /// 代码片段索引
     snippet_index: SnippetIndex,
+    /// 是否忽略所有持久化缓存、强制全量重建（由 CLI 的 `--force-reindex` 置位）。
+    ///
+    /// 只有这一个布尔开关，默认 `false`，因此既有行为完全不变；置位后
+    /// `_load_existing_graph` / `_load_existing_code_graph` / `_load_file_hashes`
+    /// 三个缓存读取点一律返回"缓存 miss"，于是 `build_code_graph` /
+    /// `build_petgraph_code_graph` 必然重新解析每个文件，并在第 8 步重新写回哈希。
+    force_reindex: bool,
 }
 
 impl CodeParser {
@@ -55,7 +62,22 @@ impl CodeParser {
             ts_parser: TreeSitterParser::new(),
             file_index: FileIndex::default(),
             snippet_index: SnippetIndex::default(),
+            force_reindex: false,
         }
+    }
+
+    /// 设置/清除"强制全量重建"开关（对应 CLI 的 `--force-reindex`）。
+    ///
+    /// 之所以做成方法而不是构造函数参数：`CodeParser` 被 `services::CodeAnalyzer`、
+    /// `codegraph::repository` 等多处构造，加参数会波及所有调用点；一个默认关闭的
+    /// setter 是改动面最小、又能让三个缓存读取点集中生效的方式。
+    pub fn set_force_reindex(&mut self, force_reindex: bool) {
+        self.force_reindex = force_reindex;
+    }
+
+    /// 当前是否处于强制全量重建模式。
+    pub fn force_reindex_enabled(&self) -> bool {
+        self.force_reindex
     }
 
     /// Check whether a JS file is obfuscated/compiled code.
@@ -896,6 +918,13 @@ impl CodeParser {
 
     /// 尝试从本地数据库加载现有的CodeGraph
     fn _load_existing_code_graph(&self, dir: &Path) -> Result<Option<CodeGraph>, String> {
+        // --force-reindex：一律报告"没有已有图"，于是 `build_code_graph` 走全量构建分支
+        // （`has_existing_data = false` → 不读哈希、不合并，直接用本次解析结果建图）。
+        if self.force_reindex {
+            info!("--force-reindex 已置位：跳过 CodeGraph 缓存，强制全量重建");
+            return Ok(None);
+        }
+
         use crate::storage::PersistenceManager;
         use md5;
         
@@ -989,6 +1018,13 @@ impl CodeParser {
 
     /// 尝试从本地数据库加载现有的图
     fn _load_existing_graph(&self, dir: &Path) -> Result<Option<PetCodeGraph>, String> {
+        // --force-reindex：一律报告"没有已有图"。这与"缓存版本不符 → Err → warn → Ok(None)"
+        // 走的是同一条失效路径，最终由 `build_petgraph_code_graph` 用 PetCodeGraph::new() 重建。
+        if self.force_reindex {
+            info!("--force-reindex 已置位：跳过 PetCodeGraph 缓存，强制全量重建");
+            return Ok(None);
+        }
+
         use crate::storage::PersistenceManager;
         
         // 使用项目路径作为项目ID
@@ -1009,6 +1045,13 @@ impl CodeParser {
 
     /// 加载文件哈希值
     fn _load_file_hashes(&self, dir: &Path) -> Result<HashMap<String, String>, String> {
+        // --force-reindex：返回空哈希表 → `_should_skip_file` 对每个文件都判定"需要重新解析"，
+        // 因此本次一定会完整解析目录，并在第 8 步 `_save_file_hashes` 写出全新的哈希。
+        if self.force_reindex {
+            info!("--force-reindex 已置位：跳过文件 MD5 哈希缓存，强制重新解析全部文件");
+            return Ok(HashMap::new());
+        }
+
         use crate::storage::PersistenceManager;
         use md5;
         

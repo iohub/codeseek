@@ -11,9 +11,19 @@ impl CodeSeekRunner {
     }
 
     pub async fn run(cli: Cli, _config: Option<Config>) -> Result<(), Box<dyn std::error::Error>> {
+        // `--force-reindex` 定义在 `Cli`（全局 flag）上，而下面的 `match cli.command`
+        // 会移动 `cli.command`，所以必须在 match 之前先把这个 bool 取出来。
+        let force_reindex = cli.force_reindex;
+
         match cli.command {
             Commands::Init { interactive: _ } => {
-                info!("init command - to be implemented in Phase 2");
+                // 真正的索引逻辑在 `src/main.rs` 的 `Commands::Init` 分支：
+                // 该 flag 经 `CodeAnalyzer::set_force_reindex` → `CodeParser::set_force_reindex`
+                // 让三个缓存读取点一律返回"缓存 miss"。
+                info!(
+                    "init command - to be implemented in Phase 2 (force_reindex: {})",
+                    force_reindex
+                );
                 Ok(())
             }
             Commands::Status { json: _ } => {

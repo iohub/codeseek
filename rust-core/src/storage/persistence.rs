@@ -8,6 +8,7 @@ use crate::storage::petgraph_storage::PetGraphStorageManager;
 use crate::cli::args::StorageMode;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 pub struct PersistenceManager {
     base_dir: PathBuf,
@@ -97,17 +98,51 @@ impl PersistenceManager {
         Ok(())
     }
 
+    /// `StorageMode::Both` 的缓存读取聚合逻辑（纯函数，便于脱离文件系统单测）。
+    ///
+    /// 原实现是：`match self.load_graph_binary(id) { Ok(graph) => Ok(graph), Err(_) => json }`，
+    /// 有两个问题：
+    /// 1. `Ok(graph)` 把 **`Ok(None)`（graph.bin 不存在）也当成命中直接返回**，
+    ///    于是"只有 graph.json"的缓存永远读不到；
+    /// 2. JSON 分支的 `Err` 原样上抛 —— 而 `GRAPH_SCHEMA_VERSION` 版本门禁正是以 `Err`
+    ///    表达"缓存失效"，上抛会让 `init` 变成致命失败而不是重建。
+    ///
+    /// 现在的语义（缓存问题绝不是致命错误）：
+    /// - binary 命中（`Ok(Some)`）→ 直接使用；
+    /// - binary 缺失（`Ok(None)`）或不可用（`Err`）→ 回退 JSON；
+    /// - JSON 也不可用 → **降级成 `Ok(None)`**（=缓存 miss，由
+    ///   `parser::_load_existing_graph` 触发全量重建），错误只落 warn 日志。
+    fn read_both_with_fallback(
+        load_binary: impl FnOnce() -> io::Result<Option<PetCodeGraph>>,
+        load_json: impl FnOnce() -> io::Result<Option<PetCodeGraph>>,
+    ) -> io::Result<Option<PetCodeGraph>> {
+        match load_binary() {
+            Ok(Some(graph)) => Ok(Some(graph)),
+            Ok(None) => load_json(),
+            Err(binary_err) => {
+                warn!("二进制图缓存不可用，回退 JSON 缓存：{}", binary_err);
+                match load_json() {
+                    Ok(graph) => Ok(graph),
+                    Err(json_err) => {
+                        warn!(
+                            "JSON 图缓存同样不可用（{}），按缓存失效处理并触发全量重建；原始二进制错误：{}",
+                            json_err, binary_err
+                        );
+                        Ok(None)
+                    }
+                }
+            }
+        }
+    }
+
     pub fn load_graph(&self, project_id: &str) -> io::Result<Option<PetCodeGraph>> {
         match self.storage_mode {
             StorageMode::Json => self.load_graph_json(project_id),
             StorageMode::Binary => self.load_graph_binary(project_id),
-            StorageMode::Both => {
-                // 优先尝试加载二进制格式（更快），如果失败则加载JSON格式
-                match self.load_graph_binary(project_id) {
-                    Ok(graph) => Ok(graph),
-                    Err(_) => self.load_graph_json(project_id),
-                }
-            },
+            StorageMode::Both => Self::read_both_with_fallback(
+                || self.load_graph_binary(project_id),
+                || self.load_graph_json(project_id),
+            ),
         }
     }
 
@@ -303,10 +338,11 @@ impl crate::storage::traits::GraphPersistence for PersistenceManager {
             StorageMode::Json => self.load_graph_json(project_id),
             StorageMode::Binary => self.load_graph_binary(project_id),
             StorageMode::Both => {
-                match self.load_graph_binary(project_id) {
-                    Ok(Some(graph)) => Ok(Some(graph)),
-                    _ => self.load_graph_json(project_id),
-                }
+                // 与固有方法收敛到同一套回退语义，避免两份实现分叉
+                Self::read_both_with_fallback(
+                    || self.load_graph_binary(project_id),
+                    || self.load_graph_json(project_id),
+                )
             },
         }
     }
@@ -371,4 +407,114 @@ impl crate::storage::traits::GraphPersistence for PersistenceManager {
     fn list_parsed_projects(&self) -> io::Result<Vec<crate::storage::persistence::ProjectRecord>> {
         Self::list_parsed_projects(self)
     }
-} 
+}
+
+#[cfg(test)]
+mod tests {
+    //! `StorageMode::Both` 回退语义的单测（纯函数，不碰文件系统）。
+    //!
+    //! 守住两条红线：
+    //! 1. graph.bin 缺失/不可用时必须回退 graph.json（原实现把 `Ok(None)` 当命中直接返回）；
+    //! 2. 两个缓存都不可用时只能降级成 `Ok(None)`（缓存 miss），**绝不把错误上抛成致命失败** ——
+    //!    `GRAPH_SCHEMA_VERSION` 版本门禁正是以 `Err` 表达"缓存失效"，全靠这条降级链生效。
+
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    fn dummy_graph(functions: usize) -> PetCodeGraph {
+        let mut graph = PetCodeGraph::new();
+        for index in 0..functions {
+            graph.add_function(crate::codegraph::types::FunctionInfo {
+                id: uuid::Uuid::new_v4(),
+                name: format!("fn_{index}"),
+                file_path: PathBuf::from("src/dummy.rs"),
+                line_start: index + 1,
+                line_end: index + 2,
+                namespace: "crate".to_string(),
+                language: "rust".to_string(),
+                signature: None,
+            });
+        }
+        graph
+    }
+
+    fn io_err(msg: &str) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, msg)
+    }
+
+    #[test]
+    fn test_both_binary_hit_skips_json() {
+        let json_called = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&json_called);
+
+        let result = PersistenceManager::read_both_with_fallback(
+            || Ok(Some(dummy_graph(2))),
+            move || {
+                flag.set(true);
+                Ok(Some(dummy_graph(9)))
+            },
+        )
+        .expect("binary 命中不应返回错误");
+
+        assert!(matches!(result, Some(graph) if graph.graph.node_count() == 2));
+        assert!(!json_called.get(), "binary 命中时不该再读 JSON 缓存");
+    }
+
+    #[test]
+    fn test_both_falls_back_when_binary_missing() {
+        // 这正是原实现的缺陷：graph.bin 不存在（Ok(None)）时旧代码会直接返回 None
+        let json_called = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&json_called);
+
+        let result = PersistenceManager::read_both_with_fallback(
+            || Ok(None),
+            move || {
+                flag.set(true);
+                Ok(Some(dummy_graph(3)))
+            },
+        )
+        .expect("回退 JSON 命中不应返回错误");
+
+        assert!(json_called.get(), "binary 缺失时必须回退 JSON 缓存");
+        assert!(matches!(result, Some(graph) if graph.graph.node_count() == 3));
+    }
+
+    #[test]
+    fn test_both_falls_back_when_binary_unusable() {
+        // 版本门禁/损坏文件都表现为 Err：必须回退而不是上抛
+        let result = PersistenceManager::read_both_with_fallback(
+            || Err(io_err("schema 版本不匹配")),
+            || Ok(Some(dummy_graph(1))),
+        )
+        .expect("binary Err + JSON 命中不应返回错误");
+
+        assert!(matches!(result, Some(graph) if graph.graph.node_count() == 1));
+    }
+
+    #[test]
+    fn test_both_missing_both_returns_none() {
+        let result = PersistenceManager::read_both_with_fallback(|| Ok(None), || Ok(None))
+            .expect("两个缓存都不存在时应为 Ok(None)（缓存 miss）");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_both_degrades_json_error_to_cache_miss() {
+        // 关键用例：两侧都是 Err（例如旧 bincode + 旧 JSON）也只能得到 Ok(None)，
+        // 上层 `_load_existing_graph` 据此走全量重建，绝不 panic、绝不上抛致命错误。
+        let result = PersistenceManager::read_both_with_fallback(
+            || Err(io_err("schema 版本不匹配")),
+            || Err(io_err("missing field `schema_version`")),
+        );
+
+        let graph = match result {
+            Ok(graph) => {
+                assert!(graph.is_none(), "两侧均不可用必须是 Ok(None)，而不是缓存数据");
+                graph
+            }
+            Err(e) => panic!("缓存不可用绝不该上抛错误，实际得到 Err: {e}"),
+        };
+        assert!(graph.is_none());
+    }
+}
