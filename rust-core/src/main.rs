@@ -2,6 +2,7 @@ use clap::Parser;
 use codeseek::cli::args::{Cli, Commands};
 use codeseek::config::Config;
 use codeseek::storage::lock::FileLock;
+use codeseek::storage::petgraph_storage::clamp_max_candidates;
 use codeseek::storage::StorageManager;
 use codeseek::codegraph::types::{PetCodeGraph, FunctionInfo};
 use codeseek::services::CodeAnalyzer;
@@ -68,11 +69,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Try loading existing graph for incremental update
             // `--force-reindex`：跳过已有图缓存，本次一定是干净的从零构建。
+            //
+            // Phase P3 收口：这里**同样**要做解析档位门禁。`CodeParser::_load_existing_graph`
+            // 已经拦了一道，但 init 这条链路是把 `existing_graph` 直接当作本轮结果的基础
+            // （下面 `pet_graph = existing_graph.unwrap_or_else(...)`），文件 MD5 未变的旧档
+            // 节点/边会被原样保留 ⇒ 仍然得到 legacy/layered 混档图。
+            // 判定复用同一个 `validate_resolution_stamp`（**不另写一套规则**）：不通过 ⇒
+            // 丢弃旧图 + 日志 ⇒ 等价于"缓存 miss"，由后面的全量解析重建。绝不 panic。
             let existing_graph = if cli.force_reindex {
                 info!("--force-reindex 已置位：跳过已有图缓存，强制全量重建");
                 None
             } else {
-                storage.get_persistence().load_graph(&project_hash).ok().flatten()
+                let expected_mode = cli.resolver.as_str();
+                let expected_max_candidates = clamp_max_candidates(cli.max_candidates);
+                storage
+                    .get_persistence()
+                    .load_graph_storage(&project_hash)
+                    .ok()
+                    .flatten()
+                    .and_then(|cached| {
+                        match cached.validate_resolution_stamp(expected_mode, expected_max_candidates) {
+                            Ok(()) => Some(cached.to_petgraph()),
+                            Err(reason) => {
+                                info!("已有图缓存与本轮解析档位不符，按缓存失效处理（全量重建）：{reason}");
+                                None
+                            }
+                        }
+                    })
             };
 
             // Phase 1: Parse files (0→70%)
@@ -139,7 +162,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::write(index_dir.join("project.json"), serde_json::to_string_pretty(&meta)?)?;
 
             let stats = pet_graph.get_stats().clone();
-            storage.get_persistence().save_graph(&project_hash, &pet_graph)?;
+            // Phase P3 收口：落盘必须带上**本轮建图用的**解析档位戳（档位 + 候选上限），
+            // 二者都取自真正产边的 `analyzer` 里的 `CodeParser`，不是再读一遍 CLI ——
+            // 只有同源，下一轮 `_load_existing_graph` / 上面的直读点才可能判出"同档命中"。
+            storage.get_persistence().save_graph(
+                &project_hash,
+                &pet_graph,
+                analyzer.resolver_mode().as_str(),
+                clamp_max_candidates(analyzer.max_candidates()),
+            )?;
             storage.set_graph(pet_graph);
 
             // Phase 4: Embedding (90→100%) — only if API token configured

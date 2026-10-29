@@ -4,7 +4,7 @@ use std::io;
 use dirs;
 use std::collections::HashMap;
 use crate::codegraph::types::PetCodeGraph;
-use crate::storage::petgraph_storage::PetGraphStorageManager;
+use crate::storage::petgraph_storage::{PetGraphStorage, PetGraphStorageManager};
 use crate::cli::args::StorageMode;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -58,41 +58,47 @@ impl PersistenceManager {
         home.join(".codeseek").join("projects").join(project_id)
     }
 
-    pub fn save_graph(&self, project_id: &str, graph: &PetCodeGraph) -> io::Result<()> {
+    pub fn save_graph(&self, project_id: &str, graph: &PetCodeGraph, resolver_mode: &str, max_candidates: u16) -> io::Result<()> {
         let project_dir = self.project_dir(project_id);
         fs::create_dir_all(&project_dir)?;
         
         match self.storage_mode {
             StorageMode::Json => {
-                self.save_graph_json(project_id, graph)?;
+                self.save_graph_json(project_id, graph, resolver_mode, max_candidates)?;
             },
             StorageMode::Binary => {
-                self.save_graph_binary(project_id, graph)?;
+                self.save_graph_binary(project_id, graph, resolver_mode, max_candidates)?;
             },
             StorageMode::Both => {
-                self.save_graph_json(project_id, graph)?;
-                self.save_graph_binary(project_id, graph)?;
+                self.save_graph_json(project_id, graph, resolver_mode, max_candidates)?;
+                self.save_graph_binary(project_id, graph, resolver_mode, max_candidates)?;
             },
         }
         
         Ok(())
     }
 
-    fn save_graph_json(&self, project_id: &str, graph: &PetCodeGraph) -> io::Result<()> {
+    /// 落盘 JSON 图缓存，**必须带上解析档位戳**（`resolver_mode` / `max_candidates`）。
+    ///
+    /// 戳的来历只能是"本轮真正用于建图的那份配置"（`CodeParser::resolver_mode()` /
+    /// `max_candidates()`，或 CLI 的 `--resolver` / `--max-candidates`），不能在这里编默认值：
+    /// 写错档位的缓存读回来会被 `PetGraphStorage::validate_resolution_stamp` 判失效，
+    /// 表现为"每次全量重建"，而不是脏数据 —— 这是故意选择的失败方向。
+    fn save_graph_json(&self, project_id: &str, graph: &PetCodeGraph, resolver_mode: &str, max_candidates: u16) -> io::Result<()> {
         let project_dir = self.project_dir(project_id);
         let graph_file = project_dir.join("graph.json");
         
-        PetGraphStorageManager::save_to_file(graph, &graph_file)
+        PetGraphStorageManager::save_to_file(graph, &graph_file, resolver_mode, max_candidates)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         
         Ok(())
     }
 
-    fn save_graph_binary(&self, project_id: &str, graph: &PetCodeGraph) -> io::Result<()> {
+    fn save_graph_binary(&self, project_id: &str, graph: &PetCodeGraph, resolver_mode: &str, max_candidates: u16) -> io::Result<()> {
         let project_dir = self.project_dir(project_id);
         let graph_file = project_dir.join("graph.bin");
         
-        PetGraphStorageManager::save_to_binary(graph, &graph_file)
+        PetGraphStorageManager::save_to_binary(graph, &graph_file, resolver_mode, max_candidates)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         
         Ok(())
@@ -112,10 +118,14 @@ impl PersistenceManager {
     /// - binary 缺失（`Ok(None)`）或不可用（`Err`）→ 回退 JSON；
     /// - JSON 也不可用 → **降级成 `Ok(None)`**（=缓存 miss，由
     ///   `parser::_load_existing_graph` 触发全量重建），错误只落 warn 日志。
-    fn read_both_with_fallback(
-        load_binary: impl FnOnce() -> io::Result<Option<PetCodeGraph>>,
-        load_json: impl FnOnce() -> io::Result<Option<PetCodeGraph>>,
-    ) -> io::Result<Option<PetCodeGraph>> {
+    ///
+    /// Phase P3 收口：泛型化 `T`，让"存储结构 `PetGraphStorage`"这条新读路径与
+    /// "图 `PetCodeGraph`"这条既有读路径**共用同一个回退实现**（原来要写两份回退逻辑，
+    /// 正是"改一处漏一处"的复发温床）。类型由调用方推导，既有单测一字未改。
+    fn read_both_with_fallback<T>(
+        load_binary: impl FnOnce() -> io::Result<Option<T>>,
+        load_json: impl FnOnce() -> io::Result<Option<T>>,
+    ) -> io::Result<Option<T>> {
         match load_binary() {
             Ok(Some(graph)) => Ok(Some(graph)),
             Ok(None) => load_json(),
@@ -135,41 +145,55 @@ impl PersistenceManager {
         }
     }
 
-    pub fn load_graph(&self, project_id: &str) -> io::Result<Option<PetCodeGraph>> {
+    /// 读回图缓存的**存储结构**（含解析档位戳），供知道自己配置的消费方做档位门禁。
+    ///
+    /// 为什么需要这个方法（而不是让所有人用 `load_graph`）：`load_graph` 返回
+    /// `PetCodeGraph`，而戳只存在于 `PetGraphStorage` 上（`PetCodeGraph` 不带戳，
+    /// 否则 `to_json()` 的输出形状会变，那是 `repository.rs::save_state` 的活跃链路）。
+    /// 于是"换档必须重建"这件事只有在拿到存储结构之后才可能判定 ——
+    /// 真实消费者：`CodeParser::_load_existing_graph` 与 `main.rs` 的 `init` 直读缓存点。
+    /// 版本门禁仍由 `PetGraphStorageManager::read_storage_from_*` 完成（不在此重复），
+    /// 这里只保证"任何一份缓存不可用 ⇒ 降级成 `Ok(None)`"这条既有链路不变。
+    pub fn load_graph_storage(&self, project_id: &str) -> io::Result<Option<PetGraphStorage>> {
         match self.storage_mode {
-            StorageMode::Json => self.load_graph_json(project_id),
-            StorageMode::Binary => self.load_graph_binary(project_id),
+            StorageMode::Json => self.load_graph_json_storage(project_id),
+            StorageMode::Binary => self.load_graph_binary_storage(project_id),
             StorageMode::Both => Self::read_both_with_fallback(
-                || self.load_graph_binary(project_id),
-                || self.load_graph_json(project_id),
+                || self.load_graph_binary_storage(project_id),
+                || self.load_graph_json_storage(project_id),
             ),
         }
     }
 
-    fn load_graph_json(&self, project_id: &str) -> io::Result<Option<PetCodeGraph>> {
+    pub fn load_graph(&self, project_id: &str) -> io::Result<Option<PetCodeGraph>> {
+        self.load_graph_storage(project_id)
+            .map(|storage| storage.map(|storage| storage.to_petgraph()))
+    }
+
+    fn load_graph_json_storage(&self, project_id: &str) -> io::Result<Option<PetGraphStorage>> {
         let graph_file = self.project_dir(project_id).join("graph.json");
         
         if !graph_file.exists() {
             return Ok(None);
         }
         
-        let graph = PetGraphStorageManager::load_from_file(&graph_file)
+        let storage = PetGraphStorageManager::read_storage_from_file(&graph_file)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         
-        Ok(Some(graph))
+        Ok(Some(storage))
     }
 
-    fn load_graph_binary(&self, project_id: &str) -> io::Result<Option<PetCodeGraph>> {
+    fn load_graph_binary_storage(&self, project_id: &str) -> io::Result<Option<PetGraphStorage>> {
         let graph_file = self.project_dir(project_id).join("graph.bin");
         
         if !graph_file.exists() {
             return Ok(None);
         }
         
-        let graph = PetGraphStorageManager::load_from_binary(&graph_file)
+        let storage = PetGraphStorageManager::read_storage_from_binary(&graph_file)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         
-        Ok(Some(graph))
+        Ok(Some(storage))
     }
 
     pub fn save_file_hash(&self, project_id: &str, file_path: &str, hash: &str) -> io::Result<()> {
@@ -314,37 +338,15 @@ impl PersistenceManager {
 } 
 
 impl crate::storage::traits::GraphPersistence for PersistenceManager {
-    fn save_graph(&self, project_id: &str, graph: &PetCodeGraph) -> io::Result<()> {
-        let project_dir = self.project_dir(project_id);
-        fs::create_dir_all(&project_dir)?;
-
-        match self.storage_mode {
-            StorageMode::Json => {
-                self.save_graph_json(project_id, graph)?;
-            },
-            StorageMode::Binary => {
-                self.save_graph_binary(project_id, graph)?;
-            },
-            StorageMode::Both => {
-                self.save_graph_json(project_id, graph)?;
-                self.save_graph_binary(project_id, graph)?;
-            },
-        }
-        Ok(())
+    fn save_graph(&self, project_id: &str, graph: &PetCodeGraph, resolver_mode: &str, max_candidates: u16) -> io::Result<()> {
+        // Phase P3 收口：改为**直接委托固有方法**。原来这里自己写了一遍
+        // `create_dir_all` + `match storage_mode`，与固有方法是两份同形实现 ——
+        // 档位戳这种"每一层都必须交代"的参数，正是靠只有一份实现才不会在某一层被漏掉。
+        Self::save_graph(self, project_id, graph, resolver_mode, max_candidates)
     }
 
     fn load_graph(&self, project_id: &str) -> io::Result<Option<PetCodeGraph>> {
-        match self.storage_mode {
-            StorageMode::Json => self.load_graph_json(project_id),
-            StorageMode::Binary => self.load_graph_binary(project_id),
-            StorageMode::Both => {
-                // 与固有方法收敛到同一套回退语义，避免两份实现分叉
-                Self::read_both_with_fallback(
-                    || self.load_graph_binary(project_id),
-                    || self.load_graph_json(project_id),
-                )
-            },
-        }
+        Self::load_graph(self, project_id)
     }
 
     fn save_file_hash(&self, project_id: &str, file_path: &str, hash: &str) -> io::Result<()> {

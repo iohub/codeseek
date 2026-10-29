@@ -18,7 +18,28 @@ use tracing::warn;
 /// 版本不符（或文件缺少版本字段，视作 0）一律判定为**缓存失效**，走既有的
 /// `Err(String)` → `persistence` → `parser::_load_existing_graph` 的
 /// `Err → warn → Ok(None)` → `PetCodeGraph::new()` 全量重建路径；绝不 panic、绝不 unwrap。
-pub const GRAPH_SCHEMA_VERSION: u32 = 2;
+///
+/// **Phase P3 收口：2 → 3**。递增的唯一原因：本版本给 `PetGraphStorage` 在
+/// `schema_version` 之后追加了两个"解析档位戳"字段（`resolver_mode` / `max_candidates`）。
+/// bincode 按字段声明顺序编码，新字段插在载荷最前面 ⇒ 所有 v2 的 `graph.bin` 字节整体错位，
+/// 必须由版本号一次性判失效；`graph.json` 虽然自描述（缺字段会被 `serde(default)` 补成
+/// 空串/0），但空串档位同样过不了 `validate_resolution_stamp`，语义与"版本不符"一致。
+/// 影响面：**现存 v2 缓存一律失效一次并触发全量重建**（已批准），没有任何路径会 panic。
+pub const GRAPH_SCHEMA_VERSION: u32 = 3;
+
+/// 把 `CodeParser` 的 `max_candidates: usize` 折算成戳字段用的 `u16`。
+///
+/// 为什么戳用 `u16` 而不是 `usize`：`usize` 的宽度随目标平台变化（32/64 位不同），
+/// 而 bincode 是无自描述的定宽编码 —— 同一个缓存在 32 位机上写的字节，到 64 位机上
+/// 就会被读成不同的数，进而把**同一档**的缓存误判成失效（白白全量重建）。`u16` 足够：
+/// 引擎内部真正消费的上限被 `ResolutionConfig.max_candidates: u8` 饱和到 255
+/// （见 `codegraph/parser.rs::resolution_config`），任何 >65535 的 CLI 取值都已经在
+/// 更早的环节被截断成"等价行为"，因此把 >65535 的值饱和成 65535 不会误判。
+///
+/// ⚠ 写侧与校验侧**必须**都经过本函数，否则会出现"写入 70000、期望 65535"这类假失效。
+pub fn clamp_max_candidates(value: usize) -> u16 {
+    value.min(u16::MAX as usize) as u16
+}
 
 /// `graph.bin` 文件头 magic（4 字节 ASCII，"CodeGraph Storage"）。
 ///
@@ -105,6 +126,31 @@ pub struct PetGraphStorage {
     /// 同样被门禁判为失效，而不是被当成合法数据读进来。
     #[serde(default)]
     pub schema_version: u32,
+    /// **解析档位戳（1/2）**：这份图是用哪一档 callee 解析器建的 —— `"legacy"` / `"layered"`，
+    /// 空串表示"未知/旧文件"（即 v2 及更早、没有戳的缓存），一律判失效。
+    ///
+    /// 为什么必须有它：`schema_version` 只能证明"字节形状兼容"，证明不了"语义档位一致"。
+    /// 自 Phase P3 起全局默认档从 legacy 切到 layered，而**旧缓存的字节形状没变过**
+    /// （v2 就带了 `resolution_level`/`confidence` 四个标量），于是上一轮用 legacy 建的
+    /// `graph.bin` 在新默认下仍会通过了 `validate_schema_version()` 被
+    /// `_load_existing_graph` 读回来；再叠加"文件 MD5 未变 ⇒ 整文件跳过重解析"的语义
+    /// （`_should_skip_file`），被跳过文件里那些**由旧档产出的边**会原样留在图里，
+    /// 得到一张 legacy/layered 混档图：同一文件集里 `resolution_level`/`confidence`
+    /// 的含义不一致，而且没有任何自动检测（只能靠用户手工 `--force-reindex`）。
+    /// 本字段把"档位"变成缓存的一部分身份，换档 ⇒ 失效 ⇒ 全量重建。
+    ///
+    /// `#[serde(default)]` 只对 JSON 生效（空串），bincode 侧因字段位置变化由版本号拦住。
+    #[serde(default)]
+    pub resolver_mode: String,
+    /// **解析档位戳（2/2）**：建图时的 `--max-candidates` 上限（已经过
+    /// [`clamp_max_candidates`] 折算成 `u16`）。0 表示"未知/旧文件"。
+    ///
+    /// 为什么上限也要进戳：它直接改变落盘边数 —— `emit_layered_resolution` 按
+    /// `take(max_candidates)` 截断候选。若戳只有档位没有上限，用户把
+    /// `--max-candidates=8` 改成 `=1` 之后旧缓存仍然"档位匹配"，于是新上限只作用于
+    /// 本轮重解析的文件，其余文件继续留 8 条边 —— 与档位混档完全同形的缺陷。
+    #[serde(default)]
+    pub max_candidates: u16,
     /// 函数信息列表
     pub functions: Vec<FunctionInfo>,
     /// 调用关系列表
@@ -118,13 +164,25 @@ pub struct PetGraphStorage {
 }
 
 impl PetGraphStorage {
-    /// 从PetCodeGraph创建存储格式
-    pub fn from_petgraph(code_graph: &PetCodeGraph) -> Self {
+    /// 从PetCodeGraph创建存储格式，并**同时写入解析档位戳**。
+    ///
+    /// 档位必须由调用方传入而不是在内部"猜"：`PetCodeGraph` 是纯图数据，本身不携带
+    /// "这些边是哪档解析器产的"这一元信息（把它塞进 `PetCodeGraph` 会改变
+    /// `to_json()` 的输出形状，而 `to_json` 是 `repository.rs::save_state` 的活跃链路，
+    /// 本轮明确不许动）。因此戳沿保存链路逐层显式传递：
+    /// `main.rs`（`cli.resolver` / `cli.max_candidates`）→ `PersistenceManager::save_graph*`
+    /// → `PetGraphStorageManager::save_to_*` → 本函数。
+    ///
+    /// `resolver_mode` 只接受 [`crate::cli::args::ResolverMode::as_str`] 产出的稳定名，
+    /// `max_candidates` 只接受 [`clamp_max_candidates`] 的折算结果。
+    pub fn from_petgraph(code_graph: &PetCodeGraph, resolver_mode: &str, max_candidates: u16) -> Self {
         let functions: Vec<FunctionInfo> = code_graph.get_all_functions().into_iter().cloned().collect();
         let call_relations: Vec<CallRelation> = code_graph.get_all_call_relations().into_iter().cloned().collect();
         
         Self {
             schema_version: GRAPH_SCHEMA_VERSION,
+            resolver_mode: resolver_mode.to_string(),
+            max_candidates,
             functions,
             call_relations,
             function_names: code_graph.function_names.clone(),
@@ -149,6 +207,41 @@ impl PetGraphStorage {
             return Err(format!(
                 "图缓存 schema 版本不匹配：文件版本={}，当前版本={}；判定为缓存失效，将触发全量重建",
                 self.schema_version, GRAPH_SCHEMA_VERSION
+            ));
+        }
+        Ok(())
+    }
+
+    /// **解析档位门禁**：校验这份缓存是不是"当前档位 + 当前候选上限"建的。
+    ///
+    /// 与 [`validate_schema_version`] 的分工：版本门禁由三个 `load_*` 反序列化咽喉自动执行
+    /// （那里拿不到"当前档位"，档位是**消费者**的配置），而档位门禁必须由知道本轮配置的
+    /// 调用方执行 —— 生产上只有两处：
+    ///  - `codegraph/parser.rs::CodeParser::_load_existing_graph`（用 `self.resolver_mode()`
+    ///    与 `self.max_candidates()`），不通过则丢弃已加载的图、走既有 `Err → warn → Ok(None)`
+    ///    的降级链 ⇒ 全量重建；
+    ///  - `main.rs` 的 `init` 直接读缓存处（用 `cli.resolver` / `cli.max_candidates`），
+    ///    那里原本会把旧档的图并进本轮结果，同样必须拒收。
+    ///
+    /// 判定是**严格相等**（不做"layered 兼容 legacy"这类偏序）：两档在同一份源码上产出的
+    /// 边集本就不同，任何"混用"都是要防的语义风险本身。空串档位（无戳的旧文件）必然失配。
+    pub fn validate_resolution_stamp(&self, expected_mode: &str, expected_max_candidates: u16) -> Result<(), String> {
+        if self.resolver_mode != expected_mode {
+            let stored = if self.resolver_mode.is_empty() {
+                "未知（无档位戳的旧缓存）".to_string()
+            } else {
+                self.resolver_mode.clone()
+            };
+            return Err(format!(
+                "图缓存解析档位不一致：缓存档位={stored}，当前档位={expected_mode}（候选上限={expected_max_candidates}）；\
+                 判定为缓存失效，将触发全量重建（换 --resolver 必须换一份干净的图）"
+            ));
+        }
+        if self.max_candidates != expected_max_candidates {
+            return Err(format!(
+                "图缓存候选上限不一致：缓存 --max-candidates={}，当前={}（档位={expected_mode}）；\
+                 判定为缓存失效，将触发全量重建（截断条数会改变落盘边数，旧边不能沿用）",
+                self.max_candidates, expected_max_candidates
             ));
         }
         Ok(())
@@ -188,8 +281,8 @@ pub struct PetGraphStorageManager;
 
 impl PetGraphStorageManager {
     /// 保存代码图到文件
-    pub fn save_to_file(code_graph: &PetCodeGraph, file_path: &Path) -> Result<(), String> {
-        let storage = PetGraphStorage::from_petgraph(code_graph);
+    pub fn save_to_file(code_graph: &PetCodeGraph, file_path: &Path, resolver_mode: &str, max_candidates: u16) -> Result<(), String> {
+        let storage = PetGraphStorage::from_petgraph(code_graph, resolver_mode, max_candidates);
         let json = serde_json::to_string_pretty(&storage)
             .map_err(|e| format!("Failed to serialize code graph: {}", e))?;
         
@@ -199,36 +292,47 @@ impl PetGraphStorageManager {
         Ok(())
     }
 
-    /// 从文件加载代码图
-    pub fn load_from_file(file_path: &Path) -> Result<PetCodeGraph, String> {
+    /// 从文件读回**存储结构本身**（已做版本门禁）。
+    ///
+    /// 为什么额外要有这一层（而不是只保留 `load_from_file`）：解析档位戳在
+    /// `PetGraphStorage` 上，`to_petgraph()` 之后就拿不到了（`PetCodeGraph` 不带戳，
+    /// 见 `from_petgraph` 的注释）。而档位是否可用只有**消费者**知道（它才是"当前档位"
+    /// 的来源），所以消费者需要的是存储结构 + `validate_resolution_stamp`，
+    /// `load_from_*` 则继续作为"只要图、不关心档位"的既有入口（trait 转发、单测、
+    /// `PersistenceManager::load_graph` 都走它）。
+    /// 两条路径共用同一段反序列化代码，不存在第二份"读缓存"实现。
+    pub fn read_storage_from_file(file_path: &Path) -> Result<PetGraphStorage, String> {
         let json = fs::read_to_string(file_path)
             .map_err(|e| format!("Failed to read file {}: {}", file_path.display(), e))?;
-        
-        let storage: PetGraphStorage = serde_json::from_str(&json)
+        Self::read_storage_from_json(&json)
+    }
+
+    /// 从文件加载代码图
+    pub fn load_from_file(file_path: &Path) -> Result<PetCodeGraph, String> {
+        Ok(Self::read_storage_from_file(file_path)?.to_petgraph())
+    }
+
+    /// 保存代码图到JSON字符串
+    pub fn save_to_json(code_graph: &PetCodeGraph, resolver_mode: &str, max_candidates: u16) -> Result<String, String> {
+        let storage = PetGraphStorage::from_petgraph(code_graph, resolver_mode, max_candidates);
+        serde_json::to_string_pretty(&storage)
+            .map_err(|e| format!("Failed to serialize code graph: {}", e))
+    }
+
+    /// 从JSON字符串读回存储结构（版本门禁落在这里，理由同 `read_storage_from_file`）
+    pub fn read_storage_from_json(json_str: &str) -> Result<PetGraphStorage, String> {
+        let storage: PetGraphStorage = serde_json::from_str(json_str)
             .map_err(|e| format!("Failed to deserialize code graph: {}", e))?;
         // 版本门禁：schema_version 不符（含旧缓存缺字段被 `serde(default)` 补成 0）
         // 一律返回 Err(String)，与"文件损坏"完全同语义 —— 上层会把它降级为
         // "缓存 miss → 全量重建"，绝不 panic。
         storage.validate_schema_version()?;
-        
-        Ok(storage.to_petgraph())
-    }
-
-    /// 保存代码图到JSON字符串
-    pub fn save_to_json(code_graph: &PetCodeGraph) -> Result<String, String> {
-        let storage = PetGraphStorage::from_petgraph(code_graph);
-        serde_json::to_string_pretty(&storage)
-            .map_err(|e| format!("Failed to serialize code graph: {}", e))
+        Ok(storage)
     }
 
     /// 从JSON字符串加载代码图
     pub fn load_from_json(json_str: &str) -> Result<PetCodeGraph, String> {
-        let storage: PetGraphStorage = serde_json::from_str(json_str)
-            .map_err(|e| format!("Failed to deserialize code graph: {}", e))?;
-        // 版本门禁，理由同 `load_from_file`
-        storage.validate_schema_version()?;
-        
-        Ok(storage.to_petgraph())
+        Ok(Self::read_storage_from_json(json_str)?.to_petgraph())
     }
 
     /// 保存代码图为二进制格式
@@ -236,8 +340,8 @@ impl PetGraphStorageManager {
     /// 落盘布局：`magic("CGSP") | schema_version(u32 小端) | bincode(PetGraphStorage)`。
     /// 文件头是**第一重**版本门禁：加载器可以在不解析载荷的前提下判定格式是否可用。
     /// 载荷内的 `PetGraphStorage.schema_version`（结构体首字段）是**第二重**门禁。
-    pub fn save_to_binary(code_graph: &PetCodeGraph, file_path: &Path) -> Result<(), String> {
-        let storage = PetGraphStorage::from_petgraph(code_graph);
+    pub fn save_to_binary(code_graph: &PetCodeGraph, file_path: &Path, resolver_mode: &str, max_candidates: u16) -> Result<(), String> {
+        let storage = PetGraphStorage::from_petgraph(code_graph, resolver_mode, max_candidates);
         let payload = bincode::serialize(&storage)
             .map_err(|e| format!("Failed to serialize code graph: {}", e))?;
 
@@ -250,14 +354,15 @@ impl PetGraphStorageManager {
         Ok(())
     }
 
-    /// 从二进制文件加载代码图
+    /// 从二进制文件读回存储结构（三层门禁，全部返回 `Err(String)` = 缓存失效）
     ///
-    /// 三层判定全部返回 `Err(String)`（=缓存失效，由上层降级为全量重建），不做任何 unwrap：
+    /// 三层判定加上"档位戳"一共四层，全部只做判定、不做任何 unwrap：
     /// 1. 文件头长度/magic 不符 —— P0 之前遗留的裸 bincode 旧缓存正是这一类；
     ///    **必须在读载荷之前拦掉**，否则错位的字节会被当成 `Vec` 长度而疯狂分配内存；
-    /// 2. 文件头里的 `schema_version` 与当前常量不符；
-    /// 3. 载荷解码成功后，再校验载荷自身的 `schema_version`（防绕过文件头的构造数据）。
-    pub fn load_from_binary(file_path: &Path) -> Result<PetCodeGraph, String> {
+    /// 2. 文件头里的 `schema_version` 与当前常量不符（P3 的 2→3 正是在这一层被拦住）；
+    /// 3. 载荷解码成功后，再校验载荷自身的 `schema_version`（防绕过文件头的构造数据）；
+    /// 4. （由消费者执行）`validate_resolution_stamp` —— 见 `PetGraphStorage` 上的注释。
+    pub fn read_storage_from_binary(file_path: &Path) -> Result<PetGraphStorage, String> {
         let binary = fs::read(file_path)
             .map_err(|e| format!("Failed to read file {}: {}", file_path.display(), e))?;
 
@@ -287,7 +392,12 @@ impl PetGraphStorageManager {
         // 第二重门禁：载荷自带的版本号同样必须一致
         storage.validate_schema_version()?;
 
-        Ok(storage.to_petgraph())
+        Ok(storage)
+    }
+
+    /// 从二进制文件加载代码图
+    pub fn load_from_binary(file_path: &Path) -> Result<PetCodeGraph, String> {
+        Ok(Self::read_storage_from_binary(file_path)?.to_petgraph())
     }
 
     /// 导出为GraphML格式（用于可视化工具）
@@ -409,24 +519,24 @@ impl PetGraphStorageManager {
 } 
 
 impl crate::storage::traits::GraphSerializer for PetGraphStorageManager {
-    fn save_to_file(code_graph: &PetCodeGraph, file_path: &std::path::Path) -> Result<(), String> {
-        Self::save_to_file(code_graph, file_path)
+    fn save_to_file(code_graph: &PetCodeGraph, file_path: &std::path::Path, resolver_mode: &str, max_candidates: u16) -> Result<(), String> {
+        Self::save_to_file(code_graph, file_path, resolver_mode, max_candidates)
     }
 
     fn load_from_file(file_path: &std::path::Path) -> Result<PetCodeGraph, String> {
         Self::load_from_file(file_path)
     }
 
-    fn save_to_json(code_graph: &PetCodeGraph) -> Result<String, String> {
-        Self::save_to_json(code_graph)
+    fn save_to_json(code_graph: &PetCodeGraph, resolver_mode: &str, max_candidates: u16) -> Result<String, String> {
+        Self::save_to_json(code_graph, resolver_mode, max_candidates)
     }
 
     fn load_from_json(json_str: &str) -> Result<PetCodeGraph, String> {
         Self::load_from_json(json_str)
     }
 
-    fn save_to_binary(code_graph: &PetCodeGraph, file_path: &std::path::Path) -> Result<(), String> {
-        Self::save_to_binary(code_graph, file_path)
+    fn save_to_binary(code_graph: &PetCodeGraph, file_path: &std::path::Path, resolver_mode: &str, max_candidates: u16) -> Result<(), String> {
+        Self::save_to_binary(code_graph, file_path, resolver_mode, max_candidates)
     }
 
     fn load_from_binary(file_path: &std::path::Path) -> Result<PetCodeGraph, String> {

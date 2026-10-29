@@ -65,6 +65,15 @@ impl CodeAnalyzer {
         self.parser.resolver_mode()
     }
 
+    /// 当前 `--max-candidates` 原值（与 [`CodeAnalyzer::resolver_mode`] 成对）。
+    ///
+    /// Phase P3 收口补上的唯一理由：图缓存的**解析档位戳**由"档位 + 候选上限"两个量组成，
+    /// `main.rs` 落盘时必须成对交代，否则上限不在戳里、改 `--max-candidates` 不会让缓存失效。
+    /// 值的来历只能是"本轮真正建图的那个解析器"，而不是再读一遍 CLI。
+    pub fn max_candidates(&self) -> usize {
+        self.parser.max_candidates()
+    }
+
     /// 分析目录并构建代码图
     pub fn analyze_directory(&mut self, dir: &Path) -> Result<&CodeGraph, String> {
         info!("Starting code graph analysis for directory: {}", dir.display());

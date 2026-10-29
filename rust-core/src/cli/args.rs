@@ -47,6 +47,22 @@ impl Default for ResolverMode {
     }
 }
 
+impl ResolverMode {
+    /// 落盘用的**稳定**档位名（`graph.json` / `graph.bin` 的解析档位戳就存这个字符串）。
+    ///
+    /// 为什么必须有这个方法而不是 `format!("{:?}", mode).to_lowercase()`：
+    /// 戳字段一旦写进缓存文件就成了**持久化契约**，绝不能跟着 Rust 变体的 Debug 打印
+    /// 或重命名而漂移。取值域固定为 `"legacy"` / `"layered"`，与 `--resolver` 的
+    /// ValueEnum 名称一致；空串 `""` 在戳的语义里表示"未知/旧文件"（见
+    /// `storage::petgraph_storage::PetGraphStorage::resolver_mode`）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ResolverMode::Legacy => "legacy",
+            ResolverMode::Layered => "layered",
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[clap(name = "codeseek", author, version, about = "Code intelligence CLI tool", long_about = None)]
 pub struct Cli {

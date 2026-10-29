@@ -57,22 +57,34 @@ type FunctionKey = (PathBuf, usize, usize);
 //   - `CodeParser::_extract_entities_from_file` 与 `IncrementalManager::_extract_entities_from_file`
 //   - `CodeParser::_analyze_file_calls`（legacy/layered 两档）与 `IncrementalManager::_analyze_file_calls`
 // 副本的存在就是 P0 记录在案的"三套并行 first-wins 实现，改一处漏一处"缺陷的复发温床。
-// P3 之后：`CodeParser::refresh_file` 与 `IncrementalManager::refresh_file` 都只**委托**下面的
-// 自由函数，不再各自持有一份实现。
+// P3 之后：两条链路都只**委托**下面的自由函数，不再各自持有一份实现。
+//
+// Phase P3 收口 A：`IncrementalManager` 那一侧的**委托者本身已被删除** ——
+// 它的 `refresh_file` / `_extract_entities_from_file` / `_analyze_file_calls` 整条产边链路
+// 在 `src/`、`tests/`、`examples/`、`benches/` 里零调用者（证据：`rg -n
+// "IncrementalManager|get_incremental" src tests examples benches` 只有本文件与
+// `storage/mod.rs` 的构造点；真实的增量刷新一直是 `CodeParser::refresh_file`，
+// 由 `codegraph/repository.rs::RepositoryManager::refresh_file` 调用）。
+// ⇒ 现在这三个共用件的**唯一**消费者就是本文件的刷新链路（下面 `_extract_entities_from_file`
+// 与 `_analyze_file_calls`），`pub(crate)` 可见性保持不变，将来要接第二条链路时它已经在那里。
 //
 // ⚠ 唯一没有并进来的历史副本是全量链路的 `_analyze_file_calls_for_petgraph`（它带
 // `FunctionNameIndex` 的四级 callee 回退，且幽灵会**同时落成节点** ⇒ 形成 legacy 特有的
-// "同名幽灵跨行复用"，见 P3 交付物 2）。它与刷新档的口径本就不同，强行合并会改变
-// legacy 产边（红线 2），故保留为"全量档 legacy"的独立实现，并在 P3 报告里显式登记。
+// "同名幽灵跨行复用"）。它与刷新档的口径本就不同，强行合并会改变
+// legacy 产边（红线 1），故保留为"全量档 legacy"的独立实现。
+// 这条差异的**权威登记位置**（不再有"P3 报告"这个东西）：
+//   - 实现本体：下面的 `_analyze_file_calls_for_petgraph`（全量档 legacy 专用）；
+//   - 收敛守卫：`tests/test_p1_edges_unchanged.rs::FIRST_WINS_ABSENCE_MARKERS`
+//     （反向钉住"第二份实现不许再长出来"）与同文件的 legacy 聚合口径 `32/13/11/2/4/9/2/13`。
 // ============================================================================================
 
 /// Phase P3：把单个文件解析成图实体（`FunctionInfo`/`ClassInfo`）与文件级解析上下文 `ctx`。
 ///
-/// 由 `CodeParser::_extract_entities_from_file` 与
-/// `IncrementalManager::_extract_entities_from_file` 共同调用（原来是两份逐行等价的副本）。
-/// `language` / `namespace` 由调用方传入而不是在这里重算：两条链路各自的
-/// `_detect_language`/`_extract_namespace` 存在历史差异（增量档不认 `.js/.jsx`），
-/// 统一它们会改变增量 legacy 的节点字段，超出本轮范围，故只把"实体提取"这一段收敛。
+/// 由 `CodeParser::_extract_entities_from_file` 调用（Phase P3 收口 A 之后它是唯一调用者；
+/// 原来这里还有 `IncrementalManager::_extract_entities_from_file` 那份逐行等价的副本）。
+/// `language` / `namespace` 由调用方传入而不是在这里重算：历史上两条链路各自的
+/// `_detect_language`/`_extract_namespace` 存在差异（增量档不认 `.js/.jsx`），
+/// 统一它们会改变节点字段，超出本轮范围，故只把"实体提取"这一段收敛。
 pub(crate) fn extract_file_entities(
     ts_parser: &TreeSitterParser,
     file_path: &Path,
@@ -1400,6 +1412,14 @@ impl CodeParser {
     }
 
     /// 尝试从本地数据库加载现有的图
+    ///
+    /// 两道门禁都在这里生效，且**只走同一条降级链**：
+    /// 1. schema 版本（`PetGraphStorageManager::read_storage_from_*` 内的
+    ///    `validate_schema_version`，不符 ⇒ `Err`）；
+    /// 2. **解析档位戳**（`validate_resolution_stamp`）：缓存必须与本轮
+    ///    `self.resolver_mode` / `self.max_candidates` 完全一致，否则判定失效。
+    /// 任何一道不过 ⇒ 丢弃已读到的图 ⇒ `Err → warn! → Ok(None)` ⇒
+    /// 由 `build_petgraph_code_graph` 用 `PetCodeGraph::new()` 全量重建，绝不 panic。
     fn _load_existing_graph(&self, dir: &Path) -> Result<Option<PetCodeGraph>, String> {
         // --force-reindex：一律报告"没有已有图"。这与"缓存版本不符 → Err → warn → Ok(None)"
         // 走的是同一条失效路径，最终由 `build_petgraph_code_graph` 用 PetCodeGraph::new() 重建。
@@ -1408,6 +1428,7 @@ impl CodeParser {
             return Ok(None);
         }
 
+        use crate::storage::petgraph_storage::clamp_max_candidates;
         use crate::storage::PersistenceManager;
         
         // 使用项目路径作为项目ID
@@ -1415,9 +1436,29 @@ impl CodeParser {
             .and_then(|n| n.to_str())
             .unwrap_or("default");
         
-        let persistence = PersistenceManager::new();
-        match persistence.load_graph(project_id) {
-            Ok(Some(graph)) => Ok(Some(graph)),
+        // 期望档位取自**本解析器自己的配置**（它才是这批边的生产者），
+        // 且必须与写侧 `from_petgraph` 用同一个折算函数，否则大小写/截断口径会造出假失效。
+        let expected_mode = self.resolver_mode.as_str();
+        let expected_max_candidates = clamp_max_candidates(self.max_candidates);
+
+        // 把"读缓存"与"档位门禁"合成成同一个 `Result<Option<PetGraphStorage>, String>`，
+        // 这样两类失效共用下面**唯一**一条 `Err → warn → Ok(None)` 降级分支，
+        // 不再新造第二条降级路径（任务要求：复用既有 warn 链，别新造一条）。
+        let gated = PersistenceManager::new()
+            .load_graph_storage(project_id)
+            .map_err(|e| e.to_string())
+            .and_then(|cached| match cached {
+                Some(storage) => {
+                    if let Err(reason) = storage.validate_resolution_stamp(expected_mode, expected_max_candidates) {
+                        return Err(reason);
+                    }
+                    Ok(Some(storage))
+                }
+                None => Ok(None),
+            });
+
+        match gated {
+            Ok(Some(storage)) => Ok(Some(storage.to_petgraph())),
             Ok(None) => Ok(None),
             Err(e) => {
                 warn!("Failed to load existing graph: {}", e);
