@@ -31,6 +31,26 @@ use chrono::TimeDelta;
 /// 累积软删除次数阈值，达到后自动触发 LanceDB compaction
 const OPTIMIZE_DELETE_THRESHOLD: u64 = 10;
 
+/// embedding API 输入的上限，单位为**字节**（不是字符数，也不是 token 数）。
+/// 约对应 32k token 的保守取值：混合内容（中英/代码/emoji）下按 ~2 字节/token 估算。
+const MAX_EMBEDDING_INPUT_BYTES: usize = 64_000;
+
+/// 按字节上限截断字符串，若截断点落在多字节字符中间则回退到最近的 UTF-8 char boundary，
+/// 保证不 panic 且返回值为原串的合法前缀。
+///
+/// 说明：`max_bytes` 是**字节**上限。`s.len() <= max_bytes` 时原样返回；
+/// `max_bytes == 0`（或回退后为 0，如首个多字节字符就超出上限）时返回空串。
+fn truncate_to_byte_limit(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 struct EmbeddingCache {
     conn: Mutex<SqliteConnection>,
 }
@@ -157,15 +177,10 @@ impl EmbeddingProvider for OpenAICompatibleEmbeddingProvider {
             return Err("Code block is empty".into());
         }
 
-        // Truncate if too long (approx 32k tokens, safe limit 30k chars for now)
-        // Note: 32K context window is quite large, but we should still have a safety limit
-        // Assuming ~4 chars per token for English, 32k tokens is ~128k chars.
-        // For mixed content, being conservative with 64k chars is safe.
-        let code_block = if code_block.len() > 64000 {
-            &code_block[..64000]
-        } else {
-            code_block
-        };
+        // Truncate if too long — 32K 上下文窗口很大，但仍需保守的安全上限。
+        // MAX_EMBEDDING_INPUT_BYTES 是**字节**上限（不是字符数，约对应 32k token）；
+        // 截断点会对齐到 UTF-8 char boundary，避免在多字节字符（中文/emoji）中间切片导致 panic。
+        let code_block = truncate_to_byte_limit(code_block, MAX_EMBEDDING_INPUT_BYTES);
         
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
         let response = self.client.post(&url)
@@ -200,8 +215,9 @@ impl EmbeddingProvider for OpenAICompatibleEmbeddingProvider {
             return Ok(Vec::new());
         }
 
+        // 每条输入按字节上限截断，截断点对齐到 UTF-8 char boundary（见 truncate_to_byte_limit）
         let texts: Vec<&str> = texts.iter()
-            .map(|t| if t.len() > 64000 { &t[..64000] } else { t.as_str() })
+            .map(|t| truncate_to_byte_limit(t, MAX_EMBEDDING_INPUT_BYTES))
             .collect();
 
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
@@ -1004,4 +1020,111 @@ mod tests {
         Ok(())
     }
 
+    // ---- truncate_to_byte_limit ----
+
+    /// 纯 ASCII 超长串：截断到恰好等于字节上限。
+    #[test]
+    fn truncate_to_byte_limit_ascii_over_limit() {
+        let limit = MAX_EMBEDDING_INPUT_BYTES;
+        let mut s = String::with_capacity(limit + 1_000);
+        for _ in 0..(limit + 1_000) {
+            s.push('a');
+        }
+        assert_eq!(s.len(), limit + 1_000);
+
+        let t = truncate_to_byte_limit(&s, limit);
+        assert_eq!(t.len(), limit);
+        assert!(s.starts_with(t));
+        assert!(t.is_char_boundary(t.len()));
+    }
+
+    /// 多字节字符（中文，3 字节）恰好跨越 64_000 字节边界：不 panic，回退到合法前缀。
+    #[test]
+    fn truncate_to_byte_limit_multibyte_straddling_limit() {
+        let limit = MAX_EMBEDDING_INPUT_BYTES;
+        // '中' 占 3 字节，起点放在 limit - 2，使其内部覆盖 limit 这个切点。
+        let mut s = String::with_capacity(limit + 16);
+        for _ in 0..(limit - 2) {
+            s.push('a');
+        }
+        s.push('中');
+        for _ in 0..8 {
+            s.push('b');
+        }
+        assert_eq!(s.len(), limit - 2 + 3 + 8);
+        assert!(!s.is_char_boundary(limit));
+
+        let t = truncate_to_byte_limit(&s, limit);
+        assert!(t.len() <= limit, "truncated len {} exceeds limit {}", t.len(), limit);
+        assert_eq!(t.len(), limit - 2, "should fall back to the preceding char boundary");
+        assert!(s.starts_with(t), "result must be a lossless prefix of the input");
+        assert!(t.is_char_boundary(t.len()));
+    }
+
+    /// 4 字节 emoji 跨越边界：同样回退，不 panic。
+    #[test]
+    fn truncate_to_byte_limit_emoji_straddling_limit() {
+        let limit = MAX_EMBEDDING_INPUT_BYTES;
+        let mut s = String::with_capacity(limit + 16);
+        for _ in 0..(limit - 1) {
+            s.push('a');
+        }
+        s.push('😀'); // 4 字节，覆盖 limit-1 .. limit+3
+        for _ in 0..4 {
+            s.push('c');
+        }
+        assert!(!s.is_char_boundary(limit));
+
+        let t = truncate_to_byte_limit(&s, limit);
+        assert_eq!(t.len(), limit - 1);
+        assert!(t.len() <= limit);
+        assert!(s.starts_with(t));
+    }
+
+    /// max_bytes = 0：非空串返回空串，空串返回空串。
+    #[test]
+    fn truncate_to_byte_limit_zero_max_bytes() {
+        assert_eq!(truncate_to_byte_limit("hello", 0), "");
+        assert_eq!(truncate_to_byte_limit("中文", 0), "");
+        assert_eq!(truncate_to_byte_limit("", 0), "");
+    }
+
+    /// s.len() <= max_bytes：原样返回（同一块缓冲区，长度不变）。
+    #[test]
+    fn truncate_to_byte_limit_within_limit_returns_original() {
+        let mut s = String::new();
+        for _ in 0..256 {
+            s.push('中');
+        }
+        let exact = s.as_str();
+        // 恰好等于上限 —— 原样返回
+        assert_eq!(truncate_to_byte_limit(exact, s.len()).as_ptr(), exact.as_ptr());
+        assert_eq!(truncate_to_byte_limit(exact, s.len()).len(), s.len());
+        // 上限大于长度 —— 原样返回
+        assert_eq!(truncate_to_byte_limit(exact, s.len() + 1).as_ptr(), exact.as_ptr());
+        // 空串在任何正上限下都是空串
+        assert_eq!(truncate_to_byte_limit("", 10), "");
+    }
+
+    /// max_bytes 落在首个字符内部（"中" 的 max_bytes = 1）：回退到 0，返回空串。
+    #[test]
+    fn truncate_to_byte_limit_first_char_straddles_limit() {
+        assert_eq!(truncate_to_byte_limit("中", 1), "");
+        assert_eq!(truncate_to_byte_limit("中", 2), "");
+        assert_eq!(truncate_to_byte_limit("中", 3), "中");
+        assert_eq!(truncate_to_byte_limit("😀a", 2), "");
+    }
+
+    /// 截断后的字节必须是合法 UTF-8（用 from_utf8 反证，确保不会切开多字节序列）。
+    #[test]
+    fn truncate_to_byte_limit_result_is_valid_utf8() {
+        let mut s = String::new();
+        for _ in 0..30_000 {
+            s.push_str("中文😀");
+        }
+        let t = truncate_to_byte_limit(&s, MAX_EMBEDDING_INPUT_BYTES);
+        assert!(t.len() <= MAX_EMBEDDING_INPUT_BYTES);
+        assert!(std::str::from_utf8(t.as_bytes()).is_ok());
+        assert!(s.starts_with(t));
+    }
 }
