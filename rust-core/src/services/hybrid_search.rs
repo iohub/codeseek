@@ -192,23 +192,18 @@ impl HybridSearchService {
             0
         };
 
-        // Dispatch both channels in parallel
-        let dense_future = self.dense.search(query, dense_limit);
-        let sparse_future = if self.config.enable_sparse {
-            Some(Box::pin(self.sparse.search(query, sparse_limit)))
+        // Dispatch both channels concurrently: `tokio::join!` polls both futures in
+        // the same task, so the sparse (BM25) query no longer waits for the dense
+        // (vector) query to finish before it even starts.
+        let (dense_res, sparse_res_opt) = if self.config.enable_sparse {
+            let (dense_res, sparse_res) = tokio::join!(
+                self.dense.search(query, dense_limit),
+                self.sparse.search(query, sparse_limit)
+            );
+            (dense_res, Some(sparse_res))
         } else {
-            None
-        };
-
-        let dense_res = dense_future.await;
-
-        // Handle sparse results with graceful degradation
-        let sparse_res_opt = match sparse_future {
-            Some(fut) => Some(fut.await),
-            None => {
-                debug!("Sparse channel disabled in config");
-                None
-            }
+            debug!("Sparse channel disabled in config");
+            (self.dense.search(query, dense_limit).await, None)
         };
 
         // Dense results are required — if they fail, the whole search fails
@@ -218,10 +213,7 @@ impl HybridSearchService {
 
         // Handle sparse results with graceful degradation
         let sparse_results: Option<Vec<TextSearchResult>> = match sparse_res_opt {
-            None => {
-                debug!("Sparse channel disabled in config");
-                None
-            }
+            None => None,
             Some(Ok(results)) => {
                 debug!("Sparse channel returned {} results", results.len());
                 Some(results)
