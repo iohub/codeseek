@@ -114,6 +114,9 @@ impl Fixture {
         let mut parser = CodeParser::new();
         // 交付物 2 的逃生口：跳过一切缓存，保证"每次都是干净的全量解析"
         parser.set_force_reindex(true);
+        // Phase P3 交付物 3：本文件是 **legacy P0 基线**，必须显式钉 Legacy，
+        // 不得依赖全局默认值（P3 起默认已切 layered）。
+        parser.set_resolver_mode(codeseek::cli::args::ResolverMode::Legacy);
         let graph = parser
             .build_petgraph_code_graph(&project_dir)
             .unwrap_or_else(|e| panic!("case `{case}` 建图失败: {e}"));
@@ -855,6 +858,8 @@ fn test_force_reindex_escape_hatch_bypasses_all_caches() {
     let build = |force: bool| -> (usize, usize, (usize, usize), PetCodeGraph) {
         let mut parser = CodeParser::new();
         parser.set_force_reindex(force);
+        // Phase P3：本用例锁 legacy 的"3 条边"基线，显式钉 Legacy，不依赖翻转后的默认值。
+        parser.set_resolver_mode(codeseek::cli::args::ResolverMode::Legacy);
         let graph = parser
             .build_petgraph_code_graph(&project_dir)
             .expect("建图应成功");

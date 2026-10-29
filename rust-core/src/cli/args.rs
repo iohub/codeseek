@@ -40,9 +40,10 @@ pub enum ResolverMode {
 }
 
 impl Default for ResolverMode {
-    /// 默认 **legacy**：不带任何 flag 时行为与 P1 逐字节一致（红线 2）。
+    /// Phase P3 起默认 **layered**（分层精度解析）。`legacy` 保留为回滚逃生口，
+    /// 行为与 P1 逐字节一致，但**不再是默认档**。
     fn default() -> Self {
-        ResolverMode::Legacy
+        ResolverMode::Layered
     }
 }
 
@@ -60,19 +61,20 @@ pub struct Cli {
     #[clap(long, action)]
     pub force_reindex: bool,
 
-    /// Phase P2a/P2b：callee 解析引擎。**默认 `legacy`**。
+    /// Phase P2a/P2b/P3：callee 解析引擎。**Phase P3 起默认 `layered`**。
     ///
-    /// - `legacy` = 旧的同名匹配：名字相等就命中，多候选取第一个（保持既有行为）；
-    /// - `layered` = 分层精度解析（L1 词法 → L2 外围类型 → L3 receiver 类型 →
+    /// - `layered`（默认）= 分层精度解析（L1 词法 → L2 外围类型 → L3 receiver 类型 →
     ///   L4 import 绑定 → L5 限定名 → L6 同模块 → L7 全仓唯一 → L8 启发式），
-    ///   歧义调用点**每个候选一条边**，并把层级/置信度/候选总数写进边。
+    ///   歧义调用点**每个候选一条边**，并把层级/置信度/候选总数写进边；
+    /// - `legacy` = 旧的同名匹配（名字相等就命中、多候选取第一个），**仅作回滚逃生口**：
+    ///   怀疑分层引擎把某仓产边弄坏时，`--resolver=legacy` 一键退回与 P1 逐字节一致的行为。
     ///
-    /// 默认值在 P3 之前保持 `legacy`（红线：不带 flag 时产边逐字节不变）。
+    /// 默认值在 Phase P3 由 `legacy` 切到 `layered`（P2 阶段逐字节验证已完成，红线解除）。
     #[clap(
         long,
         value_enum,
-        default_value = "legacy",
-        help = "调用边解析引擎：legacy = 旧的同名匹配（命中第一个）；layered = 分层精度解析（每候选一条边，带层级/置信度）"
+        default_value = "layered",
+        help = "调用边解析引擎：layered（默认）= 分层精度解析（每候选一条边，带层级/置信度）；legacy = 旧的同名匹配（命中第一个），仅作回滚逃生口"
     )]
     pub resolver: ResolverMode,
 

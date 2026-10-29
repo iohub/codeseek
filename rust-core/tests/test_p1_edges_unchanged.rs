@@ -160,8 +160,13 @@ impl Built {
 
         let mut parser = CodeParser::new();
         parser.set_force_reindex(true);
-        if let Some(flags) = flags {
-            flags.apply(&mut parser);
+        match flags {
+            Some(flags) => flags.apply(&mut parser),
+            // Phase P3 交付物 3：生产默认档位已切到 layered，但本文件的守卫表全部是
+            // **legacy 口径**（红线 2 的 32/13/... 基线）。因此"不带 flag"的建图必须
+            // **显式**钉成 Legacy，绝不隐式依赖全局默认值 —— 否则默认一翻，legacy 基线
+            // 会静默变成 layered 结果，红线名存实亡。
+            None => parser.set_resolver_mode(ResolverMode::Legacy),
         }
         let graph = parser
             .build_petgraph_code_graph(&project_dir)
@@ -643,7 +648,12 @@ fn p2b_legacy_guard_table_is_byte_for_byte_unchanged() {
         }),
     );
 
-    for (label, built) in [("--resolver 未置（默认 legacy）", &implicit), ("显式 --resolver=legacy", &explicit)] {
+    // ⚠ Phase P3 交付物 3：全局默认档位已由 legacy 切到 layered。本 `implicit` 走
+    // `Built::build`（= `build_with(None)`），而 `build_with(None)` 现在**显式**钉 Legacy
+    // （见其注释），所以这里比的是"本文件 legacy 建图入口" 与 "显式 --resolver=legacy"
+    // 两条 legacy 路径是否逐字节一致 —— 不再依赖、也不验证全局默认值。
+    // "全局默认 == Layered" 改由 [`p3_global_default_resolver_is_layered`] 单独钉。
+    for (label, built) in [("本文件 legacy 入口（build→显式钉 Legacy）", &implicit), ("显式 --resolver=legacy", &explicit)] {
         let actual = built.metrics();
         let candidates = built.ambiguous_name_candidates();
         println!("P2B LEGACY {label}\t{actual:?}\tcandidates={candidates}");
@@ -757,7 +767,9 @@ fn p2b_layered_guard_table_is_the_forked_baseline() {
     let layered = Built::build_with("p2b_fork_layered", RESOLUTION_ROOT, Some(ResolverFlags::LAYERED));
 
     // ---- (0) flag 真的被读进来了（否则比的是同一份配置，断言是空的）----
-    assert_eq!(legacy.parser.resolver_mode(), ResolverMode::Legacy, "默认必须是 legacy（红线 1）");
+    // 注：`Built::build(None)` 现在显式钉 Legacy（P3 起全局默认已切 layered），
+    // 所以这里核的是"legacy 入口确实拿到 Legacy"，而非"全局默认是 legacy"。
+    assert_eq!(legacy.parser.resolver_mode(), ResolverMode::Legacy, "legacy 入口必须被显式钉成 Legacy");
     assert_eq!(layered.parser.resolver_mode(), ResolverMode::Layered);
     assert_eq!(layered.parser.max_candidates(), 8);
     assert!(layered.parser.levels_spec().is_none(), "不带 `--levels` 必须是全层");
@@ -1047,6 +1059,9 @@ const LAYERED_ONLY_FNS: &[&str] = &[
     "_layered_callee_first",
     "_layered_caller_node",
     "_emit_layered_resolution",
+    // Phase P3 交付物 1：`CodeParser` 刷新链路与 `IncrementalManager` 增量链路**共用**的
+    // layered 发射件（原来是两份几乎相同的实现，现在只剩这一份）。
+    "emit_layered_call_edges_for_file",
 ];
 
 /// 只建不消费 `FileScopeCtx` / 只补写节点身份字段的缓存建设点。
@@ -1057,6 +1072,8 @@ const CTX_BUILDER_FNS: &[&str] = &[
     "parse_file",
     "_extract_entities_from_file",
     "ensure_file_scope_ctx",
+    // Phase P3 交付物 1：两条链路共用的实体提取件（只建 ctx，不产边）。
+    "extract_file_entities",
 ];
 
 /// [`CTX_BUILDER_FNS`] 里允许出现的引擎入口。
@@ -1067,16 +1084,43 @@ const CTX_ALLOWED_ENTRIES: &[&str] = &["build_file_scope_ctx", "module_separator
 /// 由 [`FIRST_WINS_MARKERS`] 单独证明未被偷改）。
 const MODE_BRANCH_FNS: &[&str] = &["_analyze_file_calls", "_find_callee_function"];
 
-/// 五处 first-wins 的字面特征（任务红线 1）：任何一处消失 ⇒ 说明有人把 legacy 塌缩逻辑删了。
+/// legacy "同名 first-wins"的字面特征（任务红线 1）：任何一处消失 ⇒ 说明有人把
+/// legacy 塌缩逻辑删了。
+///
+/// Phase P3 交付物 1 改写了第一条：`IncrementalManager` 里那份**副本**被删除，
+/// 增量链路改为委托 `codegraph::parser::emit_legacy_call_edges_for_file`。
+/// 因此这条特征从"incremental.rs 里有 first-wins 代码"换成
+/// "incremental.rs 里出现了共享件的调用点"（等价替代：仍然是同一个 legacy 语义，
+/// 只是只剩一份实现）；first-wins 代码本身由下面的
+/// [`FIRST_WINS_ABSENCE_MARKERS`] 反向钉住"不许再长出第二份"。
 const FIRST_WINS_MARKERS: &[(&str, &str)] = &[
-    ("src/storage/incremental.rs", "global_functions.first().map(|f| f.id)"),
+    (
+        "src/storage/incremental.rs",
+        "emit_legacy_call_edges_for_file(&self.ts_parser",
+    ),
     ("src/codegraph/parser.rs", "global_functions.first().map(|f| f.id)"),
-    ("src/codegraph/parser.rs", "index.entry(function.name.as_str()).or_insert(function)"),
+    (
+        "src/codegraph/parser.rs",
+        "index.entry(function.name.as_str()).or_insert(function)",
+    ),
     (
         "src/codegraph/parser.rs",
         "if func.namespace.contains(prefix) || func.name == method_name",
     ),
     ("src/codegraph/parser.rs", "for function in current_functions"),
+];
+
+/// Phase P3 交付物 1 的**收敛证明**：这些 first-wins 字面特征在 `src/storage/incremental.rs`
+/// 里的出现次数必须恒为 0 —— 即增量链路只允许委托，不许留第二份实现。
+const FIRST_WINS_ABSENCE_MARKERS: &[(&str, &str)] = &[
+    ("src/storage/incremental.rs", "global_functions.first().map(|f| f.id)"),
+    ("src/storage/incremental.rs", "fn _find_callee_function"),
+    ("src/storage/incremental.rs", "fn _extract_entities_from_file_impl"),
+    (
+        "src/storage/incremental.rs",
+        "build_resolution_index_from_graph",
+    ),
+    ("src/storage/incremental.rs", "resolve_call_with_config"),
 ];
 
 /// 计算每个 `fn` 的行区间 `(名字, 起始行, 结束行)`（0-based，含首尾）。
@@ -1329,6 +1373,47 @@ fn p2b_engine_entries_are_referenced_only_from_layered_branches() {
         assert!(
             text.contains(marker),
             "红线 1 被破坏：{rel} 里找不到 first-wins 特征 `{marker}`"
+        );
+    }
+
+    // ---- Phase P3 交付物 1：收敛证明 ----
+    // 增量链路里不许再存在第二份 first-wins / 第二份引擎调用代码：
+    // 一旦有人把共享件复制回去，本断言立刻失败（这正是 P0 记录在案的缺陷复发方式）。
+    for (rel, marker) in FIRST_WINS_ABSENCE_MARKERS {
+        let text = std::fs::read_to_string(manifest.join(rel)).unwrap_or_default();
+        // 只看代码行（注释里提到这些名字是允许的，而且必须允许 —— 说明文档要写清委托关系）。
+        let hits = text
+            .lines()
+            .filter(|line| {
+                let t = line.trim_start();
+                !(t.starts_with("//") || t.starts_with("///") || t.starts_with("//!") || t.starts_with('*'))
+                    && line.contains(marker)
+            })
+            .count();
+        assert_eq!(
+            hits, 0,
+            "P3 收敛被破坏：{rel} 的代码行里又出现了第二份实现特征 `{marker}`（应当委托 \
+             `codegraph::parser` 的共享件），命中 {hits} 处"
+        );
+    }
+    // 共享件必须**确实存在**于 parser.rs（防止上面两条断言同时被"删掉委托"绕过）。
+    {
+        let text = std::fs::read_to_string(manifest.join("src/codegraph/parser.rs")).unwrap_or_default();
+        for shared in [
+            "pub(crate) fn extract_file_entities",
+            "pub(crate) fn emit_legacy_call_edges_for_file",
+            "pub(crate) fn emit_layered_call_edges_for_file",
+        ] {
+            assert!(
+                text.contains(shared),
+                "P3 唯一真源必须存在：src/codegraph/parser.rs 里找不到 `{shared}`"
+            );
+        }
+        // `IncrementalManager` 必须只保留"委托"级别的 ctx 记账，不再自己产实体。
+        let inc = std::fs::read_to_string(manifest.join("src/storage/incremental.rs")).unwrap_or_default();
+        assert!(
+            inc.contains("extract_file_entities(") && inc.contains("emit_layered_call_edges_for_file("),
+            "增量链路必须委托 extract_file_entities / emit_layered_call_edges_for_file"
         );
     }
 

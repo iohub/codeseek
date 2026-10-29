@@ -125,6 +125,10 @@ impl Scenario {
 
         let mut parser = CodeParser::new();
         parser.set_force_reindex(true);
+        // Phase P3 交付物 3：本 harness 把"图里真实存在的边"当作 **legacy 答案来源**
+        // （`legacy_edges()`），必须显式钉 Legacy；layered 结果全部在测试进程内用引擎
+        // 现算，不依赖这里的建图档位。
+        parser.set_resolver_mode(codeseek::cli::args::ResolverMode::Legacy);
         let graph = parser
             .build_petgraph_code_graph(&root)
             .unwrap_or_else(|e| panic!("[{label}] 建图失败: {e}"));

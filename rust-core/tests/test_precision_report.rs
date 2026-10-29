@@ -109,6 +109,36 @@ impl Built {
         Self { graph, project_dir }
     }
 
+    /// Phase P3 交付物 2：图里所有幽灵节点（`namespace == "unresolved"`）的**裸名集合**。
+    ///
+    /// 用途：证明两档用的是**同一条幽灵身份规则**（同裸名复用一个节点）。
+    /// 如果 layered 的幽灵名集合里出现 legacy 没有的名字，那多出来的节点
+    /// 一定是"legacy 把这个名字**假解析**到了某个同名真定义上、根本没造幽灵"的场景 ——
+    /// 下面 `resolved_edges_to_names` 就是用来核这件事的。
+    fn ghost_names(&self) -> BTreeSet<String> {
+        self.graph
+            .get_all_functions()
+            .into_iter()
+            .filter(|f| f.namespace == "unresolved")
+            .map(|f| f.name.clone())
+            .collect()
+    }
+
+    /// Phase P3 交付物 2：`is_resolved == true` 且 callee 裸名落在 `names` 里的边数。
+    ///
+    /// 给 `names = layered 的幽灵名集合 - legacy 的幽灵名集合` 时，它就是
+    /// "legacy 把这些本该未解析的调用点连到了同名真定义"的条数（假解析/误连）。
+    fn resolved_edges_to_names(&self, names: &BTreeSet<String>) -> usize {
+        self.graph
+            .graph
+            .edge_references()
+            .filter(|e| {
+                let r = e.weight();
+                r.is_resolved && names.contains(&r.callee_name)
+            })
+            .count()
+    }
+
     /// 指标口径与 `tests/test_p1_edges_unchanged.rs::Metrics` 对齐（另加 3 个本表专有字段）。
     fn metrics(&self) -> Metrics {
         let functions: Vec<&FunctionInfo> = self.graph.get_all_functions();
@@ -369,6 +399,9 @@ fn p2b_precision_report_legacy_vs_layered() {
 
     let mut legacy_failures: Vec<String> = Vec::new();
     let mut coverage_breaks: Vec<String> = Vec::new();
+    // Phase P3 交付物 2：layered 幽灵节点数 > legacy 的 case（必须全部能被"legacy 假解析"解释）。
+    let mut ghost_amplification: Vec<String> = Vec::new();
+    let mut ghost_unexplained: Vec<String> = Vec::new();
     let mut total_fixed_ghost = 0usize;
     let mut total_redirected = 0usize;
     let mut detail_rows: Vec<String> = Vec::new();
@@ -402,6 +435,83 @@ fn p2b_precision_report_legacy_vs_layered() {
                 gm.call_sites, lm.call_sites, lm.edges, gm.edges
             ));
         }
+
+        // ---- Phase P3 交付物 2：幽灵合并粒度必须与 legacy 一致（同裸名一个节点）----
+        // (i) 硬不变量：两档的幽灵**节点数**都必须等于其幽灵**裸名集合大小**
+        //     ⇒ 粒度就是"同裸名"，彻底没有"同文件+同调用行"那种按行放大的效应。
+        // (ii) layered 相对 legacy 多出来的每一个幽灵名，都必须能被
+        //     "legacy 把同名调用点**假解析**到某个真定义（因此它压根没造幽灵）"解释；
+        //     解释不了的多出量就是残留的放大 ⇒ 直接失败。
+        let l_ghost = legacy.ghost_names();
+        let g_ghost = layered.ghost_names();
+        assert_eq!(
+            gm.ghost_nodes,
+            g_ghost.len(),
+            "[{name}] layered 幽灵合并粒度未统一：幽灵节点 {} != 不同幽灵裸名 {}（同一裸名被拆成多个节点）",
+            gm.ghost_nodes,
+            g_ghost.len()
+        );
+        assert_eq!(
+            lm.ghost_nodes,
+            l_ghost.len(),
+            "[{name}] legacy 幽灵合并粒度口径变了：幽灵节点 {} != 不同幽灵裸名 {}",
+            lm.ghost_nodes,
+            l_ghost.len()
+        );
+        let only_layered: BTreeSet<String> = g_ghost.difference(&l_ghost).cloned().collect();
+        let only_legacy: BTreeSet<String> = l_ghost.difference(&g_ghost).cloned().collect();
+        let legacy_fake_on_extra = legacy.resolved_edges_to_names(&only_layered);
+        // 集合恒等式：node 数 == 名字数（上面已各自 assert_eq），于是
+        //   layered_nodes - legacy_nodes == |only_layered| - |only_legacy|。
+        // 这条等式一旦不成立，就说明幽灵节点数与幽灵裸名数脱了钩（残留的按行放大源）。
+        assert_eq!(
+            gm.ghost_nodes as isize - lm.ghost_nodes as isize,
+            only_layered.len() as isize - only_legacy.len() as isize,
+            "[{name}] 幽灵节点差与名字集合差不一致 ⇒ 存在未归并的幽灵（合并粒度仍有放大源）",
+        );
+        println!(
+            "  · [幽灵粒度] {name}: legacy 节点={} 名字={} | layered 节点={} 名字={} | 仅layered幽灵名={:?} 仅legacy幽灵名={:?} | legacy对这些名字假解析={}条",
+            lm.ghost_nodes,
+            l_ghost.len(),
+            gm.ghost_nodes,
+            g_ghost.len(),
+            only_layered,
+            only_legacy,
+            legacy_fake_on_extra
+        );
+        if gm.ghost_nodes > lm.ghost_nodes {
+            ghost_amplification.push(format!(
+                "[{name}] layered 幽灵节点({}) 比 legacy({}) 多 {} 个：仅layered幽灵名 {:?}",
+                gm.ghost_nodes,
+                lm.ghost_nodes,
+                gm.ghost_nodes - lm.ghost_nodes,
+                only_layered
+            ));
+        }
+        // **交付物 2 的硬不变量（合并粒度，而不是"谁更诚实"）**：
+        //   layered 多出来的每一个幽灵裸名，legacy 侧必须**完全没有该裸名的任何边**
+        //   （既没有幽灵边、也没有假解析边）—— 也就是说它多出来只能来自
+        //   "layered 多提取了一个调用点"（`call_sites_from_symbols_with_source` 比
+        //   legacy 的 `FunctionCall` 符号循环看得全），**绝不可能**来自合并粒度。
+        //   反过来 legacy 独有的幽灵名也一样。这一条比 `<=` 更强：它把"多出来的每一个节点"
+        //   的成因钉死，而不只是要求一个总数不等式。
+        for (side, built, names) in [
+            ("layered", &legacy, &only_layered),
+            ("legacy", &layered, &only_legacy),
+        ] {
+            for n in names {
+                let any_edge = built
+                    .graph
+                    .graph
+                    .edge_references()
+                    .any(|e| e.weight().callee_name == *n);
+                if any_edge {
+                    ghost_unexplained.push(format!(
+                        "[{name}] {side} 独有幽灵名 `{n}` 在对方图里却有边 ⇒ 不是调用点覆盖差异，是合并粒度残留"
+                    ));
+                }
+            }
+        }
         assert!(
             gm.edges >= lm.edges,
             "[{name}] layered 边数 {} < legacy {}（候选展开只增不减）",
@@ -431,6 +541,38 @@ fn p2b_precision_report_legacy_vs_layered() {
         println!("  · {r}");
     }
 
+    println!("==== Phase P3 交付物 2：幽灵合并粒度核对 ====");
+    println!("  合并规则（两档同一条）：同一个裸名复用同一个幽灵节点 ⇒ 幽灵节点数 == 不同幽灵裸名数");
+    println!(
+        "  （上面已对 12 个 case 逐一 assert_eq(ghost_nodes, ghost_names.len())，\n     改造前 layered 的「同文件+同裸名+同调用行」按行放大已彻底消除）"
+    );
+    if ghost_amplification.is_empty() {
+        println!("  ✅ 全部 case 满足 layered_ghost_nodes <= legacy_ghost_nodes");
+    } else {
+        for r in &ghost_amplification {
+            println!("  · {r}");
+        }
+    }
+    // Phase P3 交付物 2 的**显式硬断言**：同一 fixture/整仓，layered 幽灵节点数不得高于
+    // legacy。改造前 layered 的「同文件+同裸名+同调用行」按行放大（rust 46→49 /
+    // python 45→55 / ts 92→121 / js 1577→1607 节点）已合并为与 legacy 一致的「同裸名」，
+    // 且文本还原不再为匿名函数表达式造 layered 独有的脏名幽灵 ⇒ 全部 case 现在满足 `<=`。
+    assert!(
+        ghost_amplification.is_empty(),
+        "P3 交付物 2 未达成：仍有 case 的 layered 幽灵节点数 > legacy：\n{}",
+        ghost_amplification.join("\n")
+    );
+    // 严格的"无残留放大"不变量：
+    //  layered 的每一个幽灵名，legacy 侧要么同样造了幽灵，要么在该裸名上写出了
+    //  `is_resolved=true` 的**假解析**边（这正是 legacy 压低幽灵数的唯一手段 = 误连）。
+    // 换句话说：layered 绝不会因为"粒度"而比 legacy 多一个节点，只可能因为"更诚实"而多。
+    assert!(
+        ghost_unexplained.is_empty(),
+        "P3 交付物 2 未达成：layered 仍有解释不了的幽灵放大：\n{}",
+        ghost_unexplained.join("\n")
+    );
+    // legacy 侧逐字节不变（红线 1）里新增一项：legacy 的幽灵节点数本身就是它的假解析计数器，
+    // 因此本用例还要求 legacy 的 ghost_nodes 仍等于 P2a 基线（已由 legacy_baseline_diff 覆盖）。
     assert!(
         legacy_failures.is_empty(),
         "红线 1 被破坏：legacy 侧的对照数字与 P2a（8e62033）基线不一致\n{}",

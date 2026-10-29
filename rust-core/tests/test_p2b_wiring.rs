@@ -112,9 +112,14 @@ fn build_once(
     let (_temp, project_dir) = staged(rel_src, label, counter);
     let mut parser = CodeParser::new();
     parser.set_force_reindex(force_reindex);
+    // Phase P3 交付物 3：`layered=false` 必须**显式**钉 Legacy，不得再依赖全局默认值
+    // （P3 起默认已切 layered）；这样本文件所有"legacy 产边=32/13"的红线断言在默认翻转后
+    // 依旧逐字节成立，而默认档本身的行为改由 [`p3_default_resolver_is_layered`] 单测。
     if layered {
         parser.set_resolver_mode(ResolverMode::Layered);
         parser.set_max_candidates(max_candidates);
+    } else {
+        parser.set_resolver_mode(ResolverMode::Legacy);
     }
     let graph = parser
         .build_petgraph_code_graph(&project_dir)
@@ -134,6 +139,9 @@ fn rebuild_in_same_dir(previous: &Build, layered: bool, max_candidates: usize) -
     if layered {
         parser.set_resolver_mode(ResolverMode::Layered);
         parser.set_max_candidates(max_candidates);
+    } else {
+        // P3：显式钉 Legacy，不依赖已翻转的全局默认值。
+        parser.set_resolver_mode(ResolverMode::Legacy);
     }
     parser
         .build_petgraph_code_graph(&previous.project_dir)
@@ -832,30 +840,78 @@ fn p2b_max_candidates_truncates_edges_but_not_truth() {
 
 // ─── 交付物 4：默认值守卫 ───────────────────────────────────────
 
-/// 不带 `--resolver` 时**实际走 legacy**：配置层与产边层双重证明。
+/// **Phase P3 交付物 3（反向更新自 P2b 的 `p2b_default_resolver_is_still_legacy`）**：
+/// 不带 `--resolver` 时默认档**必须走 layered**，配置层 / CLI 层 / 产边层三重证明；
+/// 同时保留"显式 legacy 仍等于 P0 基线 32/13"的红线（默认翻转不得让 legacy 断言静默失效）。
+///
+/// before（P2b）：`assert_eq!(CodeParser::new().resolver_mode(), Legacy, "--resolver 默认必须是 legacy")`。
+/// after （P3） ：`assert_eq!(CodeParser::new().resolver_mode(), Layered, "默认已切 layered")`。
 #[test]
-fn p2b_default_resolver_is_still_legacy() {
-    // (1) 配置层：新建的 CodeParser 默认 mode = Legacy。
-    let parser = CodeParser::new();
-    assert_eq!(parser.resolver_mode(), ResolverMode::Legacy, "`--resolver` 默认必须是 legacy");
+fn p3_default_resolver_is_layered() {
+    use codeseek::cli::args::Cli;
+    use clap::Parser;
 
-    // (2) 产边层：不带任何 flag 建出的图必须等于 P0 基线 32/13/11/2/4/9/2/13。
-    let rel = RESOLUTION_ROOT;
-    let built = build_once(rel, "defgt", 18, false, true, 8);
-    let edges: Vec<&CallRelation> = built.graph.graph.edge_references().map(|e| e.weight()).collect();
+    // (1) 配置层：新建 CodeParser 的默认 mode == Layered（反向更新的那条断言）。
+    let parser = CodeParser::new();
+    assert_eq!(
+        parser.resolver_mode(),
+        ResolverMode::Layered,
+        "Phase P3：`CodeParser::new()` 默认必须是 layered"
+    );
+
+    // (2) CLI 层：不带 `--resolver` 解析出的取值必须是 Layered（钉 clap `default_value`）。
+    let cli = Cli::try_parse_from(["codeseek", "init"]).expect("解析 `codeseek init`（不带 --resolver）");
+    assert_eq!(
+        cli.resolver,
+        ResolverMode::Layered,
+        "Phase P3：`--resolver` 的 clap 默认值必须是 layered"
+    );
+    // 显式 `--resolver=legacy` 仍可用（回滚逃生口没被删）。
+    let cli_legacy =
+        Cli::try_parse_from(["codeseek", "--resolver", "legacy", "init"]).expect("解析 --resolver=legacy");
+    assert_eq!(cli_legacy.resolver, ResolverMode::Legacy, "`--resolver=legacy` 逃生口必须仍在");
+
+    // (3) 产边层：走**默认档**（完全不 set_resolver_mode）建图，结果必须是 layered、
+    //     绝不等于 legacy 的 32/13 —— 证明默认翻转真的作用到了产边管线。
+    let (_temp, project_dir) = staged(RESOLUTION_ROOT, "deflt_layered", 19);
+    let mut p = CodeParser::new();
+    p.set_force_reindex(true);
+    // 不调 set_resolver_mode ⇒ 吃全局默认（= Layered）。
+    let g = p.build_petgraph_code_graph(&project_dir).expect("默认档建图");
+    let edges: Vec<&CallRelation> = g.graph.edge_references().map(|e| e.weight()).collect();
+    assert!(
+        edges.iter().any(|r| r.candidate_count > 0 || r.resolution_level > 0),
+        "默认档产边必须带分层标量（candidate_count/resolution_level 至少一条非 0），否则默认没切到 layered"
+    );
+    assert_ne!(
+        (g.get_all_functions().len(), edges.len()),
+        (32, 13),
+        "默认档不该再是 legacy 的 32 节点 / 13 边"
+    );
+
+    // (4) 红线 2：显式 legacy 建图仍逐字节等于 P0 基线 32/13/11/2 + 新标量全 0。
+    let built = build_once(RESOLUTION_ROOT, "defgt", 18, false, true, 8);
+    let ledges: Vec<&CallRelation> = built.graph.graph.edge_references().map(|e| e.weight()).collect();
     assert_eq!(built.graph.get_all_functions().len(), 32);
-    assert_eq!(edges.len(), 13);
-    assert_eq!(edges.iter().filter(|r| r.is_resolved).count(), 11);
-    assert_eq!(edges.iter().filter(|r| !r.is_resolved).count(), 2);
-    assert_eq!(built.graph.get_all_functions().iter().filter(|f| f.namespace == "unresolved").count(), 2);
-    // 默认（legacy）产出的边，四个新标量必须恒为 0。
-    for rel_edge in &edges {
+    assert_eq!(ledges.len(), 13);
+    assert_eq!(ledges.iter().filter(|r| r.is_resolved).count(), 11);
+    assert_eq!(ledges.iter().filter(|r| !r.is_resolved).count(), 2);
+    assert_eq!(
+        built
+            .graph
+            .get_all_functions()
+            .iter()
+            .filter(|f| f.namespace == "unresolved")
+            .count(),
+        2
+    );
+    for rel_edge in &ledges {
         assert_eq!(rel_edge.resolution_level, 0);
         assert_eq!(rel_edge.confidence, 0);
         assert_eq!(rel_edge.rank, 0);
         assert_eq!(rel_edge.candidate_count, 0);
     }
-    println!("默认值守卫：不带 --resolver 时 32/13/11/2 + 新标量全 0 ✓");
+    println!("P3 默认值守卫：默认=layered（配置/CLI/产边三重），显式 legacy 仍 32/13/11/2 + 标量全 0 ✓");
 }
 
 // ─── 任务口径 A：「跳过」与「喂索引」必须解耦 ────────────────────

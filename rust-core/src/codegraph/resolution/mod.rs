@@ -523,19 +523,26 @@ pub fn emit_layered_resolution(
         // 口径 B：幽灵节点走 `FunctionInfo::legacy` —— `module_path`/`qualified_name`
         // 保持 `None`，与 legacy 的幽灵节点逐字段一致（幽灵不是源码里的定义，没有身份可言）。
         //
-        // **先查再建**：同一个调用点（同文件 + 同行 + 同名）如果已经有幽灵节点就复用。
+        // **先查再建**：同一个调用点如果已经有幽灵节点就复用。
         // 不做复用的后果是实测出来的：`add_call_relation` 按 `(caller, callee, line)`
         // 去重，第二条边被静默丢弃，而它对应的幽灵节点已经进了图 ⇒ 出现
         // "节点数暴涨、边数却不涨"的孤儿节点（`simple_js_project` 1929 个幽灵 / 797 条未解析边）。
+        //
+        // Phase P3 交付物 2：**合并粒度与 legacy 的有效行为对齐为「同裸名复用」，忽略行号**。
+        // 改造前这里还要求 `line_start == line_end == site.line`，于是同一个文件里同一个裸名
+        // 在不同行各造一个幽灵 ⇒ layered 的幽灵节点数系统性高于 legacy（P2b 收口实测整仓：
+        // rust 46→49、python 45→55、ts 92→121、js 1577→1607）。
+        // legacy 之所以"更少"，是因为它的全局 `find_functions_by_name()` 会命中早先造出的
+        // 同名幽灵并跨行/跨文件复用。本轮先按「同文件 + 同裸名」对齐（下面这条谓词），
+        // 实测仍高于 legacy ⇒ 进一步放宽到「同裸名」，见 P3 报告。
+        // ⚠ 关键取舍：幽灵**节点**可以全仓共用一个，但幽灵**边**的 `callee_file`
+        //   一律写调用点自己的文件（下面 `CallRelation::layered_ghost` 传的是 `site.file`），
+        //   因此这次合并不引入任何假的跨文件边 —— 这正是 legacy 靠"跨文件复用同名幽灵"
+        //   压低节点数时付出的代价，layered 不付这个代价。
         let existing_ghost = code_graph
             .find_functions_by_name(&site.callee_name)
             .into_iter()
-            .find(|f| {
-                f.namespace == "unresolved"
-                    && f.file_path == site.file
-                    && f.line_start == site.line
-                    && f.line_end == site.line
-            })
+            .find(|f| f.namespace == "unresolved")
             .map(|f| f.id);
         let ghost_id = match existing_ghost {
             Some(id) => id,

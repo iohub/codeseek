@@ -172,6 +172,9 @@ fn test_parser_rebuilds_from_scratch_when_cache_version_is_stale() {
 
     // 故意**不**调用 set_force_reindex：证明"版本门禁自身"就足以让旧缓存失效
     let mut parser = CodeParser::new();
+    // Phase P3：本用例锁 legacy 的 `resolved_calls == 3` 基线，显式钉 Legacy，
+    // 不依赖翻转后的 layered 默认值（门禁/缓存失效逻辑与档位无关，此处只是产边口径）。
+    parser.set_resolver_mode(codeseek::cli::args::ResolverMode::Legacy);
     let graph = parser
         .build_petgraph_code_graph(&project_dir)
         .expect("旧缓存必须被降级为全量重建，而不是让建图失败");

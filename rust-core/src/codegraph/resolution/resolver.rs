@@ -425,9 +425,12 @@ pub fn call_sites_from_symbols_with_source(
         } else {
             ast_name
         };
-        if name.is_empty() {
-            continue;
-        }
+        // Phase P3 交付物 2（覆盖中性·口径 B）：AST 名为空、且文本还原不出合法标识符时，
+        // **不再跳过**该调用点，而是与 legacy `_create_unresolved_call_relation` 逐字段同形地
+        // 用空名 `""` 发射 —— legacy 对这些匿名函数表达式调用（如压缩 bundle 里的
+        // `onClick: function(){…}`）正是用 `""` 造幽灵；若 layered 改而"还原一个脏名"或"直接丢弃"，
+        // 前者会多造 layered 独有的幽灵节点（幽灵数 > legacy），后者会破坏"有边调用点相等"。
+        // 用空名发射后，所有这类站点折叠进同一个共享 `""` 幽灵 ⇒ 幽灵数与 legacy 严格同形。
         let mut site = CallSite::new(&ctx.file_path, line, &name, &language)
             .with_receiver(symbol_ref.call_receiver().map(|s| s.to_string()))
             .with_symbol_guid(*symbol_ref.guid())
@@ -631,11 +634,43 @@ pub fn callee_name_from_expression(expression: &str, language: &str) -> Option<S
     }
     let segments = split_path_segments(head, language);
     let last = segments.last().cloned()?;
+    // Phase P3 交付物 2：还原出的末段必须是**单个合法标识符**。
+    // 压缩 JS bundle 里的匿名函数表达式调用（`onClick: function(e,t){…}`、
+    // `new function(){…}`）AST 名为空，早期版本会把整段 `head` 末"段"直接当名字，
+    // 于是还原出 `function e` / `function t`（含内部空格，根本不是标识符）或
+    // `function` / `super`（JS 保留字，不可能是被调用的函数名）。legacy 对这些空 AST
+    // 名站点统一用空名 `""` 幽灵，故还原失败时本函数**同样返回 `None`**，让调用点
+    // 落回与 legacy 同形的 `""` 幽灵，而不是造出一个 layered 独有的脏名节点。
+    if !is_single_identifier(&last) {
+        return None;
+    }
+    // 还原出的末段是语言**保留字**时同样判定为脏名（`function`/`super`/`new`… 不可能
+    // 是被调用的函数名，它们出现只可能是匿名函数表达式/构造调用被 AST 丢了名字）。
+    if is_reserved_word(&last) {
+        return None;
+    }
     let first = last.chars().next()?;
     if !first.is_alphanumeric() && first != '_' {
         return None;
     }
     Some(last)
+}
+
+/// 判断字符串是否为**单个合法标识符**：非空、不含空白、每个字符都是标识符字符
+/// （字母/数字/下划线/`$`），且首字符不是数字。用于过滤文本还原产出的脏名。
+fn is_single_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        && !s.chars().next().map_or(true, |c| c.is_numeric())
+}
+
+/// 文本还原末段是否为某语言的**保留字**（不可能是被调用的函数名）。
+/// 只列"匿名函数表达式/构造/运算符被误当 callee"时真实会出现的词，避免误杀 `new_foo` 这类名。
+fn is_reserved_word(s: &str) -> bool {
+    matches!(
+        s,
+        "function" | "super" | "this" | "class" | "new" | "typeof" | "void" | "delete"
+    )
 }
 
 /// 从一次调用的源码文本里取出 `被调用表达式(实参)` 的前缀分量链。
