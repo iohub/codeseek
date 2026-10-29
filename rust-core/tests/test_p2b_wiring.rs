@@ -170,6 +170,47 @@ struct EdgeKey {
     candidate_count: u8,
 }
 
+/// [`EdgeKey`] 去掉 **callee 身份维**（`callee_file` + `callee_line_start`）后的结构投影。
+///
+/// 用途：全量/增量一致性 harness 里，"这条边在不在、连不连得对、4 个新标量填了什么"
+/// 必须逐条锁死；而"同名歧义最终连到哪一份定义"在 legacy 下由 `HashMap` 的每进程随机
+/// 种子决定（实测 16 轮独立建图里 `gamma.rs:6 call_helper` 会落到四个同名候选中的任一个，
+/// 而 edges/nodes 恒为 13/32）。把那一维从比较里拿掉，其余 11 维照旧全锁 ——
+/// 重复边/漏边依然会被边条数与结构投影逐条抓到，约束强度不降。
+/// 口径出处：`tests/test_p1_edges_unchanged.rs` 守卫 4 的 (c)/(c2)，
+/// 以及 `tests/fixtures/resolution/README.md` 的 legacy 抖动记录。
+type StructuralEdgeKey = (
+    String, // caller_file
+    String, // caller_name
+    usize,  // caller_line_start
+    String, // callee_name（节点名；同名候选之间这一维相同）
+    usize,  // line_number（调用行 = 调用点身份）
+    String, // edge_callee_name（边上记录的名字）
+    bool,   // is_resolved
+    u8,     // resolution_level
+    u8,     // confidence
+    u8,     // rank
+    u8,     // candidate_count
+);
+
+impl EdgeKey {
+    fn without_callee_identity(&self) -> StructuralEdgeKey {
+        (
+            self.caller_file.clone(),
+            self.caller_name.clone(),
+            self.caller_line_start,
+            self.callee_name.clone(),
+            self.line_number,
+            self.edge_callee_name.clone(),
+            self.is_resolved,
+            self.resolution_level,
+            self.confidence,
+            self.rank,
+            self.candidate_count,
+        )
+    }
+}
+
 fn edge_multiset(graph: &PetCodeGraph, root: &Path) -> Vec<EdgeKey> {
     let rel = |p: &Path| -> String {
         p.strip_prefix(root)
@@ -203,6 +244,20 @@ fn edge_multiset(graph: &PetCodeGraph, root: &Path) -> Vec<EdgeKey> {
         .collect();
     out.sort();
     out
+}
+
+/// [`edge_multiset`] 的**结构投影**版本（去掉 callee 身份维，理由见 [`StructuralEdgeKey`]）。
+///
+/// 凡是在 **legacy** 模式下做"两次独立建图之间比较"的断言，都必须用这个版本：
+/// 同名歧义连到哪一份定义由 `HashMap` 的每进程随机种子决定，锁它 = 写一条永不可能稳定的断言。
+/// layered 是确定性链路，比较时请继续用全维的 [`edge_multiset`]。
+fn structural_edge_multiset(graph: &PetCodeGraph, root: &Path) -> Vec<StructuralEdgeKey> {
+    let mut v: Vec<StructuralEdgeKey> = edge_multiset(graph, root)
+        .iter()
+        .map(|k| k.without_callee_identity())
+        .collect();
+    v.sort();
+    v
 }
 
 /// 节点投影（同样不含 uuid）。
@@ -305,9 +360,10 @@ fn p2b_second_round_without_saved_graph_must_not_be_empty() {
         "第二轮调用边数不得归零（口径 D 缺陷：只落哈希不落图）"
     );
     assert_eq!(
-        edge_multiset(&second, &first.project_dir),
-        edge_multiset(&first.graph, &first.project_dir),
-        "第二轮的边多重集必须与第一轮逐条相等"
+        structural_edge_multiset(&second, &first.project_dir),
+        structural_edge_multiset(&first.graph, &first.project_dir),
+        "第二轮的边多重集必须与第一轮逐条相等（legacy 口径：结构投影，callee 身份维除外）。\
+         `nested_function_caller` 场景里每个被调名都只有唯一候选，故此处结构投影与全维投影等价。"
     );
 }
 
@@ -323,7 +379,11 @@ fn p2b_cache_d_fix_keeps_clean_rebuild_identical() {
         false,
         8,
     );
-    let expected_edges = edge_multiset(&first.graph, &first.project_dir);
+    // 判据用**结构投影**：`method_receiver` 恰好是 legacy 的抖动场景（`add` 有两份同名候选
+    // `calc.rs:9` / `misc.rs:4`，first-wins 选哪一份取决于 HashMap 的每进程随机种子 ——
+    // 实测 16 轮独立建图 9:7 分布）。本测试要证的是"清缓存重建没有改变任何解析结果"，
+    // 与"随机选中哪一份"无关；被放开的这一维在下面用 layered 全维对照补回强度。
+    let expected_edges = structural_edge_multiset(&first.graph, &first.project_dir);
     let expected_nodes = node_multiset(&first.graph, &first.project_dir);
 
     // 抹掉全部磁盘缓存 ⇒ 下一轮必然全量重解析。
@@ -335,9 +395,29 @@ fn p2b_cache_d_fix_keeps_clean_rebuild_identical() {
         "清缓存后从零重建的节点投影必须不变"
     );
     assert_eq!(
-        edge_multiset(&from_scratch, &first.project_dir),
+        structural_edge_multiset(&from_scratch, &first.project_dir),
         expected_edges,
-        "清缓存后从零重建的边投影必须不变"
+        "清缓存后从零重建的边投影（结构投影，含 is_resolved 与 4 个新标量）必须逐条不变"
+    );
+
+    // 补回被放开那一维的强度：**layered 是确定性链路**，同一场景下清缓存重建必须全维相等
+    // （含 callee 身份）。⇒ 证明"结构投影"只是为了容忍 legacy 的既有随机面，
+    // 而不是掩盖任何真实的不一致。
+    let l_first = build_once(
+        &format!("{RESOLUTION_ROOT}/method_receiver"),
+        "cacheDctrlL",
+        9,
+        true,
+        false,
+        8,
+    );
+    let l_expected = edge_multiset(&l_first.graph, &l_first.project_dir);
+    clean_all_caches(&l_first.project_dir);
+    let l_scratch = rebuild_in_same_dir(&l_first, true, 8);
+    assert_eq!(
+        edge_multiset(&l_scratch, &l_first.project_dir),
+        l_expected,
+        "[layered] 清缓存后从零重建必须**全维**（含 callee 身份）逐条相等"
     );
 }
 
@@ -419,11 +499,77 @@ fn p2b_full_vs_incremental_refresh_is_consistent() {
             !mine(&fresh).is_empty(),
             "[{tag}] 被改文件本身必须有边，否则这条 harness 是空的"
         );
+
+        // **结构投影**（去掉 callee 的身份维）—— 两种模式都必须逐条相等。
+        // 这一条正是"重复边 / 漏边"的精确检测器：同一个调用点若被增量叠出两条，
+        // 投影多重集就会多一个元素而失败；callee 选到哪一份同名候选**不参与比较**
+        // （legacy 的 first-wins 取值来自 HashMap 每进程随机种子，实测 16 轮独立建图里
+        //  `gamma.rs:6 call_helper` 会落到 alpha/beta/mod_y/other_mod 四个候选中的任一个，
+        //  而 edges/nodes 恒为 13/32 —— 详见 `tests/test_p1_edges_unchanged.rs` 守卫 4 的
+        //  (c)/(c2) 与 `tests/fixtures/resolution/README.md`）。
+        let structural = |set: &[EdgeKey]| -> Vec<StructuralEdgeKey> {
+            let mut v: Vec<StructuralEdgeKey> =
+                set.iter().map(|k| k.without_callee_identity()).collect();
+            v.sort();
+            v
+        };
+        let (si, sf) = (structural(&mine(&incremental)), structural(&mine(&fresh)));
         assert_eq!(
-            mine(&incremental),
-            mine(&fresh),
-            "[{tag}] 增量刷新与被改文件从零全量重建产出的边必须逐条相等（含 4 个新字段）"
+            si.len(),
+            sf.len(),
+            "[{tag}] 增量刷新与被改文件从零重建的**边条数**必须相等（多出来=重复边，少了=漏边）"
         );
+        assert_eq!(
+            si, sf,
+            "[{tag}] 增量刷新与被改文件从零重建的边（结构投影，含 is_resolved 与 4 个新标量）必须逐条相等"
+        );
+
+        // **全维投影**（含 callee 身份）：layered 是确定性链路，必须逐条相等；
+        // legacy 只在"合法候选域"内允许不同 —— 用每调用点边数 + callee 名族把它的偏差钉住。
+        if layered {
+            assert_eq!(
+                mine(&incremental),
+                mine(&fresh),
+                "[layered] 全维（含 callee 身份）也必须逐条相等：layered 是确定性链路"
+            );
+        } else {
+            let per_site = |set: &[EdgeKey]| -> std::collections::BTreeMap<(String, usize), usize> {
+                let mut m = std::collections::BTreeMap::new();
+                for k in set {
+                    *m.entry((k.caller_name.clone(), k.line_number)).or_insert(0usize) += 1;
+                }
+                m
+            };
+            println!(
+                "[legacy] 每调用点边数 增量={:?} 重建={:?} | callee 身份 增量={:?} 重建={:?}",
+                per_site(&mine(&incremental)),
+                per_site(&mine(&fresh)),
+                mine(&incremental)
+                    .iter()
+                    .map(|k| (k.callee_name.clone(), k.callee_file.clone()))
+                    .collect::<Vec<_>>(),
+                mine(&fresh)
+                    .iter()
+                    .map(|k| (k.callee_name.clone(), k.callee_file.clone()))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                per_site(&mine(&incremental)),
+                per_site(&mine(&fresh)),
+                "[legacy] 每个调用点上的边条数必须一致（重复边只会出现在增量一侧）"
+            );
+            assert_eq!(
+                mine(&incremental)
+                    .iter()
+                    .map(|k| k.callee_name.clone())
+                    .collect::<Vec<_>>(),
+                mine(&fresh)
+                    .iter()
+                    .map(|k| k.callee_name.clone())
+                    .collect::<Vec<_>>(),
+                "[legacy] callee 名（同族）必须一致 —— 允许抖的是'哪一份同名定义'，不是'哪个函数'"
+            );
+        }
     }
 }
 
@@ -710,4 +856,100 @@ fn p2b_default_resolver_is_still_legacy() {
         assert_eq!(rel_edge.candidate_count, 0);
     }
     println!("默认值守卫：不带 --resolver 时 32/13/11/2 + 新标量全 0 ✓");
+}
+
+// ─── 任务口径 A：「跳过」与「喂索引」必须解耦 ────────────────────
+
+/// 把图落盘成"图缓存"，用于构造**合法增量态**（图缓存 + 文件哈希同时存在）。
+///
+/// `build_petgraph_code_graph` 自己只写 `file_hashes.json`，图的落盘在另一条链路
+/// （真实 CLI：`main.rs` 的 `persistence.save_graph(...)` + `codegraph::repository::save_state()`）。
+/// `_load_existing_graph` 认的 project_id 是**目录名**，所以这里必须用目录名存。
+fn persist_graph_as_cache(project_dir: &Path, graph: &PetCodeGraph) {
+    let name_id = project_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .expect("临时项目目录必须有目录名");
+    codeseek::storage::PersistenceManager::new()
+        .save_graph(&name_id, graph)
+        .expect("图缓存落盘失败");
+}
+
+/// **口径 A 的钉死用例**：哈希命中 ⇒ 不重新解析、不重建 `file_scopes`；
+/// 但分层索引仍必须仅凭图里已有的函数节点产出候选（边一条不少、一条不多）。
+///
+/// 这里同时钉死任务书留给实现二选一的那半句 ——
+/// **`ensure_file_scope_ctx` 的按需补建不计入"重新解析"计数**（`CodeParser::last_round_file_counts`
+/// 只统计 `build_*` 主循环里真正解析过的文件；补建只往 `file_scopes` 写一份 ctx，
+/// 既不产 `FunctionInfo` 也不产 `CallRelation`）。选中这个口径的理由写在
+/// `src/codegraph/parser.rs` 的 `last_round_parsed` 字段文档里。
+#[test]
+fn p2b_hash_skip_contract_feeds_index_without_reparsing() {
+    let case = format!("{}/cross_file_same_name", RESOLUTION_ROOT);
+    let (_temp, dir) = staged(&case, "skipA", 7);
+
+    // R1：layered 全量（force）⇒ 三个文件都解析、都建 ctx。
+    let mut p1 = CodeParser::new();
+    p1.set_force_reindex(true);
+    p1.set_resolver_mode(ResolverMode::Layered);
+    p1.set_max_candidates(8);
+    let g1 = p1
+        .build_petgraph_code_graph(&dir)
+        .unwrap_or_else(|e| panic!("R1 建图失败: {e}"));
+    let c1 = p1.last_round_file_counts();
+    assert_eq!(c1, (3, 0), "R1（force）必须解析全部 3 个文件、跳过 0 个，实际 {c1:?}");
+    assert_eq!(p1.file_scope_count(), 3, "被真正解析过的文件必须顺手建好 ctx");
+    let e1 = edge_multiset(&g1, &dir);
+    assert!(!e1.is_empty(), "R1 必须产出边，否则后面的对照是空的");
+
+    // 把磁盘状态摆成真实 CLI 跑完第一轮之后的样子：图 + 哈希都在。
+    persist_graph_as_cache(&dir, &g1);
+
+    // R2：同一套配置、非 force ⇒ 哈希全命中。
+    let mut p2 = CodeParser::new();
+    p2.set_force_reindex(false);
+    p2.set_resolver_mode(ResolverMode::Layered);
+    p2.set_max_candidates(8);
+    let g2 = p2
+        .build_petgraph_code_graph(&dir)
+        .unwrap_or_else(|e| panic!("R2 建图失败: {e}"));
+    let c2 = p2.last_round_file_counts();
+    assert_eq!(
+        c2,
+        (0, 3),
+        "口径 A：哈希命中即跳过 —— 必须『重新解析 0 个 / 跳过 3 个』，实际 {c2:?}"
+    );
+    assert_eq!(
+        p2.file_scope_count(),
+        0,
+        "被跳过的文件不得为『喂索引』而重建 file_scopes（口径 A 的解耦要求）"
+    );
+    // 索引供给：跳过一轮之后，layered 的边与全量**逐条相同**（layered 是确定性链路 ⇒ 用全维比较）。
+    assert_eq!(
+        edge_multiset(&g2, &dir),
+        e1,
+        "跳过轮不得丢边 / 叠边 / 改候选（读回的图 + 仅凭图节点的索引必须等价于全量）"
+    );
+
+    // 按需补建：拿得到 ctx，但**不算**"重新解析"。
+    let one = dir.join("alpha.rs");
+    let ctx = p2
+        .ensure_file_scope_ctx(&one)
+        .expect("按需补建必须能为被跳过的文件重建出 ctx");
+    assert!(
+        !ctx.scopes.is_empty(),
+        "补建出来的 ctx 必须有作用域树（说明它是真解析，不是空壳）"
+    );
+    assert_eq!(
+        p2.last_round_file_counts(),
+        c2,
+        "`ensure_file_scope_ctx` 的按需补建不许计入『重新解析』计数（本用例钉死的口径选择）"
+    );
+
+    println!(
+        "口径 A 钉死：R1 {c1:?} → R2 {c2:?}（3/3 跳过）| 边 {} 条逐条相等 | 补建 1 份 ctx 后计数仍 {c2:?}",
+        e1.len()
+    );
+
+    clean_all_caches(&dir);
 }

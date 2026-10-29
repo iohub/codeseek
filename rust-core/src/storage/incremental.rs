@@ -43,6 +43,18 @@ pub struct IncrementalManager {
     resolver_mode: ResolverMode,
     /// Phase P2b：本轮的仓库根，用于 module path 推导（`None` ⇒ module path 降级为空串）。
     resolution_root: Option<PathBuf>,
+    /// Phase P2b 收口（任务口径 A）：文件级解析上下文缓存，与 `CodeParser::file_scopes` 同语义。
+    ///
+    /// 改造前 P2b 主体在 `_analyze_file_calls_layered` 里**每次都重新解析一遍文件**来造 ctx
+    /// （本结构体当时没有 ctx 缓存），于是一次 `refresh_file` 对同一文件解析两次：
+    /// `_extract_entities_from_file` 一次、产边再一次。口径 A 要求"解析/重建决策"与
+    /// "索引供给"解耦，并且**不许为了喂索引而重复解析** —— 所以这里补上与 `CodeParser`
+    /// 同一份生命周期的 ctx 缓存：
+    ///  - 写入点：`_extract_entities_from_file`（与 `file_functions`/`ctx` 同批产出）；
+    ///  - 失效点：`_remove_file_entities`（整文件失效）；
+    ///  - 读者：`_analyze_file_calls_layered`（拿不到才按需补建一次，并缓存起来）。
+    /// `Legacy` 分支完全不读这个字段 ⇒ 默认路径产边逐字节不变（红线 1）。
+    file_scopes: HashMap<PathBuf, std::sync::Arc<crate::codegraph::resolution::FileScopeCtx>>,
 }
 
 impl IncrementalManager {
@@ -55,6 +67,7 @@ impl IncrementalManager {
             // Phase P2b：默认 legacy —— 不置 flag 时增量产边与 P1 完全一致（红线 1）。
             resolver_mode: ResolverMode::Legacy,
             resolution_root: None,
+            file_scopes: HashMap::new(),
         }
     }
 
@@ -183,16 +196,35 @@ impl IncrementalManager {
     }
 
     /// 从文件提取实体
-    fn _extract_entities_from_file(&self, file_path: &PathBuf) -> Result<(Vec<ClassInfo>, Vec<FunctionInfo>), String> {
+    ///
+    /// Phase P2b 收口（口径 A）：签名 `&self` → `&mut self`，因为这里要顺手把
+    /// `FileScopeCtx` 缓存进 `self.file_scopes`（与 `CodeParser::_extract_entities_from_file`
+    /// 完全同口径），让 layered 产边**不必为了拿 ctx 而重复解析同一个文件**。
+    /// 解析入口改用 `parse_file_with_metadata`：它内部就是原来的 `parse_file`
+    /// （`parse_file` = `parse_file_with_metadata(..)?.symbols` 的转发），
+    /// 符号列表逐字节相同，只是额外带出 Java 的 package 声明 ⇒ 产出的实体不变（红线 1）。
+    fn _extract_entities_from_file(&mut self, file_path: &PathBuf) -> Result<(Vec<ClassInfo>, Vec<FunctionInfo>), String> {
         let mut classes = Vec::new();
         let mut functions = Vec::new();
 
         // 使用TreeSitter解析器解析文件
-        let symbols = self.ts_parser.parse_file(file_path)
+        let ast = self.ts_parser.parse_file_with_metadata(file_path)
             .map_err(|e| format!("Failed to parse file {}: {:?}", file_path.display(), e))?;
+        let symbols = ast.symbols;
 
         let language = self._detect_language(file_path);
         let namespace = self._extract_namespace(file_path);
+
+        // Phase P2b 收口（口径 A）：与上面同一次解析顺手建 ctx 并缓存。
+        // legacy 分支不读它 ⇒ 默认路径产边逐字节不变。
+        let ctx = build_file_scope_ctx(
+            file_path.as_path(),
+            &symbols,
+            self.resolution_root.as_deref(),
+            &language,
+            ast.declared_package,
+        );
+        self.file_scopes.insert(file_path.clone(), ctx);
 
         for symbol in symbols {
             let symbol_guard = symbol.read();
@@ -276,8 +308,14 @@ impl IncrementalManager {
                             call_line,
                             true,
                         );
-                        if let Err(e) = call_graph.add_call_relation(relation) {
-                            warn!("Failed to add call relation: {}", e);
+                        // Phase P2b 收口（口径 B）：与 `CodeParser` 的刷新链路共用**同一个**
+                        // 边写入入口 `PetCodeGraph::upsert_call_site_edges`（先删同调用点旧边
+                        // 再写），因此全量/增量、legacy/layered 四条路径只有一套去重逻辑。
+                        if call_graph
+                            .upsert_call_site_edges(caller_id, call_line, call_name, vec![relation])
+                            == 0
+                        {
+                            warn!("Failed to add call relation: {}", call_name);
                         }
                     } else {
                         // 未解析的调用
@@ -297,8 +335,11 @@ impl IncrementalManager {
     /// "全量建图"与"增量刷新"两条链路上得到**完全相同**的边（含 4 个新标量）——
     /// 这正是交付物 4 的全量/增量一致性 harness 能成立的前提。
     ///
-    /// 本结构体不缓存 `FileScopeCtx`，所以这里现场解析 + 现场建 ctx，口径与
-    /// `CodeParser::ensure_file_scope_ctx` 逐参数一致
+    /// Phase P2b 收口（口径 A）：ctx **优先取缓存**（`_extract_entities_from_file` 本轮已经
+    /// 解析过该文件并顺手建好 ctx）；只有缓存里没有时才现场按需补建一次并回填缓存，
+    /// 绝不为"喂索引"而重复解析同一个文件。改造前是"每次产边都重新解析 + 重建 ctx"，
+    /// 于是一次 `refresh_file` 对同一个文件解析两遍，并且把哈希跳过的文件也拖回解析队列。
+    /// 补建口径与 `CodeParser::ensure_file_scope_ctx` 逐参数一致
     /// （`parse_file_with_metadata` → `_detect_language` → `build_file_scope_ctx`）。
     fn _analyze_file_calls_layered(
         &mut self,
@@ -306,19 +347,32 @@ impl IncrementalManager {
         function_ids: &[Uuid],
         call_graph: &mut PetCodeGraph,
     ) -> Result<(), String> {
-        let ast = self
+        // (1) ctx：缓存命中直接复用；未命中才补建一次并回填。
+        let ctx = match self.file_scopes.get(file_path) {
+            Some(cached) => cached.clone(),
+            None => {
+                let ast = self
+                    .ts_parser
+                    .parse_file_with_metadata(file_path)
+                    .map_err(|e| format!("Failed to parse file for call analysis: {:?}", e))?;
+                let language = self._detect_language(file_path);
+                let built = build_file_scope_ctx(
+                    file_path,
+                    &ast.symbols,
+                    self.resolution_root.as_deref(),
+                    &language,
+                    ast.declared_package,
+                );
+                self.file_scopes.insert(file_path.clone(), built.clone());
+                built
+            }
+        };
+        // (2) 调用点符号：只取 symbols（`parse_file` 就是 `parse_file_with_metadata(..)?.symbols`
+        // 的转发，符号列表逐字节相同），不再重建 ctx。
+        let symbols = self
             .ts_parser
-            .parse_file_with_metadata(file_path)
+            .parse_file(file_path)
             .map_err(|e| format!("Failed to parse file for call analysis: {:?}", e))?;
-        let symbols = ast.symbols;
-        let language = self._detect_language(file_path);
-        let ctx = build_file_scope_ctx(
-            file_path,
-            &symbols,
-            self.resolution_root.as_deref(),
-            &language,
-            ast.declared_package,
-        );
 
         // 本文件的函数节点（从图里按 id 取 —— 图是增量链路的唯一真相）。
         let funcs: Vec<FunctionInfo> = function_ids
@@ -436,8 +490,12 @@ impl IncrementalManager {
             false,
         );
 
-        if let Err(e) = call_graph.add_call_relation(relation) {
-            warn!("Failed to add unresolved call relation: {}", e);
+        // Phase P2b 收口（口径 B）：幽灵边同样走唯一的边写入入口。
+        if call_graph
+            .upsert_call_site_edges(caller_id, call_line, call_name, vec![relation])
+            == 0
+        {
+            warn!("Failed to add unresolved call relation: {}", call_name);
         }
     }
 
@@ -463,9 +521,20 @@ impl IncrementalManager {
             call_graph.remove_function(&function_id);
         }
 
+        // Phase P2b 收口（真缺陷 1 的同源修复，见 `CodeParser::_remove_file_entities` 的说明）：
+        // `file_index` 只记录**本 manager 自己刷新过**的文件。若图里的节点是别的链路写进去的
+        // （`CodeParser::parse_file` / 从 `graph.bin` 读回来的增量轮），上面的循环遍历的是空列表
+        // ⇒ 旧节点一个都不删 ⇒ 紧接着 `add_function` 用新 Uuid 再插一份 ⇒ 同一文件两套函数节点
+        // ⇒ 同一个调用点叠出两条一模一样的边。兜底以图自身的按文件反向索引为准（幂等：
+        // 已删除的 id 在 `remove_function` 里查不到映射，直接返回 false）。
+        call_graph.remove_functions_by_file(file_path);
+
         // 清理索引
         self.file_index.remove_file(file_path);
         self.snippet_index.clear_file_cache(file_path);
+        // Phase P2b 收口（口径 A）：ctx 与实体同生命周期失效，
+        // 残留会让下一个刷新轮读到已删除文件的旧作用域树/旧 import 绑定。
+        self.file_scopes.remove(file_path);
 
         // 从元数据中移除
         self.file_metadata.remove(file_path);

@@ -510,11 +510,12 @@ pub fn emit_layered_resolution(
 ) -> usize {
     use crate::codegraph::types::{CallRelation, FunctionInfo as GFunctionInfo};
 
-    // 要求 (v)：**重写之前**先清掉同一个调用点的旧边，保证幂等、禁止叠边。
-    // 清理范围严格限定在 `(caller, line, callee_name)` —— 按 `(caller, line)` 全删会
-    // 抹掉同一行其它调用点的边（P2b 实测踩过：`simple_js_project` 边数 746 → 52）。
-    code_graph.remove_call_edges_by_call_site(&caller.id, site.line, &site.callee_name);
-
+    // 要求 (v) + 任务口径 B：**发射必须幂等**。本函数不再自己"先删后写"，
+    // 而是把整个调用点的新候选一次性交给 [`crate::codegraph::types::PetCodeGraph::upsert_call_site_edges`]
+    // —— 那是 legacy / layered、全量 / 增量四条产边路径**共用**的唯一边写入入口
+    // （它内部先删同调用点的旧边再写新候选，删除范围严格限定在
+    // `(caller, line, callee 名族)`；按 `(caller, line)` 全删会抹掉同一行其它调用点，
+    // P2b 实测踩过：`simple_js_project` 边数 746 → 52）。
     // 截断前的真实候选数（u8 饱和到 255）。
     let total = resolution.total_candidate_count.min(u8::MAX as usize) as u8;
 
@@ -562,16 +563,17 @@ pub fn emit_layered_resolution(
             site.file.clone(),
             site.line,
         );
-        return match code_graph.add_call_relation(relation) {
-            Ok(()) => 1,
-            Err(err) => {
-                tracing::warn!("layered 幽灵边写入失败: {}", err);
-                0
-            }
-        };
+        return code_graph.upsert_call_site_edges(
+            &caller.id,
+            site.line,
+            &site.callee_name,
+            vec![relation],
+        );
     }
 
-    let mut written = 0usize;
+    // 口径 A：每个候选一条边（截断上限由 `--max-candidates` 决定），整个调用点一次性发射，
+    // 使得"重写 N 次"与"写 1 次"的图状态完全一致。
+    let mut relations: Vec<CallRelation> = Vec::new();
     for candidate in resolution.candidates.iter().take(max_candidates.max(1)) {
         // 候选必须真的是图里的节点（索引本就来自图，理论恒成立）。拿不到就跳过并告警，
         // **绝不新建假节点** —— 那会把"引擎认为存在"变成"图里凭空多一个函数"。
@@ -597,11 +599,9 @@ pub fn emit_layered_resolution(
             candidate.rank,
             total,
         );
-        if code_graph.add_call_relation(relation).is_ok() {
-            written += 1;
-        }
+        relations.push(relation);
     }
-    written
+    code_graph.upsert_call_site_edges(&caller.id, site.line, &site.callee_name, relations)
 }
 
 /// 全仓解析上下文：`ResolutionIndex` + 每文件 ctx。

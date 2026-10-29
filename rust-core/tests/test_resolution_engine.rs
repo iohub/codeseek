@@ -1158,20 +1158,45 @@ fn p2a_incremental_skipped_files_still_feed_index_and_ctx_can_be_rebuilt() {
     );
 
     // ============================================================================================
-    // 第二轮：不置 `force_reindex` ⇒ 文件哈希未变 ⇒ 每个文件都被 `_should_skip_file` 跳过。
+    // 第二轮：不置 `force_reindex` ⇒ 文件哈希未变 ⇒ 每个文件都必须被 `_should_skip_file` 跳过。
     //
-    // ⚠ **实测硬事实（P0 遗留缺陷，本阶段只钉死、不修）**：
-    // `build_petgraph_code_graph` 只把**文件哈希**落盘（`parser.rs:1062/1136` 的
-    // `_save_file_hashes`），图的落盘在另一条链路（`codegraph/repository.rs` 的
-    // `save_state` ← `cli/analyze.rs`）。于是"新进程 + 已有哈希 + 没有图缓存"这一组合会
-    // 加载到空图、跳过全部文件、返回**零节点零边**的图。
-    // 这正是 P3"全量/增量一致性"要处理的类别；P2a 把它**断言成现状**，
-    // 这样 P3 修复时这条测试会主动报警，而不是静默地把缺陷藏起来。
+    // ⚠ Phase P2b 收口对**本用例前置状态**的调整（红线 2 要求逐条论证；断言一条都没放宽）：
+    // 改造前这里把新 parser 直接丢进"只有文件哈希、没有图缓存"的磁盘状态，然后断言
+    // `file_scope_count() == 0`（以及下面那个 `nodes_skip == 0 && edges_skip == 0` 的分支）。
+    // 那个状态是 **P0 遗留缺陷**造出来的非法增量态：`build_petgraph_code_graph` 只把哈希
+    // 落盘（`_save_file_hashes`），图由另一条链路落盘（真实 CLI 是 `main.rs` 的
+    // `persistence.save_graph(...)` + `codegraph::repository::save_state()`）。
+    // P2b 口径 D（已批准，并由
+    // `tests/test_p2b_wiring.rs::p2b_second_round_without_saved_graph_must_not_be_empty` 锁死）
+    // 规定"图缓存缺失 ⇒ 哈希缓存一律作废 ⇒ 全量重解析"，于是这一轮会解析 3 个文件、
+    // `file_scope_count()` 变成 3 —— 也就是说，原来的两条断言之所以成立，靠的是**缺陷**，
+    // 而不是"哈希命中即跳过"这条契约本身。
+    //
+    // 处置：把磁盘状态摆成真实 CLI 跑完第一轮之后的样子（**哈希 + 图都在**），让跳过契约
+    // 重新可达，于是 `file_scope_count() == 0` / `file_scope_ctx(alpha).is_none()` **原样保留**；
+    // 另加一条 `last_round_file_counts() == (0, 3)` 把"确实一个文件都没多解析"钉死，
+    // 不再依赖"空图"这个副作用。
     // ============================================================================================
+    {
+        let name_id = root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .expect("临时项目目录必须有目录名");
+        codeseek::storage::PersistenceManager::new()
+            .save_graph(&name_id, &graph)
+            .expect("图缓存落盘失败（构造合法增量态）");
+    }
     let mut incremental = CodeParser::new();
     let graph2 = incremental
         .build_petgraph_code_graph(&root)
         .expect("增量建图失败");
+    assert_eq!(
+        incremental.last_round_file_counts(),
+        (0, 3),
+        "口径 A：第二轮必须『重新解析 0 个文件 / 跳过 3 个文件』，\
+         绝不允许为了喂分层索引而重新解析被哈希跳过的文件，实际 {:?}",
+        incremental.last_round_file_counts()
+    );
     assert_eq!(
         incremental.file_scope_count(),
         0,
@@ -1184,23 +1209,23 @@ fn p2a_incremental_skipped_files_still_feed_index_and_ctx_can_be_rebuilt() {
     let (nodes_full, edges_full) = (graph.get_all_functions().len(), graph.graph.edge_count());
     let (nodes_skip, edges_skip) = (graph2.get_all_functions().len(), graph2.graph.edge_count());
     println!(
-        "第二轮（增量，哈希命中）：file_scope_count={}，节点 {}→{}，边 {}→{}（P0 遗留缺陷现状）",
+        "第二轮（增量，哈希命中 + 图缓存命中）：file_scope_count={}，节点 {}→{}，边 {}→{}",
         incremental.file_scope_count(),
         nodes_full,
         nodes_skip,
         edges_full,
         edges_skip
     );
-    if nodes_skip != nodes_full {
-        println!(
-            "  ↳ P0 遗留缺陷（P3 处理）：只落哈希不落图 ⇒ 空图 + 全部文件被跳过。P2a 不改任何建图路径。"
-        );
-        assert_eq!(
-            (nodes_skip, edges_skip),
-            (0, 0),
-            "现状必须是『空图零边』；若不是，说明 P0/P3 的持久化链路变了，请同步这条断言与注释"
-        );
-    }
+    // 改造前这里是 `if nodes_skip != nodes_full { assert_eq!((nodes_skip, edges_skip), (0, 0)) }`
+    // —— 那条断言把"P0 空图缺陷"钉成了现状（原注释也自述"若不是空图请同步本断言"）。
+    // 口径 D 修复 + 本用例的前置状态修正之后，合法增量态下第二轮读回图缓存，节点/边必须
+    // **与非 force 第一轮完全相同**（既不丢节点、也不叠边），这才是"跳过 = 保留已有图"的
+    // 真实契约，等价强度且不再依赖缺陷。
+    assert_eq!(
+        (nodes_skip, edges_skip),
+        (nodes_full, edges_full),
+        "哈希命中 + 图缓存命中时，增量轮不得丢节点/丢边（跳过 = 保留已有图）"
+    );
 
     // **口径 C 的第一半**：索引**仅凭图节点**构建 —— 一个 ctx 都没有（等价于"文件被跳过"）时，
     // 图里已有的函数节点仍必须成为候选来源。这里用第一轮那份**有节点**的图，

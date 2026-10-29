@@ -499,6 +499,124 @@ impl PetCodeGraph {
         })
     }
 
+    /// Phase P2b 收口（任务口径 B）：**唯一的调用边写入入口**。
+    ///
+    /// 四条产边路径 —— legacy 全量（`parser::_analyze_file_calls_for_petgraph`）、
+    /// legacy 刷新/增量（`parser::_analyze_file_calls` 与 `incremental::_analyze_file_calls`）、
+    /// layered 全量与增量（`resolution::emit_layered_resolution`）—— 都必须经由本方法写边，
+    /// 结构上消灭"两套去重逻辑"：过去 legacy 只靠 `add_call_relation` 的
+    /// `(caller, callee, line)` 去重，layered 自己做了"先删后写"，于是同一个调用点被
+    /// 重新发射时（增量刷新）legacy 会叠出重复边（P2b 实测 `gamma.rs:6` 2 条 vs 全量 1 条）。
+    ///
+    /// 语义：把 `(caller_id, line_number, 该调用点的 callee 名族)` 这个**调用点**的旧边全部删除，
+    /// 然后写入 `edges`。因此"对同一个调用点重复发射 N 次"与发射 1 次的结果**完全相同**（幂等）。
+    ///
+    /// 为什么删除谓词是 `callee_name == site_name || callee_name ∈ {新边的 callee_name}`：
+    /// - 三种写法对 `callee_name` 的记录口径不同 —— layered 写 `site.callee_name`（AST 末段名）、
+    ///   legacy 全量写 `callee_info.name`（解析结果名）、legacy 增量写 `call_name`，
+    ///   把"新边自己的名字"也放进名字族，才能保证重写时一定命中上一轮的边；
+    /// - 只删同名边 ⇒ 同一行的**其它**调用点不受影响。历史教训：按 `(caller, line)` 全删
+    ///   把 `simple_js_project` 的边数从 746 削到 52（见
+    ///   [`PetCodeGraph::remove_call_edges_by_caller_line`] 的警告）。
+    ///
+    /// ⚠ **只删"孤儿同名边"，绝不删仍然连在活节点上的同名边**（P2b 收口实测教训）：
+    /// legacy 的 callee 解析会走到 `find_functions_by_name()`，而**幽灵节点本身也在图里、
+    /// 名字就是被调裸名** —— 于是同一行同名的第二个调用点会"解析成功"并连到第一个调用点
+    /// 造的幽灵节点上，`add_call_relation` 按 `(caller, callee, line)` 把这条边判成重复丢掉
+    /// （保留 `is_resolved=false`）。若重写时无条件先删同名边，这条边就"活不过重写"，
+    /// 于是 `is_resolved` 被翻成 `true` —— 实测：`simple_js_project` resolved 546→664、
+    /// `simple_ts_project` 70→72，**违反红线 1（默认 legacy 必须与 P2a 逐字节等价）**。
+    /// 加上"callee 已不在图里"这一道校验之后：真正的重复边（caller 节点被复制出来两份、
+    /// 旧边指向已被删掉的节点/上一轮的旧节点）照样被清理，legacy 的既有产出零变化。
+    ///
+    /// 返回实际写入的边数（`add_call_relation` 原有的 `(caller, callee, line)` 去重仍然生效，
+    /// 所以"两条完全相同的候选"只会落一条）。
+    ///
+    /// **适用范围**：只用于"由 AST 调用点发射的边"。下面三类不属于本入口，
+    /// 因此不受"唯一写入入口"约束（把它们塞进来反而会破坏各自的去重语义）：
+    ///  1. `petgraph_storage.rs` 从缓存反序列化后的原样重建（边已去重过，重写一次等于丢统计）；
+    ///  2. `_create_heuristic_calls` / `_create_test_calls` 这类**非调用点**的合成边
+    ///     （`line_number` 填的是 caller 的定义行，不是调用行，套 upsert 会把 caller
+    ///     定义行上的真实调用点误删）；
+    ///  3. `CodeGraph`（非 `PetCodeGraph`）那条老 `build_code_graph` 链路，签名不同、
+    ///     无调用点概念。
+    ///
+    /// 四条 PetCodeGraph 产边路径与其调用点（改造后全部经由本方法）：
+    /// - legacy 全量：`parser.rs:2064`（`_analyze_file_calls_for_petgraph`）
+    ///   与 `parser.rs:2220`（同函数的未解析分支）
+    /// - legacy 刷新：`parser.rs:543` 与 `parser.rs:753`
+    /// - layered 全量/刷新：`resolution/mod.rs:566`（幽灵）与 `resolution/mod.rs:604`（候选），
+    ///   由 `parser.rs` 与 `incremental.rs` 的 layered 分支共同调用
+    /// - 增量（`IncrementalManager`）：`incremental.rs:315` 与 `incremental.rs:495`
+    pub fn upsert_call_site_edges(
+        &mut self,
+        caller_id: &Uuid,
+        line_number: usize,
+        site_name: &str,
+        edges: Vec<CallRelation>,
+    ) -> usize {
+        // 名字族：本调用点的裸名 + 新候选各自记录的 callee_name。
+        let mut names: std::collections::HashSet<String> =
+            edges.iter().map(|e| e.callee_name.clone()).collect();
+        names.insert(site_name.to_string());
+
+        // 1) 先删：同一 caller、同一行、同名族里，**不属于本批候选**或**已经悬空**的旧边。
+        //
+        //    为什么必须把"仍在本批里的同一条边"留下：legacy 的 callee 解析会走到
+        //    `find_functions_by_name()`，而幽灵节点本身也在图里、名字就是被调裸名 ——
+        //    同一行同名的第二个调用点因此会"解析成功"并连到第一个调用点造的幽灵节点上，
+        //    `add_call_relation` 按 `(caller, callee, line)` 把它判成重复丢掉（留下 `is_resolved=false`）。
+        //    若无条件先删同名边，这条边就活不过重写、`is_resolved` 被翻成 `true` ——
+        //    实测 `simple_js_project` resolved 546→664、`simple_ts_project` 70→72（红线 1 违规）。
+        //    留同callee + 靠 add_call_relation 去重 ⇒ legacy 逐字节不变；
+        //    删"不在本批里"的旧边 ⇒ layered 的候选集变化时旧候选边被真正替换，不叠加。
+        let caller_node = match self.function_to_node.get(caller_id).copied() {
+            Some(node) => node,
+            None => return 0,
+        };
+        let new_callees: std::collections::HashSet<Uuid> =
+            edges.iter().map(|e| e.callee_id).collect();
+        let doomed: Vec<petgraph::graph::EdgeIndex> = self
+            .graph
+            .edges_directed(caller_node, Direction::Outgoing)
+            .filter(|edge| {
+                let relation = edge.weight();
+                if relation.line_number != line_number || !names.contains(&relation.callee_name) {
+                    return false;
+                }
+                // 旧边的 callee 还活着、且本批还要写同一条 ⇒ 留下（交给 add_call_relation 去重）
+                let callee_alive = self
+                    .function_to_node
+                    .get(&relation.callee_id)
+                    .is_some_and(|node| self.graph.node_weight(*node).is_some());
+                !(callee_alive && new_callees.contains(&relation.callee_id))
+            })
+            .map(|edge| edge.id())
+            .collect();
+
+        for edge_index in doomed {
+            match self.graph.edge_weight(edge_index).map(|r| r.is_resolved) {
+                Some(true) => {
+                    self.stats.resolved_calls = self.stats.resolved_calls.saturating_sub(1)
+                }
+                Some(false) => {
+                    self.stats.unresolved_calls = self.stats.unresolved_calls.saturating_sub(1)
+                }
+                None => continue,
+            }
+            self.graph.remove_edge(edge_index);
+        }
+
+        // 2) 再写新候选。统计口径（resolved/unresolved 计数）由 add_call_relation 唯一负责。
+        let mut written = 0usize;
+        for relation in edges {
+            if self.add_call_relation(relation).is_ok() {
+                written += 1;
+            }
+        }
+        written
+    }
+
     /// 出边删除的共用内核：按谓词挑出 caller 的出边、逐个删、同步统计。
     fn _remove_call_edges_where(
         &mut self,

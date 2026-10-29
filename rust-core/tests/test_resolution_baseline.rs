@@ -784,9 +784,60 @@ fn test_baseline_aggregate_metrics_over_all_resolution_fixtures() {
 // 交付物 2 的逃生口：`--force-reindex` 语义（跳过图缓存 + 跳过文件 MD5 哈希，强制全量重解析）
 // ============================================================================================
 
+/// 把一个图落盘成"图缓存"，用于构造**合法的增量态**（图缓存 + 文件哈希缓存同时存在）。
+///
+/// `CodeParser::build_petgraph_code_graph` 只把**文件 MD5 哈希**写回 `file_hashes.json`，
+/// 图的落盘在另一条链路（真实 CLI 是 `main.rs` 的
+/// `storage.get_persistence().save_graph(&project_hash, &pet_graph)` 与
+/// `codegraph::repository::save_state()`）。`_load_existing_graph` 认的 project_id 是
+/// **目录名**，所以这里必须用目录名存。
+fn persist_graph_as_cache(project_dir: &Path, graph: &PetCodeGraph) {
+    let name_id = project_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .expect("临时项目目录必须有目录名");
+    codeseek::storage::PersistenceManager::new()
+        .save_graph(&name_id, graph)
+        .expect("图缓存落盘失败");
+}
+
+/// 只删某个项目的**图缓存**（`graph.bin` / `graph.json`），保留文件哈希。
+///
+/// 用来复现 P0 遗留的"有哈希、无图"非法增量态 —— 口径 D 的场景
+/// （`build_petgraph_code_graph` 自己只写哈希，图由 CLI 的另一条链路落盘）。
+fn clean_graph_cache(project_id: &str) {
+    let Some(home) = dirs_home() else {
+        return;
+    };
+    let dir = home.join(".codeseek").join("projects").join(project_id);
+    for name in ["graph.bin", "graph.json"] {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+}
+
 #[test]
 fn test_force_reindex_escape_hatch_bypasses_all_caches() {
-    // 用一个小 case 做三轮建图：force → 非 force → force，比较节点数量即可证明开关生效。
+    // 用一个小 case 做四轮建图，逐轮同时读"节点/边规模"与**跳过计数**：
+    //   R1 force            ⇒ 全量解析，缓存写入
+    //   R2 非 force（合法增量态：图缓存 + 哈希都在）⇒ **一个文件都不许多解析**
+    //   R3 再次 force       ⇒ 逃生口必须绕过图缓存 + 哈希缓存，重新解析全部文件
+    //   R4 非 force（只有哈希、没有图）⇒ 口径 D：哈希缓存一律作废，绝不产出空图
+    //
+    // ⚠ Phase P2b 收口对**本用例第 2 轮断言口径**的调整（红线 2 要求逐条论证）：
+    // 改造前这里写的是 `assert_eq!(incremental_nodes, 0)`，断言消息是
+    // 「非 force 且哈希未变化时应走增量跳过（本轮没有新解析函数）」。
+    // 但"本轮没有新解析函数"与"返回的图是空图"是两回事：后者之所以成立，是因为
+    // **P0 遗留缺陷** —— `build_petgraph_code_graph` 只落哈希、不落图，于是
+    // R1 之后磁盘上是"有哈希、无图"的**非法增量态**，R2 跳过全部文件后
+    // 得到一张空图（`cross_file_same_name` 5 节点 / 3 边 → 0 / 0）。
+    // 那条断言把一个缺陷当成了契约，因此它既测不到"跳过"本身，也和 P2b 已批准的
+    // 口径 D（`tests/test_p2b_wiring.rs::p2b_second_round_without_saved_graph_must_not_be_empty`：
+    // 同样的状态下第二轮**必须非空**）直接互斥 —— 二者不可能同时为真。
+    // 替代断言（强度**更高**，且逐条覆盖原意图）：
+    //   (a) 用 `CodeParser::last_round_file_counts()` 直接断言"本轮重新解析 0 个文件"
+    //       —— 这才是原断言消息说的那件事，不再依赖"图是空的"这个副作用；
+    //   (b) 断言合法增量态下第二轮的图规模与第一轮**完全相同**（缓存读回不丢节点不丢边）；
+    //   (c) 新增 R4 钉死"哈希在、图缺失"时不得产出空图（口径 D 的行为在本用例里也有覆盖）。
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(FIXTURE_ROOT)
         .join("cross_file_same_name");
@@ -800,34 +851,86 @@ fn test_force_reindex_escape_hatch_bypasses_all_caches() {
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let build = |force: bool| -> usize {
+    // 一轮建图：返回 (函数节点数, 调用边数, (本轮重新解析的文件数, 本轮跳过的文件数), 图)
+    let build = |force: bool| -> (usize, usize, (usize, usize), PetCodeGraph) {
         let mut parser = CodeParser::new();
         parser.set_force_reindex(force);
-        parser
+        let graph = parser
             .build_petgraph_code_graph(&project_dir)
-            .expect("全量建图应成功")
-            .get_all_functions()
-            .len()
+            .expect("建图应成功");
+        (
+            graph.get_all_functions().len(),
+            graph.graph.edge_count(),
+            parser.last_round_file_counts(),
+            graph,
+        )
     };
 
-    // 第 1 轮：force 置位 —— 一定是从零解析，拿到完整函数集（5 个：2 helper + 2 调用者 + 1 call_helper）
-    let first = build(true);
-    assert_eq!(first, 5, "--force-reindex 第一次应完整解析 5 个函数，实际 {first}");
-
-    // 第 2 轮：**不** force。此时 home 下已有第 1 轮写出的 MD5 哈希，
-    // `_should_skip_file` 会跳过全部文件 → `file_functions` 为空 → 图里 0 个节点。
-    // （这正是"增量跳过"的既有行为，也说明缓存确实写成功了。）
-    let incremental = build(false);
+    // ---- R1：force 置位 —— 一定是从零解析 ----
+    let (first_nodes, first_edges, first_counts, first_graph) = build(true);
+    assert_eq!(first_nodes, 5, "--force-reindex 第一次应完整解析 5 个函数，实际 {first_nodes}");
+    assert_eq!(first_edges, 3, "第一次应产出 3 条调用边，实际 {first_edges}");
     assert_eq!(
-        incremental, 0,
-        "非 force 且哈希未变化时应走增量跳过（本轮没有新解析函数），实际 {incremental}"
+        first_counts,
+        (3, 0),
+        "R1（force）必须解析全部 3 个文件、跳过 0 个，实际 {:?}",
+        first_counts
     );
 
-    // 第 3 轮：再次 force —— 必须无视缓存重新解析，回到 5 个节点。这就是逃生口的价值。
-    let forced_again = build(true);
+    // ---- R2：非 force，且**哈希与图都在**（合法增量态）⇒ 跳过契约必须生效 ----
+    // R1 已经把文件哈希写进 `file_hashes.json`；这里补上真实 CLI 的另一半（图的落盘），
+    // 把磁盘状态摆成 `main.rs` 那一轮跑完之后的样子：有图 + 有哈希。
+    persist_graph_as_cache(&project_dir, &first_graph);
+    let (second_nodes, second_edges, second_counts, _) = build(false);
+    // (a) 原断言消息说的那件事，直接断言它本身：本轮**没有重新解析任何文件**。
     assert_eq!(
-        forced_again, first,
-        "--force-reindex 必须无视文件哈希缓存重新解析全部文件，实际 {forced_again}"
+        second_counts,
+        (0, 3),
+        "非 force 且哈希未变化时必须『重新解析 0 个 / 跳过 3 个』（增量跳过契约），实际 {:?}",
+        second_counts
+    );
+    // (b) 图从缓存读回，规模与第一轮完全一致（不丢节点、不丢边、不叠边）。
+    assert_eq!(
+        (second_nodes, second_edges),
+        (first_nodes, first_edges),
+        "合法增量态下第二轮的图必须与第一轮相同（图缓存读回），实际 {} 节点 / {} 边",
+        second_nodes,
+        second_edges
+    );
+
+    // ---- R3：再次 force —— 必须无视图缓存 + 哈希缓存，重新解析全部文件 ----
+    // （此刻 home 下同时有 graph.bin 与 file_hashes.json，正是"绕过所有缓存"的场景）
+    let (forced_nodes, forced_edges, forced_counts, _) = build(true);
+    assert_eq!(
+        forced_nodes, first_nodes,
+        "--force-reindex 必须无视文件哈希缓存重新解析全部文件，实际 {forced_nodes}"
+    );
+    assert_eq!(forced_edges, first_edges, "R3 的边数必须与 R1 相同");
+    assert_eq!(
+        forced_counts,
+        (3, 0),
+        "R3（再次 force）必须重新解析 3 个文件（绕过图缓存与哈希缓存），实际 {:?}",
+        forced_counts
+    );
+
+    // ---- R4（口径 D 的对照）：只有哈希、**没有图** ⇒ 不得产出空图 ----
+    // 改造前 R2 观察到的"0 节点"其实就是这个状态，它是 P0 遗留缺陷（只落哈希不落图），
+    // P2b 口径 D 的修法是"图缓存缺失 ⇒ 哈希缓存一律作废 ⇒ 全量重解析"。
+    clean_graph_cache(&name_id);
+    let (r4_nodes, _r4_edges, r4_counts, _) = build(false);
+    assert_ne!(
+        r4_nodes, 0,
+        "口径 D：哈希已落盘而图缓存缺失时，第二轮**不得**是空图（P0 缺陷回归锁）"
+    );
+    assert_eq!(
+        r4_nodes, first_nodes,
+        "口径 D：图缓存缺失 ⇒ 无视哈希 ⇒ 全量重解析，节点数必须回到 {first_nodes}，实际 {r4_nodes}"
+    );
+    assert_eq!(
+        r4_counts,
+        (3, 0),
+        "口径 D：这一轮必须真的重新解析 3 个文件（哈希缓存被作废），实际 {:?}",
+        r4_counts
     );
 
     // 顺带确认开关本身可读（CLI 接线时按它分支）
@@ -835,6 +938,11 @@ fn test_force_reindex_escape_hatch_bypasses_all_caches() {
     assert!(!parser.force_reindex_enabled(), "默认必须是 false，保证既有行为不变");
     parser.set_force_reindex(true);
     assert!(parser.force_reindex_enabled());
+    assert_eq!(
+        parser.last_round_file_counts(),
+        (0, 0),
+        "还没建过图时，跳过计数必须是 (0, 0)"
+    );
 
     // 清理本用例写到 home 的哈希目录，并关闭临时目录
     cleanup_codeseek_project(&md5_id);

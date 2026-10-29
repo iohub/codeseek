@@ -285,6 +285,73 @@ impl Built {
             })
             .collect()
     }
+
+    /// **调用点**的身份集合：`(caller 相对文件, caller 名, 调用行)`。
+    ///
+    /// ⚠ 判据里**故意不含 callee 名**（P2b 收口实测教训）：`CallRelation.callee_name` 记的是
+    /// **解析结果名**而不是调用点裸名，两种模式在同一条边上填的东西本就不同 ——
+    /// legacy 对 `alias(value)` 解析失败 ⇒ 填裸名 `alias`（连本文件幽灵节点）；
+    /// layered 用 L4-ImportBinding 命中 `mod_x.py:4 def func` ⇒ 填 `func`。
+    /// 拿 callee 名当调用点身份会把"这次解析得更对了"误报成"这个调用点丢了"。
+    /// 该口径差异已写进 `tests/fixtures/resolution/README.md` 的 legacy/layered 分叉表。
+    fn call_site_set(&self) -> std::collections::HashSet<(String, String, usize)> {
+        self.call_site_edge_counts().into_keys().collect()
+    }
+
+    /// `调用点身份 -> 该调用点上的边条数`。用于证明"边数上升"来自同一调用点的
+    /// 候选展开（口径 A），而不是凭空多出调用点（口径 B 的覆盖中性）。
+    fn call_site_edge_counts(&self) -> std::collections::BTreeMap<(String, String, usize), usize> {
+        let mut m = std::collections::BTreeMap::new();
+        for edge in self.graph.graph.edge_references() {
+            let rel = edge.weight();
+            let caller = self.graph.get_function_by_id(&rel.caller_id);
+            let key = (
+                caller
+                    .map(|f| {
+                        f.file_path
+                            .strip_prefix(&self.project_dir)
+                            .unwrap_or(f.file_path.as_path())
+                            .to_string_lossy()
+                            .replace('\\', "/")
+                    })
+                    .unwrap_or_default(),
+                caller.map(|f| f.name.clone()).unwrap_or_default(),
+                rel.line_number,
+            );
+            *m.entry(key).or_insert(0usize) += 1;
+        }
+        m
+    }
+
+    /// 每条边的 callee 身份投影：`(裸名, callee 相对文件, callee 定义行, is_resolved)`，
+    /// 供差集取证打印用（不参与断言 —— 该维在 legacy 下与哈希种子有关）。
+    fn callee_identities(&self) -> Vec<(String, String, usize, bool)> {
+        let mut out: Vec<(String, String, usize, bool)> = self
+            .graph
+            .graph
+            .edge_references()
+            .map(|edge| {
+                let rel = edge.weight();
+                let callee = self.graph.get_function_by_id(&rel.callee_id);
+                (
+                    rel.callee_name.clone(),
+                    callee
+                        .map(|f| {
+                            f.file_path
+                                .strip_prefix(&self.project_dir)
+                                .unwrap_or(f.file_path.as_path())
+                                .to_string_lossy()
+                                .replace('\\', "/")
+                        })
+                        .unwrap_or_default(),
+                    callee.map(|f| f.line_start).unwrap_or(0),
+                    rel.is_resolved,
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
 }
 
 /// Phase P2a 交付物 3：CLI 三枚 flag 的测试侧载体（`--resolver` / `--max-candidates` / `--levels`）。
@@ -514,45 +581,72 @@ fn p1_guard_print_every_case_table_for_transcription() {
 }
 
 // ============================================================================================
-// 守卫 4（Phase P2a 交付物 3）：`--resolver=layered` 在 P2a **不得改变任何产出**
+// 守卫 4（Phase P2b 收口，任务口径 C）：**分叉**基线 —— legacy 段沿用 P0 表，layered 段用新表
 //
-// 两条断言合起来才是"红线 2"的完整证据：
-//   (a) 不带 flag 与带 `--resolver=layered --max-candidates=8` 两次建图，聚合守卫表
-//       都必须是 `32/13/11/2/4/9/2/13`；
-//   (b) 再加一组最激进的 `layered + --max-candidates=1 + --levels=l5`，
-//       边的**规范化多重集**（源码事实，不含 uuid）必须与 legacy 逐条相同。
+// ## 为什么这里从"三段相等"变成"两段分叉"
+// P2a 时 `--resolver` 三枚 flag 只存不用，所以本守卫的形态是
+// "legacy == layered == strict == 32/13/11/2/4/9/2/13"。
+// P2b 把引擎接进产边链路之后，"相等"这件事**必然**不成立（口径 A：每个候选一条边）。
+// 任务口径 C 要求：**分叉而不是覆盖** —— legacy 段一个数字都不许改（红线 1），
+// layered 段用实测值钉死成新基线，差值来源逐项写进 `tests/fixtures/resolution/README.md`。
 //
-// ⚠⚠ **P2b 必须替换本节**：接线之后 layered 会保留多候选（口径 A：每候选一条边），
-// 届时 (a)(b) 都会分叉。分叉基线的做法写在
-// `tests/fixtures/resolution/README.md` 与 P2b 接手清单里，要点是：
-//   * 这里断言"相等"的两处，改成"legacy==P0 基线；layered==新分叉表（每候选一条边）"；
-//   * 聚合边数 13 会上升（歧义调用点按候选数展开），`is_resolved=false`/幽灵节点数不变；
-//   * `GRAPH_SCHEMA_VERSION` 必须与 `CallRelation` 加字段在同一个改动里 1→2。
+// ## 两段表
+// ```text
+// legacy （= P0/P1/P2a 基线，必须逐字节不变）
+//        函数节点 32 / 边 13 / resolved 11 / unresolved 2 / 跨文件 4 / 同名歧义 9 / 幽灵 2 / 候选 13
+// layered（P2b 接线后的新基线，`--max-candidates=8`、全层开启）
+//        函数节点 31 / 边 20 / resolved 10 / unresolved 10 / 跨文件 12 / 同名歧义 16 / 幽灵 1 / 候选 13
+// ```
+//
+// ## `function_nodes 32 → 31` 的定性（任务口径 D）
+// 见 [`p2b_layered_guard_table_is_the_forked_baseline`] 里的差集打印与断言：
+// 少掉的那一个是 `python_import_alias/consumer.py` 上由 legacy 的未解析调用临时造的
+// **幽灵节点** `alias`（`namespace == "unresolved"`），layered 用 L4-ImportBinding 把
+// `alias(a)` 正确解析到 `mod_x.py:4` 的真定义，于是**不再需要**造幽灵节点。
+// ⇒ 结论是**口径差异（②）而不是节点丢失（①）**：真实定义节点在两种模式下恒等 30 个
+// （本文件用 `ghost == false` 的节点子集逐条断言相等来钉死这一点）。
 // ============================================================================================
 
+/// Phase P2b 分叉基线的 **layered 段**（`--resolver=layered --max-candidates=8`，全层开启）。
+///
+/// 抄录来源：`cargo test --test test_p1_edges_unchanged p2b_layered_guard_table -- --nocapture`
+/// 的 `P2B LAYERED BASELINE` 行（同一份 fixture、同一条真实建图链路，只是 `--resolver` 拨到 layered）。
+const EXPECTED_LAYERED_AGGREGATE: Metrics = Metrics {
+    function_nodes: 31,
+    edges: 20,
+    resolved: 10,
+    unresolved: 10,
+    cross_file_edges: 12,
+    ambiguous_call_sites: 16,
+    ghost_nodes: 1,
+};
+/// layered 段候选总数与 legacy 段**相同**（13）：候选来自图中的同名定义节点，
+/// `--resolver` 不增删定义，只改变"保留几个候选"。
+const EXPECTED_LAYERED_AGGREGATE_CANDIDATES: usize = 13;
+
+/// **legacy 段（红线 1）**：默认路径必须与 P2a（`8e62033`）逐字节等价。
+///
+/// 三条子断言合起来才是"默认行为没被 P2b 收口改动碰过"的证据：
+///  (a) 不带任何 flag 的聚合守卫表 == P0 的 `32/13/11/2/4/9/2/13`（含候选总数 13）；
+///  (b) 显式 `--resolver=legacy` 与"不带 flag"必须完全一致（默认值没有隐藏分支）；
+///  (c) 边的规范化多重集（含 callee 身份）在两种 legacy 配置之间逐条相等。
 #[test]
-fn p2a_guard_tables_unchanged_under_both_resolver_modes() {
-    let legacy = Built::build("p2a_legacy", RESOLUTION_ROOT);
-    let layered = Built::build_with("p2a_layered", RESOLUTION_ROOT, Some(ResolverFlags::LAYERED));
-    let strict = Built::build_with("p2a_strict", RESOLUTION_ROOT, Some(ResolverFlags::LAYERED_STRICT));
+fn p2b_legacy_guard_table_is_byte_for_byte_unchanged() {
+    let implicit = Built::build("p2b_legacy_implicit", RESOLUTION_ROOT);
+    let explicit = Built::build_with(
+        "p2b_legacy_explicit",
+        RESOLUTION_ROOT,
+        Some(ResolverFlags {
+            resolver: ResolverMode::Legacy,
+            max_candidates: 1,
+            levels: Some("l5"),
+        }),
+    );
 
-    // ---- (0) flag 确实被读进来了（否则后面对比的是同一份配置，断言就是空的）----
-    assert_eq!(legacy.parser.resolver_mode(), ResolverMode::Legacy, "默认必须是 legacy（红线 2）");
-    assert_eq!(layered.parser.resolver_mode(), ResolverMode::Layered);
-    assert_eq!(strict.parser.resolver_mode(), ResolverMode::Layered);
-    assert_eq!(strict.parser.max_candidates(), 1);
-    assert_eq!(strict.parser.levels_spec(), Some("l5"));
-    assert!(legacy.parser.levels_spec().is_none(), "不传 `--levels` 时必须是\"全层\"而不是某个串");
-
-    // ---- (a) 三组配置的聚合守卫表都必须逐字段等于 P0 基线 ----
-    for (label, built) in [
-        ("--resolver 未置（legacy）", &legacy),
-        ("--resolver=layered --max-candidates=8", &layered),
-        ("--resolver=layered --max-candidates=1 --levels=l5", &strict),
-    ] {
+    for (label, built) in [("--resolver 未置（默认 legacy）", &implicit), ("显式 --resolver=legacy", &explicit)] {
         let actual = built.metrics();
         let candidates = built.ambiguous_name_candidates();
-        println!("P2A GUARD {label}\t{actual:?}\tcandidates={candidates}");
+        println!("P2B LEGACY {label}\t{actual:?}\tcandidates={candidates}");
         actual.assert_equals(&EXPECTED_AGGREGATE, label);
         assert_eq!(
             candidates, EXPECTED_AGGREGATE_CANDIDATES,
@@ -560,137 +654,766 @@ fn p2a_guard_tables_unchanged_under_both_resolver_modes() {
         );
     }
 
-    // ---- (b) 逐条比较："选中的函数身份"必须相同；**唯一豁免的是"选了哪个同名文件"** ----
+    // (c) legacy 的 `--max-candidates` / `--levels` 在 legacy 模式下**必须仍是死参数**
+    // （它们只配置分层引擎；legacy 不消费引擎），所以多重集必须逐条相等。
     //
-    // 为什么不把 callee 的文件也纳入断言：那正是本次要消灭的缺陷本身。
-    // legacy 的同名 first-wins 取哪一个取决于 `HashMap` 的**每进程/每表随机种子**，
-    // 实测两次 legacy 建图就会翻（本测试的真实输出）：
-    //   `cross_file_same_name/gamma.rs:6 helper()` → `alpha.rs::helper` ↔ `other_mod.py::helper`
-    //   `python_dotted_qualified/dotted_consumer.py:10` → `other_mod.py::helper` ↔ `alpha.rs::helper`
-    // 聚合守卫表（32/13/11/2/4/9/2/13）之所以能锁住：无论选中哪一份同名候选，
-    // 它**同样是跨文件边**，因此计数不变。
-    //
-    // layered 侧不存在这个问题（候选顺序与命中由源码事实 + (level,rank,uuid) 决定），
-    // 由 `tests/test_resolution_engine.rs::p2a_resolution_is_deterministic_…` 断言。
-    let key_legacy = legacy.normalized_edge_multiset_without_callee_file();
-    let key_layered = layered.normalized_edge_multiset_without_callee_file();
-    let key_strict = strict.normalized_edge_multiset_without_callee_file();
+    // ⚠ 判据取的是 [`Built::normalized_edge_multiset_without_callee_file`] —— 即
+    // **只放开 callee 的身份维（文件 + 定义行）**，其余 6 维
+    // `(caller 文件, caller 名, caller 定义行, callee 名, 调用行, is_resolved)` 逐条锁死。
+    // 这不是放宽，而是因为"含 callee 文件"这一条**在任何实现下都不可能稳定成立**：
+    // legacy 的同名 first-wins 取值来自 `_build_function_name_index` 的 `HashMap`
+    // 迭代顺序，其种子是每进程（甚至每多次建图）随机的。实测（同一份
+    // `tests/fixtures/resolution`、16 轮独立全量建图）：
+    // ```text
+    // edges / nodes 每轮恒为 13 / 32（与种子无关的量），但
+    //   gamma.rs:6            call_helper  -> alpha.rs:4 x2 | beta.rs:4 x3 | mod_y.py:4 x4 | other_mod.py:4 x7
+    //   dotted_consumer.py:10 call_dotted  -> alpha.rs:4 x2 | beta.rs:4 x3 | mod_y.py:4 x4 | other_mod.py:4 x7
+    //   receiver_user.rs:11   use_method   -> calc.rs:9 x9  | misc.rs:4   x7
+    //   qualifier.rs:9        call_qualified -> mod_a.rs:3 x8 | mod_b.rs:3 x8
+    // ```
+    // P0/P1 的守卫正是基于同一事实不敢锁 `cross_file_edges`（见
+    // [`Metrics::first_difference_ignoring_cross_file`]）。
+    // 被放开的那一维由 (c2) 重新约束回"必须是该裸名的图内候选之一"，
+    // 因此 (c) + (c2) 的总约束强度**高于**原先那条永不可能稳定的断言。
     assert_eq!(
-        key_legacy, key_layered,
-        "P2a 阶段 layered 尚未接线：除\"选中哪个同名文件\"外，调用边必须与 legacy **逐条相同**"
-    );
-    assert_eq!(
-        key_legacy, key_strict,
-        "P2a 阶段 `--max-candidates` / `--levels` 同样不得影响产边（它们只影响引擎配置）"
+        implicit.normalized_edge_multiset_without_callee_file(),
+        explicit.normalized_edge_multiset_without_callee_file(),
+        "legacy 下 `--max-candidates` / `--levels` 不得影响任何一条边（callee 身份维除外，理由见上方注释与 (c2)）"
     );
 
-    // ---- (b2) 把 legacy 自身的种子抖动**量化记录**（只打印，不锁死：锁死会 flaky）----
-    let full_legacy = legacy.normalized_edge_multiset();
-    let full_layered = layered.normalized_edge_multiset();
-    let flips: Vec<String> = full_legacy
-        .iter()
-        .zip(full_layered.iter())
-        .filter(|(a, b)| a != b)
-        .map(|(a, b)| format!("legacy={a:?}  layered={b:?}"))
-        .collect();
-    println!(
-        "legacy 同名候选的身份抖动（同一份 fixture 两次建图，差异条数 = {}）：",
-        flips.len()
-    );
-    for flip in &flips {
-        println!("  · {flip}");
+    // (c2) callee 身份维的合法域：每条边的 callee 必须是"该边记录的裸名在图索引里的候选之一"，
+    // 或者是该调用点自己造的未解析幽灵节点。⇒ 随机面被约束在合法候选集合内，
+    // 绝不允许 first-wins 指到名字无关的函数。
+    let mut illegal_callee: Vec<String> = Vec::new();
+    for (label, built) in [("implicit", &implicit), ("explicit", &explicit)] {
+        for edge in built.graph.graph.edge_references() {
+            let rel = edge.weight();
+            let Some(callee) = built.graph.get_function_by_id(&rel.callee_id) else {
+                illegal_callee.push(format!("[{label}] {}:{} 的 callee 节点根本不在图里", rel.caller_name, rel.line_number));
+                continue;
+            };
+            let is_ghost = callee.namespace == "unresolved";
+            let in_candidate_set = built
+                .graph
+                .function_names
+                .get(rel.callee_name.as_str())
+                .map(|ids| ids.contains(&rel.callee_id))
+                .unwrap_or(false);
+            if !is_ghost && !in_candidate_set {
+                illegal_callee.push(format!(
+                    "[{label}] {}:{} `{}` -> `{}:{}` 既不是裸名候选也不在幽灵索引里",
+                    rel.caller_name,
+                    rel.line_number,
+                    rel.callee_name,
+                    callee
+                        .file_path
+                        .strip_prefix(&built.project_dir)
+                        .unwrap_or(callee.file_path.as_path())
+                        .to_string_lossy(),
+                    callee.line_start
+                ));
+            }
+        }
     }
-    assert_eq!(
-        full_legacy.len(),
-        full_layered.len(),
-        "抖动只能发生在\"选中哪一份同名候选\"，边的条数必须不变"
+    assert!(
+        illegal_callee.is_empty(),
+        "legacy 的 callee 必须在合法候选域内（这是 (c) 放开 callee 身份维后补的约束）：\n{}",
+        illegal_callee.join("\n")
     );
 
-    // ---- (c) 本阶段未接线这一事实本身的断言 ----
-    // `CodeParser` 里存的 mode/max/levels 只被只读诊断 API `resolution_config()` 消费；
-    // 若有人把它们接进产边分支，`git grep` 会在下面这份"允许清单"之外找到读者。
-    // 这里用可运行的行为证据代替纯文本扫描：layered 下 `file_scopes` 仍然建了、
-    // 但图的规模与 legacy 完全一致 ⇒ 引擎数据存在却没被用来决定任何一条边。
-    assert_eq!(
-        legacy.graph.get_all_functions().len(),
-        layered.graph.get_all_functions().len(),
-        "P2a 未接线：函数节点数不得随 `--resolver` 变化"
-    );
+    // (d) 四个新标量在 legacy 产出的每一条边上都必须恒为 0（P2b 的落盘默认值口径）。
+    let zeros: Vec<(u8, u8, u8, u8)> = implicit
+        .graph
+        .graph
+        .edge_references()
+        .map(|e| {
+            let r = e.weight();
+            (r.resolution_level, r.confidence, r.rank, r.candidate_count)
+        })
+        .collect();
     assert!(
-        layered.parser.file_scope_count() > 0,
-        "P2a 的 ctx 必须在两种模式下都建立（否则 P2b 无从消费）"
+        zeros.iter().all(|t| *t == (0, 0, 0, 0)),
+        "legacy 的边必须四标量全 0，实际非零的有 {:?}",
+        zeros.iter().filter(|t| **t != (0, 0, 0, 0)).count()
+    );
+
+    // (e) legacy 一律不给节点补写身份字段（`module_path` / `qualified_name` 恒 None）。
+    let with_identity = implicit
+        .all_functions()
+        .into_iter()
+        .filter(|f| f.module_path.is_some() || f.qualified_name.is_some())
+        .count();
+    assert_eq!(
+        with_identity, 0,
+        "legacy 不得写节点身份字段（layered 专属），实际 {} 个节点被写了",
+        with_identity
     );
 }
 
-/// **P2a 未接线**的源码级证明（与守卫 4(c) 的行为证明互补）。
-///
-/// 判据：分层引擎的三个入口符号
-/// （`resolve_call` / `resolve_call_with_config` / `call_sites_from_symbols*` /
-/// `build_resolution_index_from_graph`）在 `src/` 里**只允许**出现在
-/// `src/codegraph/resolution/` 内部；出现在任何别处都说明有人把它接进了建图/查询管线，
-/// 那在 P2a 是红线违规。P2b 接线时本测试**必须连同白名单一起改**（见报告"P2b 接手清单"）。
+/// **layered 段（任务口径 C/D）**：接线之后的新基线 + 与 legacy 的差集取证。
 #[test]
-fn p2a_engine_entry_points_are_not_referenced_outside_the_resolution_module() {
-    let forbidden = [
+fn p2b_layered_guard_table_is_the_forked_baseline() {
+    let legacy = Built::build("p2b_fork_legacy", RESOLUTION_ROOT);
+    let layered = Built::build_with("p2b_fork_layered", RESOLUTION_ROOT, Some(ResolverFlags::LAYERED));
+
+    // ---- (0) flag 真的被读进来了（否则比的是同一份配置，断言是空的）----
+    assert_eq!(legacy.parser.resolver_mode(), ResolverMode::Legacy, "默认必须是 legacy（红线 1）");
+    assert_eq!(layered.parser.resolver_mode(), ResolverMode::Layered);
+    assert_eq!(layered.parser.max_candidates(), 8);
+    assert!(layered.parser.levels_spec().is_none(), "不带 `--levels` 必须是全层");
+
+    // ---- (1) 两段各自的精确基线 ----
+    let legacy_metrics = legacy.metrics();
+    let layered_metrics = layered.metrics();
+    println!(
+        "P2B LEGACY BASELINE   {} 候选={}",
+        format!(
+            "节点={}/边={}/resolved={}/unresolved={}/跨文件={}/同名歧义={}/幽灵={}",
+            legacy_metrics.function_nodes,
+            legacy_metrics.edges,
+            legacy_metrics.resolved,
+            legacy_metrics.unresolved,
+            legacy_metrics.cross_file_edges,
+            legacy_metrics.ambiguous_call_sites,
+            legacy_metrics.ghost_nodes
+        ),
+        legacy.ambiguous_name_candidates()
+    );
+    println!(
+        "P2B LAYERED BASELINE  {} 候选={}",
+        format!(
+            "节点={}/边={}/resolved={}/unresolved={}/跨文件={}/同名歧义={}/幽灵={}",
+            layered_metrics.function_nodes,
+            layered_metrics.edges,
+            layered_metrics.resolved,
+            layered_metrics.unresolved,
+            layered_metrics.cross_file_edges,
+            layered_metrics.ambiguous_call_sites,
+            layered_metrics.ghost_nodes
+        ),
+        layered.ambiguous_name_candidates()
+    );
+    // legacy 段：与 P0/P1/P2a 完全一致（同 [`p2b_legacy_guard_table_is_byte_for_byte_unchanged`]，
+    // 这里再对一次是为了让"分叉"两段在同一份输出里可比）。
+    legacy_metrics.assert_equals(&EXPECTED_AGGREGATE, "分叉守卫 legacy 段");
+    // layered 段：新基线逐字段精确相等。
+    layered_metrics.assert_equals(&EXPECTED_LAYERED_AGGREGATE, "分叉守卫 layered 段");
+    assert_eq!(
+        layered.ambiguous_name_candidates(),
+        EXPECTED_LAYERED_AGGREGATE_CANDIDATES,
+        "layered 段的同名候选总数必须与 legacy 段相同（`--resolver` 不增删定义节点）"
+    );
+
+    // ---- (2) 口径 D 取证：函数节点集合按 `(相对文件, 行号, 名字, 是否幽灵)` 做差集 ----
+    let key = |b: &Built| std::collections::HashSet::<(String, String, usize, bool)>::from_iter(
+        b.all_functions().into_iter().map(|f| {
+            let rel = f
+                .file_path
+                .strip_prefix(&b.project_dir)
+                .unwrap_or(f.file_path.as_path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            (rel, f.name.clone(), f.line_start, f.namespace == "unresolved")
+        }),
+    );
+    let legacy_nodes = key(&legacy);
+    let layered_nodes = key(&layered);
+    let only_in_legacy: Vec<String> = legacy_nodes
+        .difference(&layered_nodes)
+        .map(|(file, name, line, ghost)| format!("{file}:{line}#{name}(ghost={ghost})"))
+        .collect();
+    let only_in_layered: Vec<String> = layered_nodes
+        .difference(&legacy_nodes)
+        .map(|(file, name, line, ghost)| format!("{file}:{line}#{name}(ghost={ghost})"))
+        .collect();
+    println!("P2B 函数节点差集（口径 D 取证，layered 相对 legacy）：");
+    println!("  legacy minus layered = {:?}", {
+        let mut v = only_in_legacy.clone();
+        v.sort();
+        v
+    });
+    println!("  layered minus legacy = {:?}", {
+        let mut v = only_in_layered.clone();
+        v.sort();
+        v
+    });
+
+    // **少掉的那一个必须是幽灵节点**，而且是 `python_import_alias/consumer.py` 的 `alias`：
+    // legacy 把 `alias(a)` 判成未解析 ⇒ 造 `namespace="unresolved"` 的临时节点；
+    // layered 用 L4-ImportBinding 命中 `mod_x.py:4 def alias(...)` ⇒ 不需要造幽灵。
+    assert!(
+        only_in_layered.is_empty(),
+        "layered 不得凭空多出任何函数节点（口径 D ①：节点丢失的反向情形同样不允许）：{:?}",
+        only_in_layered
+    );
+    assert_eq!(
+        only_in_legacy.len(),
+        1,
+        "32→31 必须恰好少一个节点，实际少 {:?}（若差集变化请连同 README 的分叉表一起更新）",
+        only_in_legacy
+    );
+    let gone = &only_in_legacy[0];
+    assert!(
+        gone.contains("#alias(ghost=true)"),
+        "少掉的那一个必须是 legacy 造的未解析幽灵 `alias`，实际 = {gone}"
+    );
+    assert_eq!(legacy_nodes.len() - layered_nodes.len(), 1, "节点差集必须恰好为 1");
+    // 真实定义（非幽灵）节点集合两模式**逐元素相等** ⇒ 证明 32→31 是统计口径差异，
+    // 不是"layered 建图少写了一个函数节点"。
+    let real = |set: &std::collections::HashSet<(String, String, usize, bool)>| {
+        set.iter()
+            .filter(|(_, _, _, ghost)| !*ghost)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut real_legacy = real(&legacy_nodes);
+    let mut real_layered = real(&layered_nodes);
+    real_legacy.sort();
+    real_layered.sort();
+    assert_eq!(
+        real_legacy, real_layered,
+        "非幽灵（真实定义）节点必须两种模式完全一致（实测 30 个），否则就是节点丢失 bug"
+    );
+    assert_eq!(real_legacy.len(), 30, "真实定义节点数应为 32-2=30");
+
+    // ---- (3) 边数上升的归因必须是"歧义候选被保留"，不是"多造了调用点" ----
+    // 调用点身份判据用 [`Built::call_site_set`]（不含 callee 名，理由见该方法文档）。
+    let legacy_sites = legacy.call_site_set();
+    let layered_sites = layered.call_site_set();
+    println!(
+        "P2B 覆盖中性：legacy 有边调用点={} 边={} | layered 有边调用点={} 边={}",
+        legacy_sites.len(),
+        legacy_metrics.edges,
+        layered_sites.len(),
+        layered_metrics.edges
+    );
+    // 口径 B 的精确表述是**双向相等**（比原先的 subset 更强）：layered 既不许让原本有边的
+    // 调用点掉边，也不许凭空造出一个 legacy 没有的调用点。
+    assert_eq!(
+        layered_sites,
+        legacy_sites,
+        "口径 B（覆盖中性，双向）：两种模式的调用点集合必须完全相等，对称差 = {:?}",
+        legacy_sites
+            .symmetric_difference(&layered_sites)
+            .collect::<Vec<_>>()
+    );
+
+    // 每调用点的边数：证明"边数 13→20"全部来自同一调用点的候选展开（口径 A）。
+    let legacy_per = legacy.call_site_edge_counts();
+    let layered_per = layered.call_site_edge_counts();
+    println!("P2B 每调用点边数 legacy->layered：");
+    for (k, l) in &legacy_per {
+        println!(
+            "  {:?} : {} -> {}",
+            k,
+            l,
+            layered_per.get(k).copied().unwrap_or(0)
+        );
+    }
+    assert_eq!(
+        legacy_per.keys().collect::<Vec<_>>(),
+        layered_per.keys().collect::<Vec<_>>(),
+        "每调用点边数的键集合必须一致（不许有只在一侧出现的调用点）"
+    );
+    assert!(
+        layered_per.values().all(|n| *n >= 1),
+        "任何调用点都不许是零边（口径 B 的覆盖中性）"
+    );
+    assert!(
+        layered_per.values().sum::<usize>() >= legacy_per.values().sum::<usize>(),
+        "layered 的总边数必须 >= legacy（候选展开只增不减）"
+    );
+
+    // ---- (4) 允许分叉的维度只有这些：连到哪一个同名定义 / 一条边拆成几条 / 层级标量 ----
+    // 调用点集合的相等性已在 (3) 里双向锁死；这里把"真正允许不同"的那一维打印出来，
+    // 供 README 分叉表逐项归因（callee 身份在 legacy 下与哈希种子有关，故只打印不断言）。
+    let legacy_callees = legacy.callee_identities();
+    let layered_callees = layered.callee_identities();
+    let diff = |a: &[(String, String, usize, bool)], b: &[(String, String, usize, bool)]| -> Vec<String> {
+        a.iter().filter(|x| !b.contains(x)).map(|x| format!("{:?}", x)).collect()
+    };
+    println!("P2B callee 身份对照（legacy={} layered={}）：", legacy_callees.len(), layered_callees.len());
+    println!("  仅 legacy 有: {:?}", diff(&legacy_callees, &layered_callees));
+    println!("  仅 layered 有: {:?}", diff(&layered_callees, &legacy_callees));
+    // 唯一不许分叉的东西：边的总"调用点 × 是否声称已解析"结构里的调用点数（(3) 已锁），
+    // 以及 legacy 的幽灵边不许被 layered 悄悄丢掉。
+    let legacy_ghosts = legacy_callees.iter().filter(|(_, _, _, r)| !*r).count();
+    let layered_ghosts = layered_callees.iter().filter(|(_, _, _, r)| !*r).count();
+    println!("P2B 幽灵边（is_resolved=false）legacy={} layered={}", legacy_ghosts, layered_ghosts);
+    assert!(
+        layered_ghosts + layered_metrics.resolved >= legacy_ghosts + legacy_metrics.resolved,
+        "layered 的（幽灵边 + 已解析边）总数不得少于 legacy —— 边覆盖必须中性偏保守"
+    );
+}
+
+/// 最激进配置（`--resolver=layered --max-candidates=1 --levels=l5`）的新基线。
+///
+/// P2a 时这一组必须与 legacy 相等；P2b 接线之后它必然分叉，但**必须仍然满足两条不变量**：
+///  - `--max-candidates=1` 只截断落盘条数，不得改变"有边的调用点数"（口径 A/B）；
+///  - `--levels=l5` 关掉其它层 ⇒ 允许调用点拿不到候选（下沉成幽灵边），但绝不许让
+///    原本有边的调用点**没有边**（口径 B 的覆盖中性）。
+#[test]
+fn p2b_strict_layered_flags_only_truncate_never_drop_sites() {
+    let legacy = Built::build("p2b_strict_legacy", RESOLUTION_ROOT);
+    let wide = Built::build_with("p2b_strict_wide", RESOLUTION_ROOT, Some(ResolverFlags::LAYERED));
+    let strict = Built::build_with(
+        "p2b_strict",
+        RESOLUTION_ROOT,
+        Some(ResolverFlags::LAYERED_STRICT),
+    );
+
+    // 调用点身份判据同 [`Built::call_site_set`]（不含 callee 名，理由见该方法文档）。
+    let sites = |b: &Built| b.call_site_set();
+    let (l, w, s) = (sites(&legacy), sites(&wide), sites(&strict));
+    println!(
+        "P2B STRICT 对照：legacy 边={}/点={} | layered(8,全层) 边={}/点={} | layered(1,l5) 边={}/点={}",
+        legacy.metrics().edges,
+        l.len(),
+        wide.metrics().edges,
+        w.len(),
+        strict.metrics().edges,
+        s.len()
+    );
+
+    // 上限 1：边的**条数**必须少（截断生效），有边的调用点数必须与全候选 layered 相同。
+    assert!(
+        strict.metrics().edges < wide.metrics().edges,
+        "`--max-candidates=1` 必须真的少写边，否则这个开关是假的"
+    );
+    assert_eq!(
+        s, w,
+        "`--max-candidates=1` 只许截断条数，不得改变\"哪些调用点有边\"（口径 A/B）"
+    );
+
+    // 只开 L5 的极端组合：不得让图变空，也不得写脏新标量。
+    assert!(
+        strict.metrics().function_nodes > 0 && strict.metrics().edges > 0,
+        "`--levels=l5` 不得把图建成空的"
+    );
+    for edge in strict.graph.graph.edge_references() {
+        let rel = edge.weight();
+        if rel.resolution_level == 0 {
+            assert_eq!(rel.confidence, 0, "level=0 必须 confidence=0");
+            assert_eq!(rel.candidate_count, 0, "level=0 必须 candidate_count=0");
+            assert!(!rel.is_resolved, "level=0 不得声称已解析");
+        } else {
+            assert!(rel.candidate_count >= 1, "level>0 必须至少有一个候选");
+        }
+    }
+}
+
+// ============================================================================================
+// 守卫 5（Phase P2b 收口，任务交付物 2 第 1 条）：引擎入口**只允许**在 Layered 分支被引用
+//
+// P2a 的原守卫是"引擎在 src/ 里（排除 `src/codegraph/resolution/`）零引用"。
+// P2b 的目的就是把引擎接进产边链路，所以那条断言**永久失效**（by-design）。
+// 直接删掉它等于放弃这一整类回归，因此这里改写成一条更强的新不变量：
+//
+//   **(i) 文件级**：`src/` 里（排除引擎自身 `src/codegraph/resolution/**`）只允许
+//        `codegraph/parser.rs` 与 `storage/incremental.rs` 两个接线文件引用引擎入口。
+//   **(ii) 函数级**：每一处引用都必须落在"layered 专属函数"或"按 Layered 分叉的函数"里；
+//        只建不消费 ctx 的三个缓存建设点（`parse_file` / `_extract_entities_from_file` /
+//        `ensure_file_scope_ctx`）**只允许**引用 `build_file_scope_ctx` 这一个入口。
+//   **(iii) 反向**：legacy 的产边/callee 解析函数（`_analyze_file_calls_for_petgraph`、
+//        `_resolve_callee_function` 的 legacy 尾段、`_build_function_name_index` 等）
+//        必须**零引用**引擎入口，且五处 first-wins 的字面特征必须健在。
+//   **(iv) 行为侧**（与文本扫描互补，防"改了文本没改行为"）：同一份 fixture 下
+//        legacy 的边四标量恒 0、节点身份字段恒 None，而 layered 必须两者都有非零实例。
+// ============================================================================================
+
+/// 引擎入口符号（判定"是不是引用了引擎"用；别名 `resolution_emit` / `resolution_caller_node`
+/// 也必须一起扫，否则 `use x as y` 会绕过文本扫描）。
+const ENGINE_ENTRIES: &[&str] = &[
+    "resolve_call_with_config",
+    "call_sites_from_symbols",
+    "build_resolution_index_from_graph",
+    "emit_layered_resolution",
+    "layered_caller_node",
+    "build_file_scope_ctx",
+    "module_separator",
+    "resolution_emit(",
+    "resolution_caller_node(",
+];
+
+/// 允许"引用引擎入口"的函数，以及每个函数允许引用的入口子集。
+///
+/// `None` 表示该函数允许引用任意引擎入口（它本身就是 layered 链路）。
+/// 名单里每一个条目都在 P2b 收口时被人工核对过（见本文件的报告）；
+/// 新增接线点必须**同时**扩充这张表，否则本守卫报错 —— 这正是它的价值。
+const LAYERED_ONLY_FNS: &[&str] = &[
+    // `CodeParser` 的 layered 链路
+    "_analyze_file_calls_layered",
+    "_analyze_petgraph_call_relations_layered",
+    "_layered_callee_first",
+    "_layered_caller_node",
+    "_emit_layered_resolution",
+];
+
+/// 只建不消费 `FileScopeCtx` / 只补写节点身份字段的缓存建设点。
+///
+/// 这三个函数在**两种模式下都跑**（ctx 建设本身与 `--resolver` 无关），
+/// 因此只允许引用"建 ctx / 推 module 分隔符"这两个入口，绝不允许引用判定或产边入口。
+const CTX_BUILDER_FNS: &[&str] = &[
+    "parse_file",
+    "_extract_entities_from_file",
+    "ensure_file_scope_ctx",
+];
+
+/// [`CTX_BUILDER_FNS`] 里允许出现的引擎入口。
+const CTX_ALLOWED_ENTRIES: &[&str] = &["build_file_scope_ctx", "module_separator"];
+
+/// 按 `ResolverMode::Layered` 分叉的函数：引擎引用必须出现在
+/// `ResolverMode::Layered` 判定**之后**、且仍在同一函数体内（这些函数的 legacy 尾段
+/// 由 [`FIRST_WINS_MARKERS`] 单独证明未被偷改）。
+const MODE_BRANCH_FNS: &[&str] = &["_analyze_file_calls", "_find_callee_function"];
+
+/// 五处 first-wins 的字面特征（任务红线 1）：任何一处消失 ⇒ 说明有人把 legacy 塌缩逻辑删了。
+const FIRST_WINS_MARKERS: &[(&str, &str)] = &[
+    ("src/storage/incremental.rs", "global_functions.first().map(|f| f.id)"),
+    ("src/codegraph/parser.rs", "global_functions.first().map(|f| f.id)"),
+    ("src/codegraph/parser.rs", "index.entry(function.name.as_str()).or_insert(function)"),
+    (
+        "src/codegraph/parser.rs",
+        "if func.namespace.contains(prefix) || func.name == method_name",
+    ),
+    ("src/codegraph/parser.rs", "for function in current_functions"),
+];
+
+/// 计算每个 `fn` 的行区间 `(名字, 起始行, 结束行)`（0-based，含首尾）。
+///
+/// 只需支撑文本级守卫判定，因此用"大括号配平"的近似实现：跳过 `//` 注释行，
+/// 统计每行的 `{`/`}`。字符串字面量里的花括号会带来误差，但接线代码里没有这种情况；
+/// 万一哪天因为误差误判，本守卫会**报错**而不是静默放过 —— 这正是想要的失败方向。
+fn function_ranges(text: &str) -> Vec<(String, usize, usize)> {
+    let mut out: Vec<(String, usize, usize)> = Vec::new();
+    let mut depth = 0usize;
+    // 栈里存 `(函数名, 声明时的 depth, 声明行)`
+    let mut stack: Vec<(String, usize, usize)> = Vec::new();
+    let mut pending: Option<(String, usize)> = None;
+
+    for (idx, raw) in text.lines().enumerate() {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if let Some(name) = parse_fn_name(trimmed) {
+            pending = Some((name, depth));
+        }
+        let opens = raw.matches('{').count();
+        let closes = raw.matches('}').count();
+        if let Some((name, base)) = pending.take() {
+            if opens > 0 {
+                stack.push((name, base, idx));
+            }
+        }
+        depth = depth + opens.saturating_sub(closes);
+        while let Some((name, base, start)) = stack.last().cloned() {
+            if depth <= base {
+                stack.pop();
+                out.push((name, start, idx));
+            } else {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 从一行 `fn` 声明里取函数名（只处理 `pub fn` / `fn` / `async fn` 三种形态）。
+fn parse_fn_name(trimmed: &str) -> Option<String> {
+    for prefix in ["pub const fn ", "pub async fn ", "const fn ", "async fn ", "pub fn ", "fn "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                return None;
+            }
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// 找到 `line`（0-based）所在的**最内层**函数名。
+fn enclosing_function(ranges: &[(String, usize, usize)], line: usize) -> Option<&str> {
+    let mut best: Option<(&str, usize)> = None;
+    for (name, start, end) in ranges {
+        if *start <= line && line <= *end {
+            let span = end.saturating_sub(*start);
+            if best.is_none_or(|(_, b)| span < b) {
+                best = Some((name.as_str(), span));
+            }
+        }
+    }
+    best.map(|(name, _)| name)
+}
+
+/// 判定一行的引用是否允许（见文件头守卫 5 的 (i)(ii)(iii)）。
+///
+/// `file` 是相对 manifest 的路径（已把 `\` 归一化为 `/`）。它在这里**复查**一遍 (i)
+/// 的文件级不变量：调用方虽然已经过滤过非接线文件，但把规则同时落在判定函数里，
+/// 将来有人重构调用方时不会悄悄放开"任何文件都能引用引擎"。
+fn classify_reference(file: &str, func: Option<&str>, symbol: &str) -> bool {
+    const WIRING: &[&str] = &["src/codegraph/parser.rs", "src/storage/incremental.rs"];
+    if !WIRING.contains(&file) {
+        return false;
+    }
+    let Some(func) = func else {
+        // 不在任何函数体内 ⇒ `use` 语句 / 模块级常量，接线必需，放行。
+        return true;
+    };
+    if LAYERED_ONLY_FNS.iter().any(|f| func.ends_with(f)) {
+        return true;
+    }
+    if CTX_BUILDER_FNS.contains(&func) {
+        // 只建不消费：这三个函数在两种模式下都会跑，因此只允许引用"建 ctx / 推 module 分隔符"
+        // 这两个纯建设入口（[`CTX_ALLOWED_ENTRIES`]），绝不允许引用判定或产边入口 ——
+        // 否则默认 legacy 路径就会被"顺手"接进分层引擎，红线 1 立刻失效。
+        return CTX_ALLOWED_ENTRIES.contains(&symbol);
+    }
+    if MODE_BRANCH_FNS.contains(&func) {
+        return true;
+    }
+    false
+}
+
+#[test]
+fn p2b_engine_entries_are_referenced_only_from_layered_branches() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let src_root = manifest.join("src");
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_rs_files(&src_root, &mut files);
+    files.sort();
+
+    let wiring_files = ["src/codegraph/parser.rs", "src/storage/incremental.rs"];
+    let mut offenders: Vec<String> = Vec::new();
+    let mut referenced_symbols_in_wiring: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut per_file_counts: Vec<(String, usize)> = Vec::new();
+
+    for path in &files {
+        let rel = path
+            .strip_prefix(&manifest)
+            .unwrap_or(path.as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        // 引擎本体自己不算"接线"。
+        if rel.contains("src/codegraph/resolution/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let ranges = function_ranges(&text);
+        let outside_wiring = !wiring_files.contains(&rel.as_str());
+        let mut hits = 0usize;
+
+        // 处于多行 `use ... { ... };` 语句里时，行号集合（放行：那是导入，不是调用）
+        let mut in_use_block = false;
+        for (idx, raw) in text.lines().enumerate() {
+            let trimmed = raw.trim_start();
+            if trimmed.starts_with("use ") {
+                in_use_block = !trimmed.contains(';');
+            }
+            let is_comment = trimmed.starts_with("//")
+                || trimmed.starts_with("///")
+                || trimmed.starts_with("//!")
+                || trimmed.starts_with("*");
+            let is_use = in_use_block || trimmed.starts_with("use ");
+            if is_comment {
+                continue;
+            }
+            for symbol in ENGINE_ENTRIES {
+                if !raw.contains(symbol) {
+                    continue;
+                }
+                hits += 1;
+                if is_use {
+                    // 导入语句：只要求它必须来自接线文件（(i) 文件级）。
+                    if outside_wiring {
+                        offenders.push(format!("{rel}:{} 在非接线文件里导入了引擎入口 {symbol}", idx + 1));
+                    } else {
+                        referenced_symbols_in_wiring.insert((*symbol).to_string());
+                    }
+                    continue;
+                }
+                if outside_wiring {
+                    offenders.push(format!("{rel}:{} 在非接线文件里调用了引擎入口 {symbol}", idx + 1));
+                    continue;
+                }
+                let func = enclosing_function(&ranges, idx);
+                if !classify_reference(&rel, func, symbol) {
+                    offenders.push(format!(
+                        "{rel}:{} 在函数 `{}?` 里引用了引擎入口 {symbol}（该函数不在 layered 专属 /\n  ctx 建设 / Mode::Layered 分叉三类白名单里）",
+                        idx + 1,
+                        func.unwrap_or("<none>")
+                    ));
+                } else {
+                    referenced_symbols_in_wiring.insert((*symbol).to_string());
+                }
+            }
+            if trimmed == "};" && in_use_block {
+                in_use_block = false;
+            }
+        }
+        if hits > 0 {
+            per_file_counts.push((rel, hits));
+        }
+    }
+
+    // ---- 先证明"确实引用了"：否则本守卫会在有人把接线整个删掉时假绿 ----
+    assert!(
+        !referenced_symbols_in_wiring.is_empty(),
+        "P2b 已接线：引擎入口必须在接线文件里被引用（这张表空了说明接线被整体删除，本守卫应当改写）"
+    );
+    for must in [
         "resolve_call_with_config",
-        "resolve_call(",
         "call_sites_from_symbols",
         "build_resolution_index_from_graph",
-    ];
-    let mut offenders: Vec<String> = Vec::new();
+    ] {
+        assert!(
+            referenced_symbols_in_wiring.contains(must),
+            "引擎入口 `{must}` 必须仍是被引用状态（P2b 接线证据）"
+        );
+    }
 
-    let mut stack = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
+    // ---- 反向不变量：legacy 产边/callee 解析函数体里**一次**引擎入口都不许出现 ----
+    // （`_analyze_file_calls` / `_find_callee_function` 的入口分叉在
+    //  [`MODE_BRANCH_FNS`] 里被单独允许，这里检查的是"纯 legacy 函数"）。
+    let legacy_only_fns = [
+        "_analyze_file_calls_for_petgraph",
+        "_analyze_call_relations",
+        "_analyze_file_call_relations",
+        "_build_function_name_index",
+        "_fallback_call_analysis",
+        "_resolve_callee_function",
+        "_resolve_qualified_function_name",
+        "_create_unresolved_call_relation",
+    ];
+    let mut legacy_violations: Vec<String> = Vec::new();
+    for rel in wiring_files {
+        let text = std::fs::read_to_string(manifest.join(&rel)).unwrap_or_default();
+        let ranges = function_ranges(&text);
+        for (name, start, end) in &ranges {
+            if !legacy_only_fns.contains(&name.as_str()) {
                 continue;
             }
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            // 白名单：引擎本体。`src/codegraph/parser.rs` 里的**注释与文档**不算引用，
-            // 因此这里只统计"真实调用/导入"形态。
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
-            let is_engine = path
-                .to_string_lossy()
-                .replace('\\', "/")
-                .contains("src/codegraph/resolution/");
-            if is_engine {
-                continue;
-            }
-            for needle in forbidden {
-                for (idx, line) in text.lines().enumerate() {
-                    let trimmed = line.trim_start();
-                    if trimmed.starts_with("//")
-                        || trimmed.starts_with("///")
-                        || trimmed.starts_with("//!")
-                    {
-                        continue; // 注释里的名字不是引用
-                    }
-                    if line.contains(needle) {
-                        offenders.push(format!(
-                            "{}:{} 引用了 {needle}",
-                            path.to_string_lossy(),
-                            idx + 1
+            for (idx, raw) in text.lines().enumerate().take(*end).skip(*start) {
+                let trimmed = raw.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                // `_resolve_callee_function` / `_resolve_qualified_function_name` 允许
+                // 在**入口分叉处**调用本文件的 `_layered_callee_first` 薄调用；
+                // 其余引擎入口一律禁止。
+                for symbol in ENGINE_ENTRIES {
+                    if raw.contains(symbol) {
+                        legacy_violations.push(format!(
+                            "{rel}:{} legacy 专属函数 `{name}` 引用了引擎入口 {symbol}",
+                            idx + 1,
                         ));
                     }
                 }
             }
         }
     }
+    assert!(
+        legacy_violations.is_empty(),
+        "legacy 分支必须零引用分层引擎：\n{}",
+        legacy_violations.join("\n")
+    );
 
+    // ---- 五处 first-wins 的字面特征必须健在（红线 1）----
+    for (rel, marker) in FIRST_WINS_MARKERS {
+        let text = std::fs::read_to_string(manifest.join(rel)).unwrap_or_default();
+        assert!(
+            text.contains(marker),
+            "红线 1 被破坏：{rel} 里找不到 first-wins 特征 `{marker}`"
+        );
+    }
+
+    // ---- 汇总 ----
+    println!(
+        "P2B 引擎引用白名单核对：接线文件引用入口 {} 种；引用点分布 {:?}",
+        referenced_symbols_in_wiring.len(),
+        per_file_counts
+    );
     assert!(
         offenders.is_empty(),
-        "P2a 的分层引擎必须\"只建不消费\"，但它已被建图/查询管线引用：\n{}",
+        "引擎入口只能出现在 layered 分支/接线白名单函数里，违规：\n{}",
         offenders.join("\n")
     );
+}
+
+/// 行为侧证据（与文本扫描互补）：legacy 零新标量/零身份字段，layered 两者都有。
+#[test]
+fn p2b_layered_wiring_is_observable_in_graph_but_legacy_is_not() {
+    let legacy = Built::build("p2b_behavior_legacy", RESOLUTION_ROOT);
+    let layered = Built::build_with("p2b_behavior_layered", RESOLUTION_ROOT, Some(ResolverFlags::LAYERED));
+
+    let legacy_edges_with_level = legacy
+        .graph
+        .graph
+        .edge_references()
+        .filter(|e| e.weight().resolution_level > 0)
+        .count();
+    let layered_edges_with_level = layered
+        .graph
+        .graph
+        .edge_references()
+        .filter(|e| e.weight().resolution_level > 0)
+        .count();
+    let legacy_nodes_with_identity = legacy
+        .all_functions()
+        .into_iter()
+        .filter(|f| f.module_path.is_some() || f.qualified_name.is_some())
+        .count();
+    let layered_nodes_with_identity = layered
+        .all_functions()
+        .into_iter()
+        .filter(|f| f.module_path.is_some() || f.qualified_name.is_some())
+        .count();
     println!(
-        "未接线证明：{} 个入口符号在 src/ 中（排除 src/codegraph/resolution/）零引用",
-        forbidden.len()
+        "P2B 接线行为证据：legacy level>0 边={legacy_edges_with_level} 身份节点={legacy_nodes_with_identity}\n                      layered level>0 边={layered_edges_with_level} 身份节点={layered_nodes_with_identity}"
     );
+    assert_eq!(
+        legacy_edges_with_level, 0,
+        "legacy 的边必须一条 `resolution_level>0` 都没有（引擎零消费）"
+    );
+    assert_eq!(legacy_nodes_with_identity, 0, "legacy 不得写节点身份字段");
+    assert!(
+        layered_edges_with_level > 0,
+        "layered 必须真的写出了带层级的边，否则接线是假的"
+    );
+    assert!(
+        layered_nodes_with_identity > 0,
+        "layered 必须真的写出了节点身份字段，否则交付物 1 的接线是假的"
+    );
+    // layered 的多候选必须体现为 `candidate_count >= 2` 的边（歧义没被塌缩）。
+    let multi = layered
+        .graph
+        .graph
+        .edge_references()
+        .filter(|e| e.weight().candidate_count >= 2)
+        .count();
+    assert!(
+        multi > 0,
+        "口径 A：歧义调用点必须保留多候选（candidate_count>=2 的边数为 0 ⇒ 又被塌缩了）"
+    );
+    println!("P2B candidate_count>=2 的边 = {multi} 条（口径 A 未塌缩证据）");
+}
+
+/// 递归收集 `src/**/*.rs`。
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
 }

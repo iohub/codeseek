@@ -100,6 +100,23 @@ pub struct CodeParser {
     /// 解析口径由 [`ResolutionConfig::from_levels_spec`] 唯一决定；非法值在建图入口即报错，
     /// **绝不静默忽略**（否则诊断结论会建立在"以为开了其实没开"的配置上）。
     levels_spec: Option<String>,
+    /// Phase P2b 收口（口径 A）：上一轮 `build_*` 里**真正重新解析**的文件数（只读诊断）。
+    ///
+    /// 为什么需要它：任务口径 A 要求把两件事解耦 ——
+    ///  - **解析/重建决策**：由既有 MD5 哈希契约决定（哈希命中 ⇒ 不重新解析、不重建
+    ///    `file_functions`、不重建 `file_scopes`）；
+    ///  - **索引供给**：`build_resolution_index_from_graph` 仅凭**图里已有的函数节点**
+    ///    就能产出候选，被跳过的文件候选不许缺失（ctx 相关字段允许降级为中性值）。
+    /// 于是"本轮没有重新解析任何文件"是一个**必须可断言**的性质，而改造前它只能靠
+    /// "图节点数为 0"这种代理指标间接观察（正是 `test_force_reindex_escape_hatch_bypasses_all_caches`
+    /// 里那条被 P0 空图缺陷污染的断言）。这里把它变成直接可测的计数。
+    ///
+    /// ⚠ 只读诊断：`ensure_file_scope_ctx` 的**按需补建不计入**本计数（它只补 ctx，
+    /// 不产生 `FunctionInfo`/`CallRelation`，因此不算"重新解析该文件的实体/边"）。
+    /// 该口径由 `tests/test_p2b_wiring.rs::p2b_hash_skip_contract_*` 钉死。
+    last_round_parsed: usize,
+    /// 上一轮 `build_*` 里因"内容未变（MD5 命中）"或"混淆 JS"被跳过的文件数（只读诊断）。
+    last_round_skipped: usize,
 }
 
 impl CodeParser {
@@ -117,6 +134,8 @@ impl CodeParser {
             resolver_mode: ResolverMode::Legacy,
             max_candidates: DEFAULT_MAX_CANDIDATES as usize,
             levels_spec: None,
+            last_round_parsed: 0,
+            last_round_skipped: 0,
         }
     }
 
@@ -132,6 +151,19 @@ impl CodeParser {
     /// 当前是否处于强制全量重建模式。
     pub fn force_reindex_enabled(&self) -> bool {
         self.force_reindex
+    }
+
+    /// Phase P2b 收口（口径 A）：上一轮 `build_code_graph` / `build_petgraph_code_graph`
+    /// 的 `(真正重新解析的文件数, 被跳过的文件数)`。
+    ///
+    /// 这是"哈希命中即跳过"契约**唯一可直接断言**的观测点：
+    /// - `force_reindex` 置位 ⇒ `(_ > 0, 0)`（三个缓存读取点一律 miss）；
+    /// - 图缓存存在 + 内容未变 ⇒ `(0, N)`（一个文件都不许多解析）。
+    ///
+    /// ⚠ 只读诊断，不参与任何解析决策；`ensure_file_scope_ctx` 的按需补建**不**计入
+    /// "重新解析"（它只往 `file_scopes` 里写 ctx，不产生 `FunctionInfo` / `CallRelation`）。
+    pub fn last_round_file_counts(&self) -> (usize, usize) {
+        (self.last_round_parsed, self.last_round_skipped)
     }
 
     /// Phase P1 交付物 3：读取某个文件的解析上下文（作用域树 + import 表 + module path）。
@@ -503,8 +535,15 @@ impl CodeParser {
                             call_line,
                             true,
                         );
-                        if let Err(e) = call_graph.add_call_relation(relation) {
-                            warn!("Failed to add call relation: {}", e);
+                        // Phase P2b 收口（口径 B）：唯一的边写入入口。刷新会对同一个调用点
+                        // **重新发射**，先删同调用点旧边再写，保证幂等（旧写法只靠
+                        // add_call_relation 的 (caller,callee,line) 去重，一旦 caller 节点
+                        // 是"重建出来的第二个副本"就会叠出重复边）。
+                        if call_graph
+                            .upsert_call_site_edges(&caller_id, call_line, call_name, vec![relation])
+                            == 0
+                        {
+                            warn!("Failed to add call relation: {}", call_name);
                         }
                     } else {
                         // 未解析的调用
@@ -709,8 +748,12 @@ impl CodeParser {
             false,
         );
 
-        if let Err(e) = call_graph.add_call_relation(relation) {
-            warn!("Failed to add unresolved call relation: {}", e);
+        // Phase P2b 收口（口径 B）：刷新链路上的幽灵边同样走唯一写入入口。
+        if call_graph
+            .upsert_call_site_edges(caller_id, call_line, call_name, vec![relation])
+            == 0
+        {
+            warn!("Failed to add unresolved call relation: {}", call_name);
         }
     }
 
@@ -723,7 +766,7 @@ impl CodeParser {
     ) {
         // 获取文件的所有实体ID
         let entity_ids = self.file_index.get_all_entity_ids(file_path);
-        let function_ids = self.file_index.get_all_function_ids(file_path);
+        let index_function_ids = self.file_index.get_all_function_ids(file_path);
         let _class_ids = self.file_index.get_all_class_ids(file_path);
 
         // 从图中移除
@@ -731,10 +774,33 @@ impl CodeParser {
             entity_graph.remove_entity(&entity_id);
         }
 
-        for function_id in function_ids {
+        // Phase P2b 收口（真缺陷 1 的根因修复）：**"本文件的函数节点"必须以图为准**。
+        //
+        // 改造前这里只认 `self.file_index`，而 `file_index` 只有 `refresh_file` 这条链路会写
+        // （`file_index.rebuild_for_file`）；`parse_file` / `build_petgraph_code_graph`
+        // （也就是真实 CLI 的第一轮建图）**从不填它**。于是对"上一轮由全量建图写进图的节点"
+        // 做一次 `refresh_file`，清理循环遍历的是**空列表** ⇒ 旧节点一个都没删掉，
+        // 紧接着 `add_function` 用新 Uuid 又插入一份 ⇒ 同一个文件出现两套函数节点，
+        // 同一个调用点各产一条边（`add_call_relation` 按 `(caller, callee, line)` 去重，
+        // caller 是两个不同 uuid，于是去重完全失效）。
+        // 实测：`cross_file_same_name/gamma.rs:6 call_helper -> helper` 增量刷新 2 条、
+        // 从零重建 1 条（`tests/test_p2b_wiring.rs::p2b_full_vs_incremental_refresh_is_consistent`）。
+        //
+        // 修法：三处来源取并集，逐个走索引安全的删除原语。
+        //  (a) `file_index`（刷新链路自己写的）
+        //  (b) `self.file_functions`（同一 parser 实例内做过全量建图的）
+        //  (c) **图自身的按文件反向索引**（跨进程、从 `graph.bin` 读回来的增量场景 ——
+        //      `PetGraphStorage` 会重建 `file_functions`，见 `remove_functions_by_file`）
+        let mut stale_function_ids: Vec<Uuid> = index_function_ids;
+        if let Some(parser_side) = self.file_functions.get(file_path) {
+            stale_function_ids.extend(parser_side.iter().map(|f| f.id));
+        }
+        for function_id in stale_function_ids {
             // 必须走索引安全的删除原语：直接 remove_node 会让 NodeIndex 映射因 swap 搬移而失效
             call_graph.remove_function(&function_id);
         }
+        // 兜底：图知道自己每个文件挂了哪些节点，按文件整批清理（已删掉的 id 返回 false，幂等）。
+        call_graph.remove_functions_by_file(file_path);
 
         // 清理索引
         self.file_index.remove_file(file_path);
@@ -1212,6 +1278,9 @@ impl CodeParser {
         }
         
         info!("File processing completed: {} processed, {} skipped", processed_files, skipped_files);
+        // Phase P2b 收口（口径 A）：把"本轮是否真的重新解析了文件"变成可直接断言的观测点。
+        self.last_round_parsed = processed_files;
+        self.last_round_skipped = skipped_files;
         
         // 5. 如果这是增量构建，需要合并新解析的函数
         if has_existing_data {
@@ -1310,6 +1379,11 @@ impl CodeParser {
         }
         
         info!("File processing completed: {} processed, {} skipped", processed_files, skipped_files);
+        // Phase P2b 收口（口径 A）：跳过契约的直接观测点（同 `build_code_graph`）。
+        // 注意 `ensure_file_scope_ctx` 的按需补建**不会**增加这两个计数：它只写 `file_scopes`，
+        // 不重新解析实体、不产边（该口径由 `tests/test_p2b_wiring.rs` 钉死）。
+        self.last_round_parsed = processed_files;
+        self.last_round_skipped = skipped_files;
         
         // 5. 如果这是增量构建，需要合并新解析的函数
         if has_existing_data {
@@ -1983,8 +2057,18 @@ impl CodeParser {
                             true,
                         );
                         
-                        if let Err(e) = code_graph.add_call_relation(relation) {
-                            warn!("Failed to add resolved call relation: {}", e);
+                        // Phase P2b 收口（口径 B）：唯一的边写入入口（详见
+                        // `PetCodeGraph::upsert_call_site_edges` 的文档）。legacy 全量路径
+                        // 记录的 callee_name 是**解析结果名**，而刷新路径记录的是 AST 裸名，
+                        // 因此 upsert 的删除名字族必须同时包含两者 —— 由 upsert 内部保证。
+                        let written = code_graph.upsert_call_site_edges(
+                            &caller.id,
+                            call_line,
+                            call_name,
+                            vec![relation],
+                        );
+                        if written == 0 {
+                            warn!("Failed to add resolved call relation: {}", call_name);
                         } else {
                             stats.resolved += 1;
                         }
@@ -2130,8 +2214,18 @@ impl CodeParser {
             false,
         );
         
-        if let Err(e) = code_graph.add_call_relation(relation) {
-            warn!("Failed to add unresolved call relation: {}", e);
+        // Phase P2b 收口（口径 B）：未解析（幽灵）边也走同一个唯一写入入口 ——
+        // 重写同一个调用点时，旧的幽灵边会被删除，绝不留成"两条同名同线的边"。
+        if code_graph
+            .upsert_call_site_edges(
+                &caller.id,
+                call_line,
+                call_name,
+                vec![relation],
+            )
+            == 0
+        {
+            warn!("Failed to add unresolved call relation: {}", call_name);
         }
     }
     
