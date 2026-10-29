@@ -82,6 +82,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 把 `--force-reindex` 传进解析器：三个缓存读取点（已有图 / 文件 MD5 哈希）
             // 一律返回"缓存 miss"，保证本次全量重新解析。
             analyzer.set_force_reindex(cli.force_reindex);
+            // Phase P2a 交付物 3：`--resolver` / `--max-candidates` / `--levels=` 走同一条注入链。
+            // ⚠ 本阶段这三个值**不参与任何产边决策**（默认 legacy；layered 尚未接入管线），
+            //   因此它们对 `analyze_directory` 的结果零影响 —— 由
+            //   `tests/test_p1_edges_unchanged.rs::p2a_guard_cli_flags_are_plumbed_but_inert` 钉死。
+            //   非法的 `--levels` 一律在建图之前报错退出，绝不静默退回全开。
+            if let Err(err) = analyzer.set_resolver_options(
+                cli.resolver,
+                cli.max_candidates,
+                Some(cli.levels.clone()),
+            ) {
+                return Err(err.into());
+            }
             let result = analyzer.analyze_directory(&project_root);
             let code_graph = match result {
                 Ok(g) => g,

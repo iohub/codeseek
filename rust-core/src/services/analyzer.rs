@@ -28,6 +28,43 @@ impl CodeAnalyzer {
         self.parser.set_force_reindex(force_reindex);
     }
 
+    /// Phase P2a 交付物 3：把 `--resolver` / `--max-candidates` / `--levels=` 转发进
+    /// `CodeParser`，与 [`CodeAnalyzer::set_force_reindex`] 完全同一条链路
+    /// （`cli → main.rs → services/analyzer.rs → CodeParser`）。
+    ///
+    /// ⚠ **P2a 阶段这三个值只被存起来**：`analyze_directory` 及它下游的任何产边分支都不读它们，
+    /// 所以无论 `legacy` 还是 `layered`，调用边结果与 P1 逐字节一致（红线 1/2）。
+    /// 唯一的读取者是 `CodeParser::resolution_config()`（只读诊断）与其单测。
+    ///
+    /// `levels` 为空串/`None` 表示"全层开启"；**非法取值返回 Err**（绝不静默忽略），
+    /// 由调用方决定是报错退出还是回退默认。
+    pub fn set_resolver_options(
+        &mut self,
+        resolver_mode: crate::cli::args::ResolverMode,
+        max_candidates: usize,
+        levels: Option<String>,
+    ) -> Result<(), String> {
+        let trimmed = levels.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        if let Some(spec) = trimmed.as_deref() {
+            if crate::codegraph::resolution::resolver::ResolutionConfig::from_levels_spec(spec)
+                .is_none()
+            {
+                return Err(format!(
+                    "--levels 取值非法: {spec}（可用 all/p1/none/l1..l8/l2-l6/all,-l6/max=N）"
+                ));
+            }
+        }
+        self.parser.set_resolver_mode(resolver_mode);
+        self.parser.set_max_candidates(max_candidates);
+        self.parser.set_levels_spec(trimmed);
+        Ok(())
+    }
+
+    /// 当前解析引擎模式（诊断/测试用；P2a 不参与任何产边决策）。
+    pub fn resolver_mode(&self) -> crate::cli::args::ResolverMode {
+        self.parser.resolver_mode()
+    }
+
     /// 分析目录并构建代码图
     pub fn analyze_directory(&mut self, dir: &Path) -> Result<&CodeGraph, String> {
         info!("Starting code graph analysis for directory: {}", dir.display());

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::fs;
 use uuid::Uuid;
 use tracing::{info, warn, debug};
@@ -9,6 +10,11 @@ use crate::codegraph::types::{
     FileIndex, SnippetIndex
 };
 use crate::codegraph::graph::CodeGraph;
+// Phase P2a：`ResolverMode` 与 CLI 共用同一个枚举（先例：`storage/mod.rs` 与
+// `storage/persistence.rs` 都用 `crate::cli::args::StorageMode`），避免出现第二套"模式"类型。
+use crate::cli::args::ResolverMode;
+use crate::codegraph::resolution::resolver::{DEFAULT_MAX_CANDIDATES, ResolutionConfig};
+use crate::codegraph::resolution::{build_file_scope_ctx, FileScopeCtx};
 use crate::codegraph::treesitter::TreeSitterParser;
 use crate::detector;
 
@@ -52,6 +58,37 @@ pub struct CodeParser {
     /// 三个缓存读取点一律返回"缓存 miss"，于是 `build_code_graph` /
     /// `build_petgraph_code_graph` 必然重新解析每个文件，并在第 8 步重新写回哈希。
     force_reindex: bool,
+    /// Phase P1 交付物 3：**只建不消费**的文件级解析上下文缓存。
+    ///
+    /// 内容 = 作用域树 + import 绑定表 + module path（见 `codegraph::resolution`）。
+    /// 与 `file_functions` / `function_registry` / `file_index` / `snippet_index` 严格平行：
+    /// 每个文件解析成功时写入，`_remove_file_entities` 移除，两个 `build_*` 入口按新的仓库根重建。
+    ///
+    /// 硬约束：这里的任何数据都**不参与** `FunctionInfo` / `CallRelation` / `Uuid` 的生成，
+    /// 四处同名 first-wins（`parser.rs` 的 `_find_callee_function`、`_resolve_callee_function`、
+    /// `_resolve_qualified_function_name`、`_build_function_name_index` 与 `storage/incremental.rs`
+    /// 的 `_find_callee_function`）一字未改 —— 本缓存唯一的读者是
+    /// [`CodeParser::file_scope_ctx`]（P2 才接入解析路径）与其单测。
+    file_scopes: HashMap<PathBuf, Arc<FileScopeCtx>>,
+    /// 本轮建图的仓库根，用于 `resolution` 的 module path 推导。
+    ///
+    /// `None`（例如直接调用 `parse_file` 而没走 `build_*`）时 module path 一律降级为空串，
+    /// 见 `resolution::index::derive_module_path` 的 TODO(P2)。
+    resolution_root: Option<PathBuf>,
+    /// Phase P2a 交付物 3：`--resolver` 的取值（**默认 `Legacy`**）。
+    ///
+    /// ⚠ P2a 里这个字段**只存不用**：`build_code_graph` / `build_petgraph_code_graph` /
+    /// `refresh_file` / `incremental` 的任何一条产边分支都不读它，因此置成 `Layered`
+    /// 也不会改变一个节点、一条边。真正的接线在 P2b。
+    /// 唯一的消费者是新增的只读诊断 API（[`CodeParser::resolution_config`]）与其单测，
+    /// 这样既能保证 CLI 链路是通的，又不会碰到五处 first-wins 红线。
+    resolver_mode: ResolverMode,
+    /// Phase P2a 交付物 3：`--max-candidates`（默认 8）。同样**只存不用**，P2b 用它截断落盘候选。
+    max_candidates: usize,
+    /// Phase P2a 交付物 4：`--levels=` 的原始字符串（`None` = 全层开启）。
+    /// 解析口径由 [`ResolutionConfig::from_levels_spec`] 唯一决定；非法值在建图入口即报错，
+    /// **绝不静默忽略**（否则诊断结论会建立在"以为开了其实没开"的配置上）。
+    levels_spec: Option<String>,
 }
 
 impl CodeParser {
@@ -63,6 +100,12 @@ impl CodeParser {
             file_index: FileIndex::default(),
             snippet_index: SnippetIndex::default(),
             force_reindex: false,
+            file_scopes: HashMap::new(),
+            resolution_root: None,
+            // Phase P2a：默认 legacy —— 不置任何 flag 时产边结果与 P1 完全一致（红线 2）。
+            resolver_mode: ResolverMode::Legacy,
+            max_candidates: DEFAULT_MAX_CANDIDATES as usize,
+            levels_spec: None,
         }
     }
 
@@ -78,6 +121,119 @@ impl CodeParser {
     /// 当前是否处于强制全量重建模式。
     pub fn force_reindex_enabled(&self) -> bool {
         self.force_reindex
+    }
+
+    /// Phase P1 交付物 3：读取某个文件的解析上下文（作用域树 + import 表 + module path）。
+    ///
+    /// 这是 `file_scopes` 缓存**唯一**的公开读者：P1 里只有单测和 `tests/test_p1_edges_unchanged.rs`
+    /// 调用它，四处 callee 解析与 caller 归属一行未改，因此调用边语义不变。
+    ///
+    /// 返回 `None` 的两种情况：
+    /// 1. 该文件本轮没有被解析过（未进入 `parse_file` / `refresh_file`）；
+    /// 2. 增量构建中被文件哈希跳过（内容未变 ⇒ 没有重新解析 ⇒ 没有重建 ctx）。
+    ///    TODO(P2)：接入解析路径时必须为"跳过的文件"补建 ctx（要么持久化，
+    ///    要么在 `_should_skip_file` 命中时按已有图节点重建），否则该文件的调用点拿不到作用域。
+    pub fn file_scope_ctx(&self, path: &Path) -> Option<Arc<FileScopeCtx>> {
+        self.file_scopes.get(path).cloned()
+    }
+
+    /// 已建立 ctx 的文件数量（诊断与守卫测试用；不参与任何解析决策）。
+    pub fn file_scope_count(&self) -> usize {
+        self.file_scopes.len()
+    }
+
+    /// Phase P2a 交付物 2(b)：**按需补建**某个文件的 `FileScopeCtx`。
+    ///
+    /// 解决的正是 `file_scope_ctx()` 文档里那条 TODO(P2)：增量构建中被文件哈希
+    /// （MD5）跳过的文件不会重新解析，因此 `file_scopes` 里没有它的 ctx。任务口径 C 要求
+    /// **正确性绝不依赖缓存是否命中** —— 缺 ctx 就必须补建，而不是"降级成只用不需要
+    /// ctx 的层"，否则同一个文件在全量/增量两条路径下会产出不同的边，直接违反 P3 的
+    /// 一致性硬约束。
+    ///
+    /// 口径与 P1 的两个写入点（`_extract_entities_from_file`、`parse_file`）**逐参数一致**：
+    /// `TreeSitterParser::parse_file_with_metadata` + `_detect_language` +
+    /// `build_file_scope_ctx(path, symbols, self.resolution_root, language, declared_package)`。
+    ///
+    /// 硬约束（红线 1）：这里**只**往 `file_scopes` 里写，绝不触碰 `file_functions` /
+    /// `function_registry` / `file_index` / `snippet_index`，也绝不产生
+    /// `FunctionInfo` / `CallRelation` / `Uuid::new_v4()`。
+    /// 因此 P2a 里它只被新测试与 P2b 的解析路径消费，对既有建图产出零影响。
+    ///
+    /// 返回 `None` 仅当文件无法读取/无法解析（与 `parse_file` 的失败口径一致，打 `warn`
+    /// 而不 panic）；调用方应当把该文件的调用点按"无 ctx"处理并下沉到不需要 ctx 的层。
+    pub fn ensure_file_scope_ctx(&mut self, path: &Path) -> Option<Arc<FileScopeCtx>> {
+        // 命中缓存直接返回：与 `file_scope_ctx()` 同一份数据，绝不重复解析。
+        if let Some(ctx) = self.file_scopes.get(path) {
+            return Some(ctx.clone());
+        }
+
+        let path_buf = path.to_path_buf();
+        let ast = match self.ts_parser.parse_file_with_metadata(&path_buf) {
+            Ok(ast) => ast,
+            Err(err) => {
+                warn!("ensure_file_scope_ctx: 解析失败 {}: {}", path.display(), err.message);
+                return None;
+            }
+        };
+        let language = self._detect_language(path);
+        let ctx = build_file_scope_ctx(
+            path,
+            &ast.symbols,
+            self.resolution_root.as_deref(),
+            &language,
+            ast.declared_package,
+        );
+        // 与 P1 写入点一样回装进缓存，后续同一文件的调用点复用。
+        self.file_scopes.insert(path_buf, ctx.clone());
+        Some(ctx)
+    }
+
+    /// 本轮使用的解析引擎模式（对应 CLI 的 `--resolver`）。
+    ///
+    /// P2a：**只存不用**。P2b 起 `_find_callee_function` / `_resolve_callee_function` /
+    /// `_resolve_qualified_function_name` / `_build_function_name_index` /
+    /// `incremental.rs::_find_callee_function` 这五处才按它分叉。
+    pub fn set_resolver_mode(&mut self, mode: ResolverMode) {
+        self.resolver_mode = mode;
+    }
+
+    /// 当前解析引擎模式（默认 `Legacy`）。
+    pub fn resolver_mode(&self) -> ResolverMode {
+        self.resolver_mode.clone()
+    }
+
+    /// 候选保留上限（对应 CLI 的 `--max-candidates`，默认 8）。P2a 只存不用。
+    pub fn set_max_candidates(&mut self, max_candidates: usize) {
+        self.max_candidates = max_candidates;
+    }
+
+    /// 当前候选上限。
+    pub fn max_candidates(&self) -> usize {
+        self.max_candidates
+    }
+
+    /// 设置 `--levels=` 的原始字符串（`None`/空串 = 全层开启）。P2a 只存不用。
+    pub fn set_levels_spec(&mut self, spec: Option<String>) {
+        self.levels_spec = spec.filter(|s| !s.trim().is_empty());
+    }
+
+    /// 当前 `--levels=` 原始字符串。
+    pub fn levels_spec(&self) -> Option<&str> {
+        self.levels_spec.as_deref()
+    }
+
+    /// 把 `--max-candidates` / `--levels=` 组装成引擎配置（**只读诊断，不参与任何产边**）。
+    ///
+    /// `levels_spec` 非法时返回 `None`：调用方（CLI）必须**立即报错退出**，
+    /// 不能静默退回全层，否则"关掉 L5"这类诊断结论就不可信。
+    pub fn resolution_config(&self) -> Option<ResolutionConfig> {
+        let base = match self.levels_spec.as_deref() {
+            Some(spec) => ResolutionConfig::from_levels_spec(spec)?,
+            None => ResolutionConfig::all(),
+        };
+        // usize → u8：超过 255 直接饱和（与 P2b 落盘的 `candidate_count: u8` 口径一致）。
+        let max = self.max_candidates.min(u8::MAX as usize) as u8;
+        Some(base.with_max_candidates(max))
     }
 
     /// Check whether a JS file is obfuscated/compiled code.
@@ -166,8 +322,18 @@ impl CodeParser {
         // 解析文件，提取新的实体和函数
         let (classes, functions) = self._extract_entities_from_file(file_path)?;
 
+        // Phase P1 交付物 3：`_extract_entities_from_file` 已经把本次的 ctx 写进 `file_scopes`，
+        // 而下面的 `_remove_file_entities` 会按"整文件失效"的语义把它一并清掉 ——
+        // 与它对 `file_functions` 做的事完全一样，所以这里同样要在清理之后把新鲜的 ctx 装回去
+        // （顺序不能反，否则刷新过的文件反而查不到 ctx）。
+        let fresh_ctx = self.file_scopes.remove(file_path);
+
         // 移除旧的实体和函数
         self._remove_file_entities(file_path, entity_graph, call_graph);
+
+        if let Some(ctx) = fresh_ctx {
+            self.file_scopes.insert(file_path.clone(), ctx);
+        }
 
         // 关键：把本次解析出的函数写回 parser 自己的索引，与 parse_file 的数据源保持一致。
         // `_analyze_file_calls` / `_update_snippet_index` 都依赖 file_functions 才能拿到
@@ -201,16 +367,40 @@ impl CodeParser {
     }
 
     /// 从文件提取实体
-    fn _extract_entities_from_file(&self, file_path: &PathBuf) -> Result<(Vec<ClassInfo>, Vec<FunctionInfo>), String> {
+    ///
+    /// 签名从 `&self` 改为 `&mut self`：Phase P1 交付物 3 需要把本次解析出的符号列表
+    /// 额外交给 `resolution::build_file_scope_ctx` 产出只读 ctx（写入 `file_scopes`）。
+    /// 唯一调用点是 `refresh_file`（本身已是 `&mut self`），因此波及面为零。
+    fn _extract_entities_from_file(&mut self, file_path: &PathBuf) -> Result<(Vec<ClassInfo>, Vec<FunctionInfo>), String> {
         let mut classes = Vec::new();
         let mut functions = Vec::new();
 
         // 使用TreeSitter解析器解析文件
-        let symbols = self.ts_parser.parse_file(file_path)
+        //
+        // Phase P1 交付物 2(b)：这里改用 `parse_file_with_metadata`。它内部就是原来的
+        // `parse_file`（`parse_file` 现在是 `parse_file_with_metadata(..)?.symbols` 的转发），
+        // 符号列表**逐字节相同**，只是额外带出 Java 的 `package a.b.c;`（改造前被 `java.rs`
+        // 的空分支彻底丢弃）。带出来的值只写进 `file_scopes`，不参与下面任何分支。
+        let ast = self.ts_parser.parse_file_with_metadata(file_path)
             .map_err(|e| format!("Failed to parse file {}: {:?}", file_path.display(), e))?;
+        let declared_package = ast.declared_package;
+        let symbols = ast.symbols;
 
         let language = self._detect_language(file_path);
         let namespace = self._extract_namespace(file_path);
+
+        // Phase P1 交付物 3（**只建不消费**）：同一批符号额外产出一份文件级解析上下文。
+        // 这一步在所有既有分支**之前**完成、且只读 `symbols`：
+        // 不修改符号、不产生 FunctionInfo/ClassInfo、不参与 callee 解析，
+        // 因此下面的 match 与调用边产出逐字节不变（守卫测试 tests/test_p1_edges_unchanged.rs）。
+        let ctx = build_file_scope_ctx(
+            file_path.as_path(),
+            &symbols,
+            self.resolution_root.as_deref(),
+            &language,
+            declared_package,
+        );
+        self.file_scopes.insert(file_path.clone(), ctx);
 
         for symbol in symbols {
             let symbol_guard = symbol.read();
@@ -398,6 +588,9 @@ impl CodeParser {
         // 必须同时清除本文件的函数索引：调用关系分析现在直接依赖 file_functions，
         // 残留的陈旧条目会产生"幽灵 caller"（指向已从图中移除的函数）。
         self.file_functions.remove(file_path);
+        // Phase P1 交付物 3：`file_scopes` 与 `file_functions` 同生命周期失效
+        // （残留会让 P2 读到已删除文件的旧作用域树/旧 import 绑定）。
+        self.file_scopes.remove(file_path);
     }
 
     /// 更新代码片段索引
@@ -495,8 +688,12 @@ impl CodeParser {
         }
 
         // 使用TreeSitter解析器解析文件
-        let symbols = self.ts_parser.parse_file(file_path)
+        // Phase P1 交付物 2(b)：同 `_extract_entities_from_file`，改用带元数据的入口
+        // （符号列表与改造前逐字节相同，只是多带出 Java 的 package 声明）。
+        let ast = self.ts_parser.parse_file_with_metadata(file_path)
             .map_err(|e| format!("Failed to parse file {}: {:?}", file_path.display(), e))?;
+        let declared_package = ast.declared_package;
+        let symbols = ast.symbols;
         info!("TreeSitter parsing completed, found {} symbols", symbols.len());
         
 
@@ -507,7 +704,19 @@ impl CodeParser {
 
         let language = self._detect_language(file_path);
         let namespace = self._extract_namespace_from_content(&file_content, file_path);
-        
+
+        // Phase P1 交付物 3（**只建不消费**）：与 `_extract_entities_from_file` 同一套产出，
+        // 只读 `symbols`，不产生任何 FunctionInfo/CallRelation，也不参与 callee 解析。
+        // 放在下面的 match 之前，是为了让这个新增分支与既有三类 symbol 的处理完全解耦。
+        let ctx = build_file_scope_ctx(
+            file_path.as_path(),
+            &symbols,
+            self.resolution_root.as_deref(),
+            &language,
+            declared_package,
+        );
+        self.file_scopes.insert(file_path.clone(), ctx);
+
         let mut functions = Vec::new();
         let mut classes = Vec::new();
         let mut function_calls = Vec::new();
@@ -773,6 +982,10 @@ impl CodeParser {
         // 清空之前解析的函数数据，防止跨项目调用时数据残留
         self.file_functions.clear();
         self.function_registry.clear();
+        // Phase P1 交付物 3：解析上下文与上面两个索引同生共死，
+        // 并把本轮仓库根记下（module path 推导需要它；见 `resolution::index::derive_module_path`）。
+        self.file_scopes.clear();
+        self.resolution_root = Some(dir.to_path_buf());
         
         // 1. 尝试从本地数据库加载现有的图
         let mut code_graph = self._load_existing_code_graph(dir)?;
@@ -853,6 +1066,15 @@ impl CodeParser {
 
     /// 构建基于petgraph的代码图（增量构建）
     pub fn build_petgraph_code_graph(&mut self, dir: &Path) -> Result<PetCodeGraph, String> {
+        // Phase P1 交付物 3：记下本轮仓库根，供 `file_scopes` 的 module path 推导使用。
+        // 这里**不** clear `file_scopes` —— 与下面 `file_functions` 的增量语义保持一致
+        // （本函数不清空 file_functions，内容未变的文件会被 `_should_skip_file` 跳过而不再解析，
+        // 清空就意味着这些文件在本轮彻底没有 ctx）。
+        // TODO(P2)：ctx 需要持久化（与 graph.bin 同一套 schema_version 门禁），
+        // 或在 root 变化时按 (root, file) 重新推导 module path，否则跨项目复用 parser 实例时
+        // 旧条目的 module path 会按旧根计算。
+        self.resolution_root = Some(dir.to_path_buf());
+
         // 1. 尝试从本地数据库加载现有的图
         let mut code_graph = self._load_existing_graph(dir)?;
         let has_existing_data = code_graph.is_some();
@@ -2204,5 +2426,303 @@ pub fn compute(y: i32) -> i32 {
             1,
             "regression: seen backfill missing in CodeGraph merge -> (50,60) inserted twice"
         );
+    }
+
+    // ==========================================================================================
+    // Phase P1 交付物 3：`file_scopes` 的接线测试（只建不消费）
+    //
+    // 这两条用例是 `file_scopes` / `file_scope_ctx` 的**真实消费者**，
+    // 因此本阶段不需要任何 `#[allow(dead_code)]`。
+    // ==========================================================================================
+
+    /// `parse_file` 必须为本文件产出 `FileScopeCtx`（作用域树 + import 表），
+    /// 并且 **ctx 的内容不得反过来影响 `FunctionInfo` 的产出**。
+    #[test]
+    fn test_parse_file_builds_file_scope_ctx_and_does_not_touch_functions() {
+        let temp_dir = tempdir().unwrap();
+        let file = temp_dir.path().join("ctx_probe.rs");
+        fs::write(
+            &file,
+            "use a::b::{c, d as e};\npub fn host(x: i32) -> i32 { guest(x) }\nfn guest(y: i32) -> i32 { y }\n",
+        )
+        .unwrap();
+
+        let mut parser = CodeParser::new();
+        parser.parse_file(&file).expect("parse_file 必须成功");
+
+        // 1) 建出来了，且只有这一个文件。
+        assert_eq!(parser.file_scope_count(), 1, "parse_file 应恰好写入 1 条 ctx");
+        let ctx = parser
+            .file_scope_ctx(&file)
+            .expect("`file_scope_ctx` 必须能读回刚写入的 ctx");
+
+        // 2) import 原料真的在 ctx 里（走的是 P1 交付物 1 的 trait getter，不是 downcast）。
+        assert_eq!(
+            ctx.imports.len(),
+            2,
+            "`use a::b::{{c, d as e}};` 应拆成 2 条绑定，实测 = {:?}",
+            ctx.imports.entries()
+        );
+        let aliased = ctx.imports.unique_binding("e").expect("别名 e 必须在 ImportMap 里");
+        assert_eq!(aliased.module_path, vec!["a", "b", "d"]);
+        assert_eq!(aliased.original_name.as_deref(), Some("d"));
+
+        // 3) 未传仓库根（没走 build_*）⇒ module path 降级为空串，绝不瞎猜。
+        assert_eq!(ctx.module_path, "", "仓库根未知时 module path 必须是空串");
+
+        // 4) 只建不消费的**硬证明**：ctx 里的可调用作用域与既有 match 分支产出的
+        //    FunctionInfo 必须一一对应 —— 两者同源于 FunctionDeclaration 符号，
+        //    谁也没有替谁增删。
+        let functions = parser
+            .file_functions
+            .get(&file)
+            .cloned()
+            .unwrap_or_default();
+        let mut names_from_graph: Vec<String> = functions.iter().map(|f| f.name.clone()).collect();
+        let mut names_from_ctx: Vec<String> = ctx
+            .scopes
+            .callable_scopes()
+            .into_iter()
+            .filter_map(|id| ctx.scopes.scope(id).map(|s| s.name.clone()))
+            .collect();
+        names_from_graph.sort();
+        names_from_ctx.sort();
+        assert_eq!(
+            names_from_graph, names_from_ctx,
+            "FunctionInfo 的集合必须不受 ctx 影响（两侧同源、数量与名字都该一致）"
+        );
+        assert_eq!(names_from_graph, vec!["guest".to_string(), "host".to_string()]);
+
+        // 5) 交付物 2(b) 的通路在 `CodeParser` 里也是通的：Java 的 `package` 声明必须
+        //    随 `parse_file_with_metadata` 一起进到 ctx（改造前 `java.rs` 是空分支、包名丢弃）。
+        let java_file = temp_dir.path().join("Runner.java");
+        fs::write(&java_file, "package com.ex;\npublic class Runner { public void go() {} }\n").unwrap();
+        parser.parse_file(&java_file).expect("java parse_file 必须成功");
+        let java_ctx = parser
+            .file_scope_ctx(&java_file)
+            .expect("Java 文件也应有 ctx");
+        assert_eq!(
+            java_ctx.declared_package.as_deref(),
+            Some(&["com".to_string(), "ex".to_string()][..]),
+            "package com.ex; 必须被带出（交付物 2(b)）"
+        );
+        assert_eq!(java_ctx.module_path, "com.ex", "有包名时以包名为准");
+        assert_eq!(
+            parser.file_functions.get(&java_file).map(|v| v.len()),
+            Some(1),
+            "Java 的 FunctionInfo 仍只有 `go` 一个 —— package 不产生任何新节点"
+        );
+    }
+
+    /// 生命周期：`refresh_file` 重建 ctx，文件删除后 ctx 必须与 `file_functions` 一起失效。
+    #[test]
+    fn test_refresh_and_remove_keep_file_scope_ctx_in_sync() {
+        let temp_dir = tempdir().unwrap();
+        let file = temp_dir.path().join("ctx_life.rs");
+        fs::write(&file, "use a::b;\nfn one() {}\n").unwrap();
+
+        let mut parser = CodeParser::new();
+        let mut entity_graph = EntityGraph::new();
+        let mut call_graph = PetCodeGraph::new();
+
+        parser
+            .refresh_file(&file, &mut entity_graph, &mut call_graph)
+            .expect("首次 refresh_file 必须成功");
+        let first = parser.file_scope_ctx(&file).expect("refresh 后应有 ctx");
+        assert_eq!(first.imports.len(), 1);
+        assert_eq!(first.imports.entries()[0].module_path, vec!["a", "b"]);
+
+        // 改写文件 ⇒ ctx 必须按新内容重建（不能残留旧的 import 绑定）。
+        fs::write(&file, "use z::y;\nfn two() {}\n").unwrap();
+        parser
+            .refresh_file(&file, &mut entity_graph, &mut call_graph)
+            .expect("二次 refresh_file 必须成功");
+        let second = parser.file_scope_ctx(&file).expect("重建后仍应有 ctx");
+        assert_eq!(second.imports.len(), 1, "ctx 必须整体替换，不得叠加");
+        assert_eq!(second.imports.entries()[0].module_path, vec!["z", "y"]);
+        assert!(
+            second.imports.lookup("b").is_empty(),
+            "旧文件的 import 不得残留在新 ctx 里"
+        );
+
+        // 删除文件 ⇒ `_remove_file_entities` 必须连带清除 ctx（与 file_functions 同语义）。
+        fs::remove_file(&file).unwrap();
+        parser
+            .refresh_file(&file, &mut entity_graph, &mut call_graph)
+            .expect("删除后的 refresh_file 走清理分支，不应报错");
+        assert!(
+            parser.file_scope_ctx(&file).is_none(),
+            "文件已删除，ctx 必须同步失效（否则 P2 会读到已消失文件的作用域）"
+        );
+        assert_eq!(parser.file_scope_count(), 0);
+    }
+
+    // ==========================================================================================
+    // Phase P2a 交付物 2(b)/3：`ensure_file_scope_ctx` 与 `--resolver/--max-candidates/--levels`
+    //
+    // 这三条用例是新增字段的**真实消费者**（因此不需要 `#[allow(dead_code)]`），
+    // 同时把"P2a 只存不用、一个字节都不改产出"这条红线钉在单元测试里。
+    // ==========================================================================================
+
+    /// `ensure_file_scope_ctx`：命中缓存必须复用同一个 `Arc`（绝不重复解析）；
+    /// 缓存缺失必须**按需补建**（口径 C：正确性不依赖缓存是否命中）；文件读不到才返回 `None`。
+    #[test]
+    fn test_ensure_file_scope_ctx_reuses_cache_and_backfills_on_demand() {
+        let temp_dir = tempdir().unwrap();
+        let file = temp_dir.path().join("ensure_ctx.rs");
+        fs::write(&file, "pub fn a(p: i32) -> i32 { b(p) }\nfn b(q: i32) -> i32 { q }\n").unwrap();
+
+        let mut parser = CodeParser::new();
+        // 单测里直接设仓库根（`build_*` 入口本来就会设；这里不依赖建图，只验证补建口径）。
+        parser.resolution_root = Some(temp_dir.path().to_path_buf());
+
+        // 1) 冷缓存：没有解析过 ⇒ 现场补建。
+        assert_eq!(parser.file_scope_count(), 0, "新 parser 的 ctx 缓存必须是空的");
+        let first = parser
+            .ensure_file_scope_ctx(&file)
+            .expect("缺失时必须按需解析补建");
+        assert_eq!(parser.file_scope_count(), 1, "补建的 ctx 必须回装进缓存");
+        assert!(!first.scopes.is_empty(), "补建的 ctx 必须有作用域树");
+        assert_eq!(first.module_path, "ensure_ctx", "补建必须用同一个仓库根推导 module path");
+
+        // 2) 热缓存：第二次调用必须返回**同一个 Arc**（指针相等 ⇒ 一次都没重新解析）。
+        let second = parser.ensure_file_scope_ctx(&file).expect("缓存命中");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "`ensure_file_scope_ctx` 命中缓存时不得重新解析（否则全量/增量成本与结果都可能不一致）"
+        );
+
+        // 3) 与 `file_scope_ctx` 是同一份数据（读者只有一个）。
+        assert!(Arc::ptr_eq(&second, &parser.file_scope_ctx(&file).expect("读者必须拿得到")));
+
+        // 4) 无法解析的路径 ⇒ `None`（与 `parse_file` 同口径：打 warn，绝不 panic）。
+        let missing = temp_dir.path().join("does_not_exist.rs");
+        assert!(
+            parser.ensure_file_scope_ctx(&missing).is_none(),
+            "文件不存在时返回 None，由调用方按\"无 ctx\"处理"
+        );
+        assert_eq!(
+            parser.file_scope_count(),
+            1,
+            "补建失败不得往缓存里写任何条目"
+        );
+    }
+
+    /// CLI 三枚新 flag 的组装：默认值、`--levels=` 解析、`--max-candidates` 的 u8 饱和、
+    /// 非法 `--levels=` 必须 `None`（CLI 据此报错，**绝不静默退回全开**）。
+    #[test]
+    fn test_resolver_flags_defaults_and_config_composition() {
+        let mut parser = CodeParser::new();
+
+        // 默认：legacy + 上限 8 + 全层（红线 2：不置 flag 时与 P1 完全一致）。
+        assert_eq!(parser.resolver_mode(), ResolverMode::Legacy, "`--resolver` 默认必须是 legacy");
+        assert_eq!(parser.max_candidates(), DEFAULT_MAX_CANDIDATES as usize);
+        assert!(parser.levels_spec().is_none(), "未传 `--levels` 时不得凭空造一个串");
+        let config = parser.resolution_config().expect("默认配置必须可组装");
+        assert_eq!(config.enabled_levels, ResolutionConfig::ALL_LEVELS);
+        assert_eq!(config.max_candidates, DEFAULT_MAX_CANDIDATES);
+
+        // 置位：三个字段都读得到（P2a 只存不用，P2b 才分叉）。
+        parser.set_resolver_mode(ResolverMode::Layered);
+        assert_eq!(parser.resolver_mode(), ResolverMode::Layered);
+
+        // `--levels=all,-l6`：L6 的 bit 必须被清掉，其它保持全开。
+        parser.set_levels_spec(Some("all,-l6".to_string()));
+        let config = parser.resolution_config().expect("`all,-l6` 必须是合法配置");
+        assert_eq!(
+            config.enabled_levels
+                & ResolutionConfig::bit(crate::codegraph::resolution::ResolutionLevel::SameModule),
+            0,
+            "关掉 L6 后 bit 必须为 0"
+        );
+        assert_ne!(
+            config.enabled_levels
+                & ResolutionConfig::bit(crate::codegraph::resolution::ResolutionLevel::QualifiedPath),
+            0,
+            "只关 L6 不得顺手关掉 L5"
+        );
+
+        // 空串等价于"没传"（全开），避免 `--levels=` 误伤成"一层都不开"。
+        parser.set_levels_spec(Some("   ".to_string()));
+        assert!(parser.levels_spec().is_none(), "空白串必须归一化成 None");
+        assert_eq!(
+            parser.resolution_config().expect("空白 levels 必须可组装").enabled_levels,
+            ResolutionConfig::ALL_LEVELS
+        );
+
+        // `--max-candidates` 超过 u8 ⇒ 饱和到 255（与 P2b 落盘的 `candidate_count: u8` 同口径）。
+        parser.set_max_candidates(1000);
+        assert_eq!(parser.max_candidates(), 1000, "usize 原值必须可读回（诊断用）");
+        assert_eq!(
+            parser.resolution_config().expect("饱和配置").max_candidates,
+            u8::MAX,
+            "组装成引擎配置时必须饱和到 255"
+        );
+        parser.set_max_candidates(3);
+        assert_eq!(parser.resolution_config().expect("配置").max_candidates, 3);
+
+        // 非法 levels 串 ⇒ `None`（调用方必须报错退出）。
+        parser.set_levels_spec(Some("l99".to_string()));
+        assert!(parser.resolution_config().is_none(), "非法层号必须报错，不得静默忽略");
+        parser.set_levels_spec(Some("not_a_level".to_string()));
+        assert!(parser.resolution_config().is_none(), "无法识别的 token 必须报错");
+    }
+
+    /// **红线 2 的单元级证据**：把三个 flag 全打开，建图产出必须与默认（legacy）逐字段相同。
+    ///
+    /// 这条断言在 P2b 接线后**必须被替换成分叉基线**（见 `tests/test_p1_edges_unchanged.rs`
+    /// 里同名的守卫与 `// P2b` 注释）。
+    #[test]
+    fn test_resolver_mode_layered_does_not_change_graph_output() {
+        let temp_dir = tempdir().unwrap();
+        let dir = temp_dir.path();
+        fs::write(
+            dir.join("alpha.rs"),
+            "pub fn helper(x: i32) -> i32 { x + 1 }\npub fn use_it(x: i32) -> i32 { helper(x) }\n",
+        )
+        .unwrap();
+        fs::write(dir.join("beta.rs"), "pub fn helper(y: i32) -> i32 { y * 2 }\n").unwrap();
+
+        let signature = |layered: bool| {
+            let mut parser = CodeParser::new();
+            parser.set_force_reindex(true);
+            if layered {
+                parser.set_resolver_mode(ResolverMode::Layered);
+                parser.set_max_candidates(2);
+                parser.set_levels_spec(Some("all".to_string()));
+            }
+            let graph = parser.build_petgraph_code_graph(dir).expect("建图必须成功");
+            let mut nodes: Vec<(String, usize)> = graph
+                .get_all_functions()
+                .iter()
+                .map(|f| (format!("{}:{}", f.name, f.line_start), 0))
+                .collect();
+            nodes.sort();
+            let mut edges: Vec<(String, String, usize, bool)> = graph
+                .graph
+                .edge_references()
+                .map(|e| {
+                    let rel = e.weight();
+                    (
+                        rel.caller_name.clone(),
+                        rel.callee_name.clone(),
+                        rel.line_number,
+                        rel.is_resolved,
+                    )
+                })
+                .collect();
+            edges.sort();
+            // 引擎上下文也必须在两种模式下都建出来（"只建不消费"不等于"layered 时才建"）。
+            (nodes, edges, parser.file_scope_count(), parser.resolver_mode())
+        };
+
+        let (nodes_a, edges_a, ctx_a, mode_a) = signature(false);
+        let (nodes_b, edges_b, ctx_b, mode_b) = signature(true);
+        assert_eq!(mode_a, ResolverMode::Legacy);
+        assert_eq!(mode_b, ResolverMode::Layered);
+        assert_eq!(nodes_a, nodes_b, "layered 不得改变任何函数节点");
+        assert_eq!(edges_a, edges_b, "layered 不得改变任何调用边");
+        assert_eq!(ctx_a, ctx_b, "ctx 的建立不得依赖 `--resolver`（两种模式都建）");
+        assert!(!edges_a.is_empty(), "对照组必须有边，否则这条断言是空的");
     }
 }

@@ -14,6 +14,25 @@ impl CodeSeekRunner {
         // `--force-reindex` 定义在 `Cli`（全局 flag）上，而下面的 `match cli.command`
         // 会移动 `cli.command`，所以必须在 match 之前先把这个 bool 取出来。
         let force_reindex = cli.force_reindex;
+        // Phase P2a 交付物 3：同样先取出三个新全局 flag。
+        // `--levels=` 必须在这里就校验：非法值立刻报错退出，**不得静默退回全开**，
+        // 否则"关掉 L5"这类逐层诊断结论建立在错误的配置上。
+        let resolver = cli.resolver;
+        let max_candidates = cli.max_candidates;
+        let levels = if cli.levels.trim().is_empty() {
+            None
+        } else {
+            if crate::codegraph::resolution::resolver::ResolutionConfig::from_levels_spec(&cli.levels)
+                .is_none()
+            {
+                return Err(format!(
+                    "--levels 取值非法: {:?}（可用 all/p1/none/l1..l8/l2-l6/all,-l6/max=N，逗号分隔）",
+                    cli.levels
+                )
+                .into());
+            }
+            Some(cli.levels)
+        };
 
         match cli.command {
             Commands::Init { interactive: _ } => {
@@ -23,6 +42,12 @@ impl CodeSeekRunner {
                 info!(
                     "init command - to be implemented in Phase 2 (force_reindex: {})",
                     force_reindex
+                );
+                // Phase P2a：三个新 flag 已经过 clap 解析并在此转发；
+                // ⚠ P2a 它们**不改变任何产边结果**（默认 legacy，layered 尚未接入建图管线）。
+                info!(
+                    "resolver mode = {:?}, max_candidates = {}, levels = {:?}",
+                    resolver, max_candidates, levels
                 );
                 Ok(())
             }
