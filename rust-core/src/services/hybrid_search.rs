@@ -5,7 +5,7 @@
 
 use crate::services::embedding_service::{EmbeddingService, SearchResult};
 use crate::services::reranker_service::RerankerService;
-use crate::storage::traits_bm25::{CandidateSource, CodeChunk, FusedCandidate, TextSearchProvider, TextSearchResult};
+use crate::storage::traits_bm25::{CandidateSource, CodeChunk, FusedCandidate, TextSearchProvider, TextSearchResult, parse_snippet_id};
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -76,9 +76,10 @@ pub struct HybridSearchService {
 /// Internal metadata structure used to track line info during RRF fusion.
 ///
 /// Filled from either channel: the dense channel carries the real `code_block` /
-/// line range / language, the sparse (BM25) channel only carries path, symbol,
-/// language and (when available) `line_start`. Missing pieces are merged from the
-/// other channel via [`FusionMeta::merge_missing`].
+/// line range / language, the sparse (BM25) channel carries path, symbol, language
+/// and — because Tantivy does not store `line_start` as a field — a `line_start`
+/// reverse-parsed out of its `snippet_id` (see [`sparse_line_start`]).
+/// Missing pieces are merged from the other channel via [`FusionMeta::merge_missing`].
 #[derive(Clone, Default)]
 struct FusionMeta {
     file_path: String,
@@ -102,6 +103,21 @@ impl From<&SearchResult> for FusionMeta {
     }
 }
 
+/// Line number of a sparse (BM25) hit.
+///
+/// The Tantivy schema has no `line_start` field, so the real line is only available
+/// inside `snippet_id` (`{file_path}#{line_start}#{symbol_name}`, built by
+/// [`CodeChunk::generate_id`]). Prefer the already-populated `line_start` when a
+/// provider supplies it, otherwise reverse-parse it from the id; 0 means unknown.
+fn sparse_line_start(sr: &TextSearchResult) -> usize {
+    if sr.line_start != 0 {
+        return sr.line_start;
+    }
+    parse_snippet_id(&sr.snippet_id)
+        .map(|(_, line_start, _)| line_start)
+        .unwrap_or(0)
+}
+
 impl From<&TextSearchResult> for FusionMeta {
     fn from(sr: &TextSearchResult) -> Self {
         Self {
@@ -110,7 +126,8 @@ impl From<&TextSearchResult> for FusionMeta {
             language: sr.language.clone(),
             // BM25 通道不存储正文（content 非 STORED），保持为空串
             code_block: String::new(),
-            line_start: sr.line_start,
+            // 行号从 snippet_id 反解得到（Tantivy 未存 line_start 字段）
+            line_start: sparse_line_start(sr),
             // BM25 通道不存储结束行
             line_end: 0,
         }
@@ -147,6 +164,10 @@ impl FusionMeta {
 /// Build the snippet id of a dense result using the very same scheme as the
 /// Tantivy index (`CodeChunk::generate_id`), so both ranked lists can be merged
 /// by id. Format: `{file_path}#{line_start}#{symbol_name}`.
+///
+/// 只用于 sparse 通道不可用的降级路径：那里没有 BM25 结果可借行号，
+/// 只能按 dense 自带的行号成 id。[`HybridSearchService::fuse`] 会在回填
+/// 行号后重算 id，因此不复用此函数。
 fn dense_snippet_id(sr: &SearchResult) -> String {
     CodeChunk::generate_id(&sr.file_path, sr.line_start, &sr.symbol_name)
 }
@@ -301,22 +322,10 @@ impl HybridSearchService {
         let mut dense_ids: HashSet<String> = HashSet::new();
         let mut sparse_ids: HashSet<String> = HashSet::new();
 
-        // Process dense channel
-        for (rank, dr) in dense.iter().enumerate() {
-            let snippet_id = dense_snippet_id(dr);
-            let rrf_score = 1.0 / (k + rank as f64 + 1.0);
-            *score_map.entry(snippet_id.clone()).or_insert(0.0) += rrf_score;
-
-            let dense_meta = FusionMeta::from(dr);
-            let meta = meta_map
-                .entry(snippet_id.clone())
-                .or_insert_with(|| dense_meta.clone());
-            meta.merge_missing(&dense_meta);
-
-            dense_ids.insert(snippet_id);
-        }
-
-        // Process sparse channel — 纯 BM25 命中本身就是合法候选
+        // Process sparse channel FIRST — 纯 BM25 命中本身就是合法候选，并且只有它的
+        // snippet_id 携带真实行号（Tantivy schema 未存 line_start 字段）。遍历时顺带
+        // 建立 (file_path, symbol_name) → line_start 映射，供行号缺失的 dense 结果回填。
+        let mut sparse_line_by_symbol: HashMap<(String, String), usize> = HashMap::new();
         for (rank, sr) in sparse.iter().enumerate() {
             let rrf_score = 1.0 / (k + rank as f64 + 1.0);
             *score_map.entry(sr.snippet_id.clone()).or_insert(0.0) += rrf_score;
@@ -327,7 +336,43 @@ impl HybridSearchService {
                 .or_insert_with(|| sparse_meta.clone());
             meta.merge_missing(&sparse_meta);
 
+            // 只记录非 0 行号，同 (file, symbol) 取第一次出现的值
+            if sparse_meta.line_start > 0 {
+                sparse_line_by_symbol
+                    .entry((sparse_meta.file_path.clone(), sparse_meta.symbol_name.clone()))
+                    .or_insert(sparse_meta.line_start);
+            }
+
             sparse_ids.insert(sr.snippet_id.clone());
+        }
+
+        // Process dense channel — 旧 LanceDB 表缺 line_start 列时行号为 0，先按
+        // (file, symbol) 从 sparse 回填，再用回填后的行号重算 snippet_id。否则
+        // dense 侧的 `{file}#0#{sym}` 与 BM25 侧真实 id 永不相等，RRF 既不能合并
+        // 分数，也会多出一条行号为 0 的重复候选。
+        for (rank, dr) in dense.iter().enumerate() {
+            let mut dense_meta = FusionMeta::from(dr);
+            if dense_meta.line_start == 0 {
+                if let Some(line) = sparse_line_by_symbol
+                    .get(&(dense_meta.file_path.clone(), dense_meta.symbol_name.clone()))
+                {
+                    dense_meta.line_start = *line;
+                }
+            }
+            let snippet_id =
+                CodeChunk::generate_id(&dense_meta.file_path, dense_meta.line_start, &dense_meta.symbol_name);
+
+            let rrf_score = 1.0 / (k + rank as f64 + 1.0);
+            *score_map.entry(snippet_id.clone()).or_insert(0.0) += rrf_score;
+
+            // sparse meta 已是基底（携带真实行号），merge_missing 只补它缺的
+            // code_block / line_end / language，不会用 0 覆盖真实行号
+            let meta = meta_map
+                .entry(snippet_id.clone())
+                .or_insert_with(|| dense_meta.clone());
+            meta.merge_missing(&dense_meta);
+
+            dense_ids.insert(snippet_id);
         }
 
         // Sort by fused score descending
@@ -478,12 +523,55 @@ mod tests {
         assert_eq!(c.file_path, "/tmp/a.rs");
         assert_eq!(c.symbol_name, "foo");
         assert_eq!(c.language, "rust");
-        assert_eq!(c.line_start, 0);
+        assert_eq!(c.line_start, 10, "行号应从 snippet_id 反解得到，不再是 0");
         assert_eq!(c.line_end, 0);
         assert!(c.code_block.is_empty());
         // 没有正文 ⇒ 不施加短代码惩罚，分数就是未惩罚的 1/(k+rank+1)
         let expected = 1.0 / (config.rrf_k + 0.0 + 1.0);
         assert!((c.final_score - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sparse_line_start_recovered_from_snippet_id() {
+        let id = CodeChunk::generate_id("/tmp/a.rs", 10, "foo");
+        let sparse = make_sparse(&id, "/tmp/a.rs", "foo", 0);
+
+        // FusionMeta 侧：行号来自 snippet_id 反解
+        let meta = FusionMeta::from(&sparse);
+        assert_eq!(meta.line_start, 10, "BM25 结果的行号应从 snippet_id 反解");
+
+        // fuse 侧：即使 dense 通道为空也应有真实行号
+        let config = HybridSearchConfig::default();
+        let fused = HybridSearchService::fuse(Vec::new(), vec![sparse], &config, 10);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].line_start, 10);
+        assert_eq!(fused[0].snippet_id, id);
+
+        // provider 已给出非 0 行号时以它为准，不被 id 覆盖
+        let with_line = make_sparse(&id, "/tmp/a.rs", "foo", 3);
+        assert_eq!(sparse_line_start(&with_line), 3);
+    }
+
+    #[test]
+    fn dense_missing_line_start_aligns_with_sparse() {
+        // 模拟旧 LanceDB 表缺 line_start 列：dense 完全没有行号信息
+        let dense = vec![make_dense("/tmp/a.rs", "foo", 0, 0)];
+        let id = CodeChunk::generate_id("/tmp/a.rs", 10, "foo");
+        // BM25 侧 line_start 字段为 0，但 snippet_id 里带真实行号
+        let sparse = vec![make_sparse(&id, "/tmp/a.rs", "foo", 0)];
+        let config = HybridSearchConfig::default();
+
+        let fused = HybridSearchService::fuse(dense, sparse, &config, 10);
+
+        assert_eq!(fused.len(), 1, "回填行号并重算 id 后，两侧必须合并为一条候选");
+        let c = &fused[0];
+        assert_eq!(c.snippet_id, id);
+        assert_eq!(c.source, CandidateSource::Fused);
+        assert_eq!(c.line_start, 10, "dense 缺失的行号应从 sparse 回填");
+        assert_eq!(c.line_end, 0);
+        let expected = 1.0 / (config.rrf_k + 1.0) + 1.0 / (config.rrf_k + 1.0);
+        assert!((c.final_score - expected).abs() < 1e-9, "两通道 RRF 分数应累加");
+        assert!(!c.code_block.is_empty(), "正文应由 dense 通道补齐");
     }
 
     #[test]

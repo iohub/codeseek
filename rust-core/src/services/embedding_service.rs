@@ -10,7 +10,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatchIterator;
 use uuid::Uuid;
-use tracing::{info, error, debug};
+use tracing::{info, error, debug, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use async_trait::async_trait;
@@ -858,6 +858,8 @@ impl EmbeddingService {
             
         // 3. Parse results
         let mut search_results = Vec::new();
+        // 旧索引表可能没有 line_start 列（ensure_collection 不做列迁移），只警告一次，避免逐行刷屏
+        let mut warned_missing_line_start = false;
         
         while let Some(batch) = results_stream.try_next().await? {
             let file_path_col = batch.column_by_name("file_path").ok_or(anyhow!("Missing file_path column"))?.as_string::<i32>();
@@ -884,6 +886,13 @@ impl EmbeddingService {
                 let symbol_type_col = batch.column_by_name("symbol_type");
                 let language_col = batch.column_by_name("language");
                 let line_start_col = batch.column_by_name("line_start");
+                if line_start_col.is_none() && !warned_missing_line_start {
+                    warn!(
+                        "LanceDB 表 '{}' 缺少 line_start 列（旧索引 schema），dense 结果的行号将为 0，建议重建索引",
+                        self.table_name
+                    );
+                    warned_missing_line_start = true;
+                }
                 let line_end_col = batch.column_by_name("line_end");
 
                 let symbol_type = symbol_type_col

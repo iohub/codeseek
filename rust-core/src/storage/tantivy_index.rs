@@ -3,7 +3,7 @@
 //! Reuses Tree-sitter parsed code chunks (AST symbols: functions, structs, etc.)
 //! as the indexing unit — NOT whole files.
 
-use crate::storage::traits_bm25::{CodeChunk, TextSearchResult, TextSearchProvider};
+use crate::storage::traits_bm25::{CodeChunk, TextSearchResult, TextSearchProvider, parse_snippet_id};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use regex::Regex;
@@ -304,13 +304,18 @@ impl TextSearchProvider for TantivyBm25Index {
                 .doc::<TantivyDocument>(doc_address)
                 .map_err(|e| anyhow!("Tantivy doc fetch error: {}", e))?;
 
+            // snippet_id 格式 `{file_path}#{line_start}#{symbol_name}`（CodeChunk::generate_id），
+            // 是唯一携带真实行号的载体 —— Tantivy schema 未存 line_start 字段。
+            let snippet_id = Self::get_stored_string(&doc, self.snippet_id_field, &self.schema);
+            let line_start = parse_snippet_id(&snippet_id).map(|(_, line, _)| line).unwrap_or(0);
+
             results.push(TextSearchResult {
-                snippet_id: Self::get_stored_string(&doc, self.snippet_id_field, &self.schema),
+                snippet_id,
                 score: _score,
                 file_path: Self::get_stored_string(&doc, self.file_path_field, &self.schema),
                 symbol_name: Self::get_stored_string(&doc, self.symbol_name_field, &self.schema),
                 language: Self::get_stored_string(&doc, self.language_field, &self.schema),
-                line_start: 0, // Not stored in Tantivy; filled by dense result during fusion
+                line_start,
             });
         }
 
@@ -354,5 +359,37 @@ impl TextSearchProvider for TantivyBm25Index {
         let reader = self.index.reader().map_err(|e| anyhow!("Tantivy reader error: {}", e))?;
         let searcher = reader.searcher();
         Ok(searcher.num_docs() as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn search_recovers_line_start_from_snippet_id() {
+        let dir = tempdir().unwrap();
+        let index = TantivyBm25Index::open_or_create(dir.path()).unwrap();
+
+        // schema 未存 line_start 字段，真实行号只编码在 snippet_id 里
+        let chunk = CodeChunk::new(
+            "/tmp/a.rs",
+            "fn foo() { return 1; }",
+            "foo",
+            "function",
+            "rust",
+            42,
+            50,
+        );
+        assert_eq!(chunk.snippet_id, CodeChunk::generate_id("/tmp/a.rs", 42, "foo"));
+        index.index_chunks(vec![chunk]).await.unwrap();
+        index.commit().await.unwrap();
+
+        let results = index.search("foo", 5).await.unwrap();
+        assert_eq!(results.len(), 1, "BM25 应命中刚索引的代码块");
+        assert_eq!(results[0].line_start, 42, "行号应从 snippet_id 反解得到，而不是 0");
+        assert_eq!(results[0].file_path, "/tmp/a.rs");
+        assert_eq!(results[0].symbol_name, "foo");
     }
 }
