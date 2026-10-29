@@ -32,6 +32,8 @@ fn make_function(name: &str, file: &str, language: &str) -> FunctionInfo {
         namespace: "test::ns".to_string(),
         language: language.to_string(),
         signature: Some(format!("fn {}()", name)),
+        module_path: None,
+        qualified_name: None,
     }
 }
 
@@ -45,6 +47,10 @@ fn make_call(caller: &FunctionInfo, callee: &FunctionInfo, line: usize) -> CallR
         callee_file: callee.file_path.clone(),
         line_number: line,
         is_resolved: true,
+        resolution_level: 0,
+        confidence: 0,
+        rank: 0,
+        candidate_count: 0,
     }
 }
 

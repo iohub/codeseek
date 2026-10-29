@@ -425,6 +425,185 @@ fn is_type_ident(s: &str) -> bool {
     s.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
+// ============================================================================================
+// Phase P2b 交付物 2：接线用的两个共用件。
+//
+// 放在 `resolution` 里而不是 `parser.rs`，原因只有一个：**全量、刷新（CodeParser
+// 的 per-file 链路）、增量（`storage::IncrementalManager`）三条链路必须跑同一段
+// 判定代码**，否则"全量 vs 增量一致"这个 P2b 硬验收只能靠人肉对齐两份实现 ——
+// 而那正是 P0/P1 记录在案的"三套并行 first-wins 副本"缺陷的复发方式。
+// P3 删除重复实现时，这两个函数就是唯一留下的实现。
+// ============================================================================================
+
+/// Phase P2b：caller 归属（任务交付物 2 的要求 (iii)）。
+///
+/// 有 ctx 时：`ScopeTree::innermost_scope_containing(line)` 给出**最内层**作用域，
+/// 再沿作用域链**由内向外**回退，取第一个能与图节点对齐的可调用作用域。
+/// 这一步替掉了 legacy 的"行区间 first-wins"（`_find_caller_function_by_line`），
+/// 是闭包/嵌套函数不再被误归外层的唯一手段。
+///
+/// 对齐键：`(name, line_start)`。不能用 id —— `FunctionInfo.id` 是建图时现场
+/// `Uuid::new_v4()`，与 AST `guid` 无对应关系（任务红线 5 禁止改行号口径）。
+/// 同键多节点按 id 升序取第一个，保证跨进程确定性。
+///
+/// 没有 ctx 时（该文件本轮没被解析过）：**不退化成 first-wins**，而是用纯图事实
+/// 做同一条"最内层优先"规则 —— 在所有覆盖该行的候选里取行区间最窄者，同宽取
+/// `line_start` 更晚者，再同按 id 升序。结果是"更保守"而不是"更错"。
+pub fn layered_caller_node(
+    site: &CallSite,
+    ctx: Option<&FileScopeCtx>,
+    funcs: &[FunctionInfo],
+) -> Option<FunctionInfo> {
+    if let Some(ctx) = ctx {
+        if let Some(innermost) = ctx.innermost_scope_containing(site.line) {
+            // `scope_chain` 是"外 → 内"，caller 要"内 → 外"，故 reverse。
+            for scope_id in ctx.scopes.scope_chain(innermost).into_iter().rev() {
+                let scope = ctx.scopes.scope(scope_id)?;
+                if !matches!(scope.kind, ScopeKind::Function | ScopeKind::Closure) {
+                    continue;
+                }
+                if scope.name.is_empty() {
+                    continue;
+                }
+                if let Some(node) = funcs
+                    .iter()
+                    .filter(|f| f.name == scope.name && f.line_start == scope.line_start)
+                    .min_by_key(|f| f.id.as_u128())
+                {
+                    return Some(node.clone());
+                }
+            }
+        }
+    }
+    // 兜底路径：只用图节点自身携带的行区间，规则同上（最内层优先，绝不 first-wins）。
+    funcs
+        .iter()
+        .filter(|f| f.file_path == site.file && site.line >= f.line_start && site.line <= f.line_end)
+        .min_by(|a, b| {
+            let span_a = a.line_end.saturating_sub(a.line_start);
+            let span_b = b.line_end.saturating_sub(b.line_start);
+            span_a
+                .cmp(&span_b)
+                .then_with(|| b.line_start.cmp(&a.line_start))
+                .then_with(|| a.id.as_u128().cmp(&b.id.as_u128()))
+        })
+        .cloned()
+}
+
+/// Phase P2b：把一个 `Resolution` 落成调用边（口径 A + 口径 B + 要求 (v)）。
+///
+/// - **口径 A**：每个候选一条边，最多 `max_candidates` 条；超出上限的候选丢弃但
+///   仍计入 `candidate_count`，且 `is_resolved` 的判定用**截断前**的真实候选数
+///   （所以 `--max-candidates=1` 只是少写几条边，绝不会把歧义伪装成唯一）。
+/// - **口径 B（覆盖中性）**：`Unresolved` ⇒ 合成与 legacy `_create_unresolved_call_relation`
+///   **逐字段同形**的幽灵节点 + 幽灵边（`level=0`、`confidence=0`、`candidate_count=0`），
+///   因此同一份源码下"有边的调用点数"两种模式必然相等，layered 不会净减少调用边。
+/// - **要求 (v)**：写边之前先删该 `(caller, line)` 的旧边，禁止叠边。
+///
+/// 返回本次实际写出的边数（诊断与统计用）。
+pub fn emit_layered_resolution(
+    site: &CallSite,
+    caller: &FunctionInfo,
+    resolution: &Resolution,
+    code_graph: &mut crate::codegraph::types::PetCodeGraph,
+    max_candidates: usize,
+) -> usize {
+    use crate::codegraph::types::{CallRelation, FunctionInfo as GFunctionInfo};
+
+    // 要求 (v)：**重写之前**先清掉同一个调用点的旧边，保证幂等、禁止叠边。
+    // 清理范围严格限定在 `(caller, line, callee_name)` —— 按 `(caller, line)` 全删会
+    // 抹掉同一行其它调用点的边（P2b 实测踩过：`simple_js_project` 边数 746 → 52）。
+    code_graph.remove_call_edges_by_call_site(&caller.id, site.line, &site.callee_name);
+
+    // 截断前的真实候选数（u8 饱和到 255）。
+    let total = resolution.total_candidate_count.min(u8::MAX as usize) as u8;
+
+    if resolution.status == ResolutionStatus::Unresolved || total == 0 {
+        // 口径 B：幽灵节点走 `FunctionInfo::legacy` —— `module_path`/`qualified_name`
+        // 保持 `None`，与 legacy 的幽灵节点逐字段一致（幽灵不是源码里的定义，没有身份可言）。
+        //
+        // **先查再建**：同一个调用点（同文件 + 同行 + 同名）如果已经有幽灵节点就复用。
+        // 不做复用的后果是实测出来的：`add_call_relation` 按 `(caller, callee, line)`
+        // 去重，第二条边被静默丢弃，而它对应的幽灵节点已经进了图 ⇒ 出现
+        // "节点数暴涨、边数却不涨"的孤儿节点（`simple_js_project` 1929 个幽灵 / 797 条未解析边）。
+        let existing_ghost = code_graph
+            .find_functions_by_name(&site.callee_name)
+            .into_iter()
+            .find(|f| {
+                f.namespace == "unresolved"
+                    && f.file_path == site.file
+                    && f.line_start == site.line
+                    && f.line_end == site.line
+            })
+            .map(|f| f.id);
+        let ghost_id = match existing_ghost {
+            Some(id) => id,
+            None => {
+                let id = Uuid::new_v4();
+                code_graph.add_function(GFunctionInfo::legacy(
+                    id,
+                    site.callee_name.clone(),
+                    site.file.clone(),
+                    site.line,
+                    site.line,
+                    "unresolved".to_string(),
+                    caller.language.clone(),
+                    Some(format!("unresolved_call_{}", site.callee_name)),
+                ));
+                id
+            }
+        };
+        let relation = CallRelation::layered_ghost(
+            caller.id,
+            ghost_id,
+            caller.name.clone(),
+            site.callee_name.clone(),
+            caller.file_path.clone(),
+            site.file.clone(),
+            site.line,
+        );
+        return match code_graph.add_call_relation(relation) {
+            Ok(()) => 1,
+            Err(err) => {
+                tracing::warn!("layered 幽灵边写入失败: {}", err);
+                0
+            }
+        };
+    }
+
+    let mut written = 0usize;
+    for candidate in resolution.candidates.iter().take(max_candidates.max(1)) {
+        // 候选必须真的是图里的节点（索引本就来自图，理论恒成立）。拿不到就跳过并告警，
+        // **绝不新建假节点** —— 那会把"引擎认为存在"变成"图里凭空多一个函数"。
+        let Some(callee) = code_graph.get_function_by_id(&candidate.callee_id).cloned() else {
+            tracing::warn!(
+                "layered 解析出的候选不在图里：{} @ {}:{}",
+                candidate.callee_id,
+                site.file.display(),
+                site.line
+            );
+            continue;
+        };
+        let relation = CallRelation::layered(
+            caller.id,
+            callee.id,
+            caller.name.clone(),
+            callee.name.clone(),
+            caller.file_path.clone(),
+            callee.file_path.clone(),
+            site.line,
+            candidate.level.as_u8(),
+            candidate.confidence,
+            candidate.rank,
+            total,
+        );
+        if code_graph.add_call_relation(relation).is_ok() {
+            written += 1;
+        }
+    }
+    written
+}
+
 /// 全仓解析上下文：`ResolutionIndex` + 每文件 ctx。
 ///
 /// P2 建图时用它替代"每次调用都线性扫全图"的做法。P1 里它只被单测与守卫测试构造，
@@ -578,6 +757,8 @@ mod tests {
                         namespace: c.module_path.clone(),
                         language: "rust".to_string(),
                         signature: Some(scope.name.clone()),
+                        module_path: None,
+                        qualified_name: None,
                     })
                     .collect::<Vec<_>>()
             })

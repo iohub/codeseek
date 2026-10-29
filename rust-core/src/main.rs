@@ -566,6 +566,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Phase P2b 交付物 3：给 `callers` / `callees` 的**文本**输出追加解析层级标注。
+///
+/// 选择"最小侵入"的方式：**只在 `resolution_level > 0` 时**追加一段后缀。
+/// legacy 模式下四个新标量恒为 0 ⇒ 后缀为空 ⇒ 既有的文本输出逐字节不变
+/// （红线 4：不改既有 JSON 字段名，也不破坏任何已有的文本断言）。
+fn resolution_annotation(relation: &codeseek::codegraph::types::CallRelation) -> String {
+    if relation.resolution_level == 0 {
+        return String::new();
+    }
+    format!(
+        "  [L{} c{} n{}{}]",
+        relation.resolution_level,
+        relation.confidence,
+        relation.candidate_count,
+        if relation.candidate_count >= 2 { " ambiguous" } else { "" }
+    )
+}
+
+/// Phase P2b 交付物 3：给 JSON 输出**追加**解析元信息字段（既有键名与顺序一律不变）。
+fn resolution_json_fields(
+    relation: &codeseek::codegraph::types::CallRelation,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    map.insert("resolution_level".into(), serde_json::json!(relation.resolution_level));
+    map.insert("confidence".into(), serde_json::json!(relation.confidence));
+    map.insert("candidate_count".into(), serde_json::json!(relation.candidate_count));
+    map.insert("ambiguous".into(), serde_json::json!(relation.candidate_count >= 2));
+    map
+}
+
 fn execute_callers(
     graph: &PetCodeGraph,
     symbol: &str,
@@ -578,12 +608,17 @@ fn execute_callers(
         let mut results = Vec::new();
         for func in &functions {
             for (caller, relation) in graph.get_callers(&func.id) {
-                results.push(serde_json::json!({
+                let mut entry = serde_json::json!({
                     "caller": caller.name,
                     "caller_file": caller.file_path,
                     "caller_line": relation.line_number,
                     "target": func.name,
-                }));
+                });
+                // Phase P2b：追加解析元信息（既有键名不变）。
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.extend(resolution_json_fields(relation));
+                }
+                results.push(entry);
             }
         }
         output = serde_json::to_string_pretty(&results)?;
@@ -596,10 +631,11 @@ fn execute_callers(
                 output.push_str(&format!("Callers of '{}':\n", func.name));
                 for (caller, relation) in callers {
                     output.push_str(&format!(
-                        "  {} ({}:{})\n",
+                        "  {} ({}:{}){}\n",
                         caller.name,
                         caller.file_path.display(),
-                        relation.line_number
+                        relation.line_number,
+                        resolution_annotation(relation)
                     ));
                 }
             }
@@ -627,12 +663,17 @@ fn execute_callees(
         let mut results = Vec::new();
         for func in &functions {
             for (callee, relation) in graph.get_callees(&func.id) {
-                results.push(serde_json::json!({
+                let mut entry = serde_json::json!({
                     "callee": callee.name,
                     "callee_file": callee.file_path,
                     "callee_line": relation.line_number,
                     "caller": func.name,
-                }));
+                });
+                // Phase P2b：追加解析元信息（既有键名不变）。
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.extend(resolution_json_fields(relation));
+                }
+                results.push(entry);
             }
         }
         output = serde_json::to_string_pretty(&results)?;
@@ -645,10 +686,11 @@ fn execute_callees(
                 output.push_str(&format!("Callees of '{}':\n", func.name));
                 for (callee, relation) in callees {
                     output.push_str(&format!(
-                        "  {} ({}:{})\n",
+                        "  {} ({}:{}){}\n",
                         callee.name,
                         callee.file_path.display(),
-                        relation.line_number
+                        relation.line_number,
+                        resolution_annotation(relation)
                     ));
                 }
             }

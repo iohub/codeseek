@@ -60,16 +60,31 @@ pub struct Cli {
     #[clap(long, action)]
     pub force_reindex: bool,
 
-    /// Phase P2a：callee 解析引擎。默认 `legacy`（现状行为，一个字节都不变）。
+    /// Phase P2a/P2b：callee 解析引擎。**默认 `legacy`**。
     ///
-    /// `layered` 目前**只影响配置装载，不影响产边**（引擎未接入建图管线，接线在 P2b）。
-    #[clap(long, value_enum, default_value = "legacy")]
+    /// - `legacy` = 旧的同名匹配：名字相等就命中，多候选取第一个（保持既有行为）；
+    /// - `layered` = 分层精度解析（L1 词法 → L2 外围类型 → L3 receiver 类型 →
+    ///   L4 import 绑定 → L5 限定名 → L6 同模块 → L7 全仓唯一 → L8 启发式），
+    ///   歧义调用点**每个候选一条边**，并把层级/置信度/候选总数写进边。
+    ///
+    /// 默认值在 P3 之前保持 `legacy`（红线：不带 flag 时产边逐字节不变）。
+    #[clap(
+        long,
+        value_enum,
+        default_value = "legacy",
+        help = "调用边解析引擎：legacy = 旧的同名匹配（命中第一个）；layered = 分层精度解析（每候选一条边，带层级/置信度）"
+    )]
     pub resolver: ResolverMode,
 
-    /// Phase P2a：单个调用点最多保留多少个候选（对应 P2b 落盘的 `candidate_count` 截断）。
+    /// Phase P2a/P2b：单个调用点最多落盘多少个候选。
     ///
-    /// 超出部分**丢弃但仍计入** `Resolution::total_candidate_count`（口径 A）。
-    #[clap(long, default_value = "8")]
+    /// 只**截断落盘条数**：`candidate_count` 仍写截断前的真实候选数，
+    /// `is_resolved` 也仍按真实数判定 ⇒ `--max-candidates=1` 不会把歧义伪装成唯一。
+    #[clap(
+        long,
+        default_value = "8",
+        help = "单个调用点最多落盘的候选条数（超出丢弃但仍计入 candidate_count，且不改变 is_resolved 判定）"
+    )]
     pub max_candidates: usize,
 
     /// Phase P2a：分层诊断开关，只启用/禁用指定的层（**空 = 全开**）。
@@ -77,7 +92,11 @@ pub struct Cli {
     /// 语法见 `codegraph::resolution::resolver::ResolutionConfig::from_levels_spec`：
     /// `all` / `p1` / `none` / `l1,l5` / `l2-l6` / `all,-l6` / `max=4`，逗号分隔、大小写不敏感。
     /// 非法取值会**直接报错退出**，绝不静默退回全开 —— 否则"关掉某层"的诊断结论不可信。
-    #[clap(long, default_value = "")]
+    #[clap(
+        long,
+        default_value = "",
+        help = "只启用指定解析层（空=全开）：all/p1/none/l1..l8/l2-l6/all,-l6；仅对 --resolver=layered 生效"
+    )]
     pub levels: String,
 
     #[clap(subcommand)]

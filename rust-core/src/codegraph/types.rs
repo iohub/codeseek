@@ -17,6 +17,52 @@ pub struct FunctionInfo {
     pub namespace: String,
     pub language: String,
     pub signature: Option<String>,
+    // ============================================================================================
+    // Phase P2b 交付物 1：把"分层解析需要的身份"提升为节点的一等属性。
+    //
+    // 两个字段都是 `Option` 且 `#[serde(default)]`：
+    // - **layered 路径**在建立 `FunctionInfo` 时用 `FileScopeCtx` 的 module path 与
+    //   `ScopeTree` 的 `scope_path` 填充；
+    // - **legacy 路径**一律保持 `None`（红线 1：不许改变 legacy 节点内容，逐字节不变）。
+    //
+    // 因为它们是"追加在结构体尾部"的新字段，序列化形状发生变化，所以 `GRAPH_SCHEMA_VERSION`
+    // 必须在同一次改动里 1→2（见 `storage/petgraph_storage.rs`）。
+    // ============================================================================================
+    /// 该函数所属文件的 module path（`layered` 填充；`legacy` = `None`）。
+    #[serde(default)]
+    pub module_path: Option<String>,
+    /// 该函数的限定名 `module_path::name`（`layered` 填充；`legacy` = `None`）。
+    #[serde(default)]
+    pub qualified_name: Option<String>,
+}
+
+impl FunctionInfo {
+    /// **legacy 路径**的构造入口：新身份字段一律 `None`，因此产出的节点与 P1 逐字节一致
+    /// （红线 1）。所有既有 legacy 构造点统一走这里，避免逐字面量补字段。
+    #[allow(clippy::too_many_arguments)]
+    pub fn legacy(
+        id: Uuid,
+        name: String,
+        file_path: PathBuf,
+        line_start: usize,
+        line_end: usize,
+        namespace: String,
+        language: String,
+        signature: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            file_path,
+            line_start,
+            line_end,
+            namespace,
+            language,
+            signature,
+            module_path: None,
+            qualified_name: None,
+        }
+    }
 }
 
 /// 调用关系
@@ -30,6 +76,148 @@ pub struct CallRelation {
     pub callee_file: PathBuf,
     pub line_number: usize,
     pub is_resolved: bool,
+    // ============================================================================================
+    // Phase P2b 交付物 1：把"解析层级 / 置信度 / 歧义候选"变成调用边的一等属性。
+    //
+    // 派生规则（口径 A）：
+    //   `is_resolved = (resolution_level > 0 && candidate_count == 1)`
+    // 即 `is_resolved` 字段保留、不删，只是 layered 路径按上式重算；legacy 路径继续写
+    // 它原有的 `true`/`false`，四个新标量对 legacy 恒为默认值（`0`），因此 legacy 的
+    // 边语义与逐字节内容均不变。
+    //
+    // - `resolution_level`：`ResolutionLevel as u8`（0=Unresolved .. 8=Heuristic）。
+    // - `confidence`：由 `ResolutionLevel::confidence()` 推导（0..=98）。
+    // - `rank`：该候选在同层候选里的排序位（0 起，`rank_candidates` 决定）。
+    // - `candidate_count`：该调用点截断前的**真实**候选个数（u8 饱和到 255）。
+    // ============================================================================================
+    /// 命中该边所依据的解析层级（0=未解析/legacy 默认；见 `ResolutionLevel`）。
+    #[serde(default)]
+    pub resolution_level: u8,
+    /// 该层级的置信度（与 `resolution_level` 同步冗余存一份，便于落盘后不重算）。
+    #[serde(default)]
+    pub confidence: u8,
+    /// 同一调用点候选里的排序位（0 = 最优）。
+    #[serde(default)]
+    pub rank: u8,
+    /// 该调用点截断前的真实候选总数（u8 饱和到 255）。
+    #[serde(default)]
+    pub candidate_count: u8,
+}
+
+impl CallRelation {
+    /// **legacy 路径**的构造入口：四个新标量一律 `0`，`is_resolved` 由调用方按旧语义传入。
+    /// 这样 legacy 边的逐字节内容与 P1 完全一致（红线 1），而分层元信息只在 layered 分支
+    /// 经 [`CallRelation::layered`] 写入。
+    #[allow(clippy::too_many_arguments)]
+    pub fn legacy(
+        caller_id: Uuid,
+        callee_id: Uuid,
+        caller_name: String,
+        callee_name: String,
+        caller_file: PathBuf,
+        callee_file: PathBuf,
+        line_number: usize,
+        is_resolved: bool,
+    ) -> Self {
+        Self {
+            caller_id,
+            callee_id,
+            caller_name,
+            callee_name,
+            caller_file,
+            callee_file,
+            line_number,
+            is_resolved,
+            resolution_level: 0,
+            confidence: 0,
+            rank: 0,
+            candidate_count: 0,
+        }
+    }
+
+    /// **layered 路径**的构造入口（Phase P2b 交付物 1）。
+    ///
+    /// 四个新标量在这里一次性写全，`is_resolved` 由**口径 A 的派生规则**决定，
+    /// 不允许调用方自带一个 bool —— 否则"歧义被伪装成已解析"这个 P0 缺陷会以新的
+    /// 形式复发：
+    ///
+    /// ```text
+    /// is_resolved = (resolution_level > 0 && candidate_count == 1)
+    /// ```
+    ///
+    /// `resolution_level` / `confidence` 取 `ResolutionLevel as u8` 与其
+    /// `confidence()`，`rank` 是候选在 `rank_candidates` 之后的名次（0 起），
+    /// `candidate_count` 是**截断前**的真实候选数（`--max-candidates` 只截断落盘条数，
+    /// 不改这个数，也不改 `is_resolved` 的判定）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn layered(
+        caller_id: Uuid,
+        callee_id: Uuid,
+        caller_name: String,
+        callee_name: String,
+        caller_file: PathBuf,
+        callee_file: PathBuf,
+        line_number: usize,
+        resolution_level: u8,
+        confidence: u8,
+        rank: u8,
+        candidate_count: u8,
+    ) -> Self {
+        Self {
+            caller_id,
+            callee_id,
+            caller_name,
+            callee_name,
+            caller_file,
+            callee_file,
+            line_number,
+            is_resolved: resolution_level > 0 && candidate_count == 1,
+            resolution_level,
+            confidence,
+            rank,
+            candidate_count,
+        }
+    }
+
+    /// **口径 B（覆盖中性）**：layered 遇到 `ResolutionStatus::Unresolved` 时合成的幽灵边。
+    ///
+    /// 与 [`CallRelation::legacy`] 的未解析边逐字段同形（四个标量 = 0、`is_resolved=false`），
+    /// 差别只在于它是 layered 路径写的：这样"有边的调用点数"在两种模式下必然相等，
+    /// layered 不会因为"更诚实"而**净减少**调用边。
+    pub fn layered_ghost(
+        caller_id: Uuid,
+        callee_id: Uuid,
+        caller_name: String,
+        callee_name: String,
+        caller_file: PathBuf,
+        callee_file: PathBuf,
+        line_number: usize,
+    ) -> Self {
+        Self::layered(
+            caller_id,
+            callee_id,
+            caller_name,
+            callee_name,
+            caller_file,
+            callee_file,
+            line_number,
+            // 口径 B 明令：level=0、confidence=0、candidate_count=0。
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+
+    /// 该边是否是"分层解析唯一确定"的（layered 且候选恰好 1 个）。
+    pub fn layered_unique(&self) -> bool {
+        self.resolution_level > 0 && self.candidate_count == 1
+    }
+
+    /// 该边是否来自歧义调用点（layered 且候选 ≥2）。
+    pub fn layered_ambiguous(&self) -> bool {
+        self.resolution_level > 0 && self.candidate_count >= 2
+    }
 }
 
 /// 图节点
@@ -272,6 +460,75 @@ impl PetCodeGraph {
         }
 
         Ok(())
+    }
+
+    /// 删除某个 caller 在某一行的全部出边（Phase P2b 交付物 2 的要求 (v)：**禁止叠边**）。
+    ///
+    /// ⚠ **不要**用它做重写前的清理：同一行可以有多个**不同**的调用
+    /// （`first(); second();`、JS 的一行链式调用），按 `(caller, line)` 全删会连带
+    /// 抹掉兄弟调用点的边。实测教训：`simple_js_project` 的边数因此从 746 掉到 52。
+    /// 重写前的清理请用 [`PetCodeGraph::remove_call_edges_by_call_site`]。
+    ///
+    /// 用途：整文件失效（`remove_functions_by_file` / 节点删除）之外的"按行清理"场景。
+    ///
+    /// 统计口径与 `remove_function` 一致：按被删边的 `is_resolved` 递减
+    /// `stats.resolved_calls` / `stats.unresolved_calls`，绝不出现负数（`saturating_sub`）。
+    /// 返回删除的边数。
+    pub fn remove_call_edges_by_caller_line(&mut self, caller_id: &Uuid, line_number: usize) -> usize {
+        self._remove_call_edges_where(caller_id, |relation| relation.line_number == line_number)
+    }
+
+    /// Phase P2b：删除**同一个调用点**的旧边（重写之前调用，保证幂等且不叠边）。
+    ///
+    /// 调用点的身份 = `(caller_id, line_number, callee_name)` 三元组：
+    /// - 与 `add_call_relation` 的去重键 `(caller, callee, line)` 同属一个调用点，
+    ///   所以重复分析同一行同名的调用不会累积出两条边；
+    /// - 只删同名旧边 ⇒ 同一行的**其它**调用点（不同 callee 名）不受影响。
+    ///
+    /// `callee_name` 用 layered 侧的裸名（`site.callee_name`），它与 legacy 写入时用的
+    /// `symbol_ref.name()` 是同一个字符串（都是 AST 的末段名），因此两种模式互相重写
+    /// 时也能正确命中旧边。
+    pub fn remove_call_edges_by_call_site(
+        &mut self,
+        caller_id: &Uuid,
+        line_number: usize,
+        callee_name: &str,
+    ) -> usize {
+        self._remove_call_edges_where(caller_id, |relation| {
+            relation.line_number == line_number && relation.callee_name == callee_name
+        })
+    }
+
+    /// 出边删除的共用内核：按谓词挑出 caller 的出边、逐个删、同步统计。
+    fn _remove_call_edges_where(
+        &mut self,
+        caller_id: &Uuid,
+        predicate: impl Fn(&CallRelation) -> bool,
+    ) -> usize {
+        let Some(caller_node) = self.function_to_node.get(caller_id).copied() else {
+            return 0;
+        };
+        let doomed: Vec<petgraph::graph::EdgeIndex> = self
+            .graph
+            .edges_directed(caller_node, Direction::Outgoing)
+            .filter(|edge| predicate(edge.weight()))
+            .map(|edge| edge.id())
+            .collect();
+        let mut removed = 0usize;
+        for edge_index in doomed {
+            match self.graph.edge_weight(edge_index).map(|r| r.is_resolved) {
+                Some(true) => {
+                    self.stats.resolved_calls = self.stats.resolved_calls.saturating_sub(1)
+                }
+                Some(false) => {
+                    self.stats.unresolved_calls = self.stats.unresolved_calls.saturating_sub(1)
+                }
+                None => continue,
+            }
+            self.graph.remove_edge(edge_index);
+            removed += 1;
+        }
+        removed
     }
 
     /// 根据函数ID获取节点索引

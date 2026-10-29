@@ -541,6 +541,8 @@ mod tests {
             namespace: String::new(),
             language: language.to_string(),
             signature: Some(name.to_string()),
+            module_path: None,
+            qualified_name: None,
         }
     }
 

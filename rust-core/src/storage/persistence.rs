@@ -434,6 +434,8 @@ mod tests {
                 namespace: "crate".to_string(),
                 language: "rust".to_string(),
                 signature: None,
+                module_path: None,
+                qualified_name: None,
             });
         }
         graph

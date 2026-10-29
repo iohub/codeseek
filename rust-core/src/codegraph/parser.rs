@@ -14,6 +14,17 @@ use crate::codegraph::graph::CodeGraph;
 // `storage/persistence.rs` 都用 `crate::cli::args::StorageMode`），避免出现第二套"模式"类型。
 use crate::cli::args::ResolverMode;
 use crate::codegraph::resolution::resolver::{DEFAULT_MAX_CANDIDATES, ResolutionConfig};
+// Phase P2b 交付物 2：分层接线所需的引擎入口（P2a 时这些只在 `resolution/` 内部被引用，
+// 接线之后 `parser.rs` 成为它们的第一个生产消费者 —— 与 `tests/test_p1_edges_unchanged.rs`
+// 里"未接线证明"的白名单同步更新）。
+use crate::codegraph::resolution::index::module_separator;
+use crate::codegraph::resolution::resolver::{
+    call_sites_from_symbols_with_source, resolve_call_with_config, CallSite,
+};
+use crate::codegraph::resolution::{
+    build_resolution_index_from_graph, emit_layered_resolution as resolution_emit,
+    layered_caller_node as resolution_caller_node, Resolution, ResolutionStatus,
+};
 use crate::codegraph::resolution::{build_file_scope_ctx, FileScopeCtx};
 use crate::codegraph::treesitter::TreeSitterParser;
 use crate::detector;
@@ -408,16 +419,16 @@ impl CodeParser {
 
             match symbol_ref.symbol_type() {
                 crate::codegraph::treesitter::structs::SymbolType::FunctionDeclaration => {
-                    let function = FunctionInfo {
-                        id: Uuid::new_v4(),
-                        name: symbol_ref.name().to_string(),
-                        file_path: file_path.clone(),
-                        line_start: symbol_ref.full_range().start_point.row + 1,
-                        line_end: symbol_ref.full_range().end_point.row + 1,
-                        namespace: namespace.clone(),
-                        language: language.clone(),
-                        signature: Some(symbol_ref.name().to_string()),
-                    };
+                    let function = FunctionInfo::legacy(
+                        Uuid::new_v4(),
+                        symbol_ref.name().to_string(),
+                        file_path.clone(),
+                        symbol_ref.full_range().start_point.row + 1,
+                        symbol_ref.full_range().end_point.row + 1,
+                        namespace.clone(),
+                        language.clone(),
+                        Some(symbol_ref.name().to_string()),
+                    );
                     functions.push(function);
                 },
                 crate::codegraph::treesitter::structs::SymbolType::StructDeclaration => {
@@ -445,11 +456,19 @@ impl CodeParser {
     }
 
     /// 分析文件的函数调用
+    ///
+    /// Phase P2b 交付物 2（接线点①，增量/刷新链路）：按 `--resolver` 分叉。
+    /// - `Legacy`（默认）：下面原有的"本文件同名 first-wins + 全局 first-wins"**一字不改**；
+    /// - `Layered`：交给 [`CodeParser::_analyze_file_calls_layered`]，每候选一条边。
     fn _analyze_file_calls(
-        &self,
+        &mut self,
         file_path: &PathBuf,
         call_graph: &mut PetCodeGraph,
     ) -> Result<(), String> {
+        if self.resolver_mode == ResolverMode::Layered {
+            return self._analyze_file_calls_layered(file_path, call_graph);
+        }
+
         let symbols = self.ts_parser.parse_file(file_path)
             .map_err(|e| format!("Failed to parse file for call analysis: {:?}", e))?;
 
@@ -474,16 +493,16 @@ impl CodeParser {
                 if let Some(caller_id) = self._find_caller_function(file_path, call_line, funcs) {
                     // 查找被调用函数（先在本文件，再全局）
                     if let Some(callee_id) = self._find_callee_function(call_name, funcs, call_graph) {
-                        let relation = CallRelation {
+                        let relation = CallRelation::legacy(
                             caller_id,
                             callee_id,
-                            caller_name: "".to_string(), // 会在add_call_relation中填充
-                            callee_name: call_name.to_string(),
-                            caller_file: file_path.clone(),
-                            callee_file: file_path.clone(),
-                            line_number: call_line,
-                            is_resolved: true,
-                        };
+                            "".to_string(), // 会在add_call_relation中填充
+                            call_name.to_string(),
+                            file_path.clone(),
+                            file_path.clone(),
+                            call_line,
+                            true,
+                        );
                         if let Err(e) = call_graph.add_call_relation(relation) {
                             warn!("Failed to add call relation: {}", e);
                         }
@@ -493,6 +512,79 @@ impl CodeParser {
                     }
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    /// Phase P2b 交付物 2（接线点①的 layered 分支）：刷新/增量链路里单文件产边。
+    ///
+    /// 与全量路径 [`CodeParser::_analyze_petgraph_call_relations_layered`] 用**同一套**
+    /// 引擎入口与同一个发射器，差别只在范围：这里只处理一个文件，
+    /// 索引必须**从当前图**重建（图里已经有别的文件的节点，候选池才是完整的）。
+    ///
+    /// 这正是"全量 vs 增量结果一致"（交付物 4 的 harness）能够成立的前提：
+    /// 两条链路对同一个调用点跑的是同一段判定代码。
+    fn _analyze_file_calls_layered(
+        &mut self,
+        file_path: &PathBuf,
+        call_graph: &mut PetCodeGraph,
+    ) -> Result<(), String> {
+        let symbols = self.ts_parser.parse_file(file_path)
+            .map_err(|e| format!("Failed to parse file for call analysis: {:?}", e))?;
+
+        // ctx：优先用 `_extract_entities_from_file` 刚写进 `file_scopes` 的那份；
+        // 拿不到（例如缓存被清理）就按需补建，绝不"降级成不需要 ctx 的层"。
+        let ctx = self
+            .file_scope_ctx(file_path)
+            .or_else(|| self.ensure_file_scope_ctx(file_path));
+        let per_file: HashMap<PathBuf, Arc<FileScopeCtx>> = ctx
+            .clone()
+            .into_iter()
+            .map(|c| (file_path.clone(), c))
+            .collect();
+
+        let config = self.resolution_config().unwrap_or_else(ResolutionConfig::all);
+        let max_candidates = config.max_candidates.max(1) as usize;
+        let index = build_resolution_index_from_graph(
+            call_graph,
+            &per_file,
+            self.resolution_root.as_deref(),
+        );
+
+        let funcs: Vec<FunctionInfo> = self
+            .file_functions
+            .get(file_path)
+            .cloned()
+            .unwrap_or_default();
+        let source = fs::read_to_string(file_path).ok();
+
+        // `call_sites_from_symbols_with_source` 需要 ctx（它从 ctx 取文件路径/语言/import 表）。
+        // ctx 建不出来意味着这个文件本轮无法解析 —— 与 legacy 里 `parse_file` 失败
+        // 直接 `Err` 上抛的口径一致，这里同样上抛错误，**绝不静默产 0 条边**。
+        let ctx_ref = match ctx.as_ref() {
+            Some(c) => c,
+            None => {
+                return Err(format!(
+                    "Failed to build FileScopeCtx for {} (layered resolver)",
+                    file_path.display()
+                ))
+            }
+        };
+        let sites = call_sites_from_symbols_with_source(&symbols, ctx_ref, source.as_deref());
+
+        for site in sites {
+            let Some(caller) = self._layered_caller_node(&site, ctx_ref, &funcs) else {
+                continue;
+            };
+            let resolution = resolve_call_with_config(&site, Some(ctx_ref), &index, &config);
+            self._emit_layered_resolution(
+                &site,
+                &caller,
+                &resolution,
+                call_graph,
+                max_candidates,
+            );
         }
 
         Ok(())
@@ -521,7 +613,22 @@ impl CodeParser {
     }
 
     /// 查找被调用函数
+    ///
+    /// Phase P2b 交付物 2（接线点②）：`layered` 下**不再**走"本文件同名 first-wins →
+    /// 全局 `find_functions_by_name().first()`"，而是问分层引擎要最优候选
+    /// （[`CodeParser::_layered_callee_first`]）。`legacy` 分支保持原样（红线 1）。
     fn _find_callee_function(&self, call_name: &str, functions: &[FunctionInfo], call_graph: &PetCodeGraph) -> Option<Uuid> {
+        if self.resolver_mode == ResolverMode::Layered {
+            // 本函数签名不带文件参数（调用方 `_analyze_file_calls` 只在 legacy 分支里用它），
+            // 因此从"本文件函数切片"推出所属文件；切片为空 ⇒ 没有可归属的文件，
+            // 直接交给引擎按"无 ctx"处理，绝不回落到同名 first-wins。
+            let file = functions
+                .first()
+                .map(|f| f.file_path.clone())
+                .unwrap_or_default();
+            return self._layered_callee_first(call_name, &file, functions, call_graph);
+        }
+
         // 先在本文件查找（按切片顺序 first-wins，与原 function_ids 顺序一致）
         for function in functions {
             if function.name == call_name {
@@ -534,6 +641,53 @@ impl CodeParser {
         global_functions.first().map(|f| f.id)
     }
 
+    /// Phase P2b：分层引擎的"单个最优答案"入口（接线点②③④的共用薄调用）。
+    ///
+    /// 与 layered 发射器的区别只在**用法**：这里服务于"只能返回一个 id"的既有签名
+    /// （`_find_callee_function` / `_resolve_callee_function` /
+    /// `incremental.rs::_find_callee_function`），发射器才会把全部候选落成多条边。
+    ///
+    /// 两条硬约束（任务交付物 2）：
+    /// - 索引一律走 `build_resolution_index_from_graph`，**不读**
+    ///   `FunctionNameIndex` / `_build_function_name_index` 的同名塌缩结果；
+    /// - 判定完全交给 `resolve_call_with_config`，这里**没有任何 `contains` 子串匹配**，
+    ///   也**没有任何 `.first()`**。
+    ///
+    /// `ctx` 只从 `file_scopes` 缓存读（本方法是 `&self`，不能按需补建）；缺失时引擎
+    /// 自然下沉到不依赖 ctx 的层（L1/L7/L8），**结果是"更保守"而不是"更错"**。
+    fn _layered_callee_first(
+        &self,
+        call_name: &str,
+        current_file: &Path,
+        functions: &[FunctionInfo],
+        call_graph: &PetCodeGraph,
+    ) -> Option<Uuid> {
+        let config = self.resolution_config().unwrap_or_else(ResolutionConfig::all);
+        // 行号：调用点一定落在本文件某个函数体内，取切片首个节点的起始行作为
+        // "最不坏"的归属行（真正影响判定的只有 `(file, line_start)` 对齐与 ctx 是否存在，
+        // 与 legacy 的"完全不看行号"相比已经更多信息）。
+        let line = functions.first().map(|f| f.line_start).unwrap_or(1);
+        let language = functions
+            .first()
+            .map(|f| f.language.clone())
+            .unwrap_or_else(|| self._detect_language(current_file));
+        let ctx = self.file_scope_ctx(current_file);
+        let per_file: HashMap<PathBuf, Arc<FileScopeCtx>> = ctx
+            .clone()
+            .into_iter()
+            .map(|c| (current_file.to_path_buf(), c))
+            .collect();
+        let index =
+            build_resolution_index_from_graph(call_graph, &per_file, self.resolution_root.as_deref());
+
+        let site = CallSite::new(current_file, line, call_name, &language);
+        let resolution = resolve_call_with_config(&site, ctx.as_deref(), &index, &config);
+        resolution
+            .primary()
+            .filter(|candidate| candidate.callee_id != Uuid::nil())
+            .map(|candidate| candidate.callee_id)
+    }
+
     /// 处理未解析的调用
     fn _handle_unresolved_call(
         &self,
@@ -544,16 +698,16 @@ impl CodeParser {
         call_graph: &mut PetCodeGraph,
     ) {
         // 创建未解析的调用关系
-        let relation = CallRelation {
-            caller_id: *caller_id,
-            callee_id: Uuid::new_v4(), // 临时ID
-            caller_name: "".to_string(),
-            callee_name: call_name.to_string(),
-            caller_file: file_path.clone(),
-            callee_file: file_path.clone(),
-            line_number: call_line,
-            is_resolved: false,
-        };
+        let relation = CallRelation::legacy(
+            *caller_id,
+            Uuid::new_v4(), // 临时ID
+            "".to_string(),
+            call_name.to_string(),
+            file_path.clone(),
+            file_path.clone(),
+            call_line,
+            false,
+        );
 
         if let Err(e) = call_graph.add_call_relation(relation) {
             warn!("Failed to add unresolved call relation: {}", e);
@@ -747,6 +901,28 @@ impl CodeParser {
             }
         }
 
+        // Phase P2b 交付物 1：layered 路径给 `FunctionInfo` 补上节点身份
+        // （`module_path` 来自 `FileScopeCtx`，`qualified_name` = `module_path + sep + name`）。
+        // **legacy 路径逐字节不变**：这两个字段一律保持 `None`（红线 1），所以整段被 mode 守卫。
+        if self.resolver_mode == ResolverMode::Layered {
+            if let Some(ctx) = self.file_scopes.get(file_path) {
+                let separator = module_separator(&language);
+                for function in functions.iter_mut() {
+                    if ctx.module_path.is_empty() {
+                        // module path 推不出来（root 缺失）⇒ 只给裸名限定，绝不拼假前缀。
+                        function.module_path = None;
+                        function.qualified_name = Some(function.name.clone());
+                    } else {
+                        function.module_path = Some(ctx.module_path.clone());
+                        function.qualified_name = Some(format!(
+                            "{}{}{}",
+                            ctx.module_path, separator, function.name
+                        ));
+                    }
+                }
+            }
+        }
+
         // 注册函数到全局注册表
         for function in &functions {
             self.function_registry.insert(function.name.clone(), function.clone());
@@ -779,16 +955,16 @@ impl CodeParser {
         // 尝试提取函数签名
         let signature = self._extract_function_signature(symbol);
 
-        FunctionInfo {
-            id: Uuid::new_v4(),
+        FunctionInfo::legacy(
+            Uuid::new_v4(),
             name,
-            file_path: file_path.clone(),
+            file_path.clone(),
             line_start,
             line_end,
-            namespace: namespace.to_string(),
-            language: language.to_string(),
+            namespace.to_string(),
+            language.to_string(),
             signature,
-        }
+        )
     }
 
     /// 从AST符号提取类信息
@@ -1092,8 +1268,29 @@ impl CodeParser {
         let files = self.scan_directory(dir);
         info!("Found {} files to process", files.len());
         
-        // 3. 加载文件哈希值（如果存在）
-        let mut file_hashes = self._load_file_hashes(dir)?;
+        // 3. 加载文件哈希值（**仅当图缓存存在时**）
+        //
+        // Phase P2b 口径 D 修复：哈希缓存与图缓存必须**同生同死**。
+        //
+        // 根因：本函数第 8 步把 MD5 写进 `file_hashes.json`，而**图**由
+        // `codegraph::repository::save_state()` 在别处落盘。于是存在一种真实状态：
+        // "哈希已落盘、图没落盘"（例如首次 `init` 走的是 `build_petgraph_code_graph`
+        // 但没走到 `save_state`，或图文件被单独清理/版本门禁判失效）。下一轮：
+        //   第 1 步读不到图 → `has_existing_data = false` → 走"全量"分支，
+        //   但第 3 步仍然读到上一轮的哈希 → 第 4 步 `_should_skip_file` 对**每个**文件
+        //   都返回 true → `self.file_functions` 为空 → 第 5 步"全量分支"往空图里
+        //   添加 0 个函数 ⇒ **空图**（实测 `nested_function_caller`：5 节点/3 边 → 0/0）。
+        //
+        // 修法与本文件 `build_code_graph()`（CodeGraph 链路）里已有的写法对齐：
+        // 那里第 3 步就是 `if has_existing_data { … } else { HashMap::new() }`，
+        // 只有 petgraph 链路漏了这道守卫。语义后果：图缺失 ⇒ 一律全量重解析，
+        // 正确性不再依赖"缓存是否命中"（口径 C 的要求）。
+        let mut file_hashes: HashMap<String, String> = if has_existing_data {
+            self._load_file_hashes(dir)?
+        } else {
+            info!("图缓存缺失：无视文件哈希缓存，本轮全量重新解析（P2b 口径 D 修复）");
+            HashMap::new()
+        };
         
         // 4. 逐个处理文件，检查是否需要重新解析
         let mut processed_files = 0;
@@ -1445,16 +1642,16 @@ impl CodeParser {
                     if let Some(caller_idx) = self._find_caller_function_by_line(call_file, call_line, functions) {
                         let callee = &functions[callee_idx];
                         let caller = &functions[caller_idx];
-                        let relation = CallRelation {
-                            caller_id: caller.id,
-                            callee_id: callee.id,
-                            caller_name: caller.name.clone(),
-                            callee_name: callee.name.clone(),
-                            caller_file: caller.file_path.clone(),
-                            callee_file: callee.file_path.clone(),
-                            line_number: call_line,
-                            is_resolved: true,
-                        };
+                        let relation = CallRelation::legacy(
+                            caller.id,
+                            callee.id,
+                            caller.name.clone(),
+                            callee.name.clone(),
+                            caller.file_path.clone(),
+                            callee.file_path.clone(),
+                            call_line,
+                            true,
+                        );
                         code_graph.add_call_relation(relation);
                         continue;
                     }
@@ -1464,16 +1661,16 @@ impl CodeParser {
                     // 查找调用者函数（通过分析调用位置）
                     if let Some(caller_idx) = self._find_caller_function_by_line(call_file, call_line, functions) {
                         let caller = &functions[caller_idx];
-                        let relation = CallRelation {
-                            caller_id: caller.id,
-                            callee_id: callee.id,
-                            caller_name: caller.name.clone(),
-                            callee_name: callee.name.clone(),
-                            caller_file: caller.file_path.clone(),
-                            callee_file: callee.file_path.clone(),
-                            line_number: call_line,
-                            is_resolved: true,
-                        };
+                        let relation = CallRelation::legacy(
+                            caller.id,
+                            callee.id,
+                            caller.name.clone(),
+                            callee.name.clone(),
+                            caller.file_path.clone(),
+                            callee.file_path.clone(),
+                            call_line,
+                            true,
+                        );
                         code_graph.add_call_relation(relation);
                         continue;
                     }
@@ -1525,16 +1722,16 @@ impl CodeParser {
         if let Some(caller_idx) = self._find_caller_function_by_line(call_file, call_line, functions) {
             let caller = &functions[caller_idx];
             // 创建一个未解析的调用关系
-            let relation = CallRelation {
-                caller_id: caller.id,
-                callee_id: uuid::Uuid::new_v4(), // 临时ID
-                caller_name: caller.name.clone(),
-                callee_name: call_name.to_string(),
-                caller_file: caller.file_path.clone(),
-                callee_file: call_file.clone(),
-                line_number: call_line,
-                is_resolved: false,
-            };
+            let relation = CallRelation::legacy(
+                caller.id,
+                uuid::Uuid::new_v4(), // 临时ID
+                caller.name.clone(),
+                call_name.to_string(),
+                caller.file_path.clone(),
+                call_file.clone(),
+                call_line,
+                false,
+            );
             code_graph.add_call_relation(relation);
         }
     }
@@ -1554,7 +1751,18 @@ impl CodeParser {
     }
 
     /// 分析petgraph调用关系（完整实现）
-    fn _analyze_petgraph_call_relations(&self, code_graph: &mut PetCodeGraph) {
+    ///
+    /// Phase P2b 交付物 2：按 `--resolver` 分叉。
+    /// - `Legacy`（默认）：下面的原有四段降级逻辑**一字不改**（红线 1，逐字节产边）。
+    /// - `Layered`：走 [`CodeParser::_analyze_petgraph_call_relations_layered`]，它用分层引擎
+    ///   产边，并把"解析层级 / 置信度 / 歧义候选 / 候选总数"写成边的一等属性（口径 A/B）。
+    fn _analyze_petgraph_call_relations(&mut self, code_graph: &mut PetCodeGraph) {
+        // 接线点①（全量 petgraph 主路径）：layered 直接交给分层发射器，legacy 保持原样。
+        if self.resolver_mode == ResolverMode::Layered {
+            self._analyze_petgraph_call_relations_layered(code_graph);
+            return;
+        }
+
         info!("Starting petgraph call relation analysis for {} files", self.file_functions.len());
         
         // 预建一次名称索引，避免 `_resolve_callee_function` 在每个调用点上做全仓双重扫描
@@ -1596,6 +1804,139 @@ impl CodeParser {
               total_calls, resolved_calls, unresolved_calls);
     }
     
+    // ============================================================================================
+    // Phase P2b 交付物 2：layered 发射器（把 P2a 的分层引擎接进真实建图链路）。
+    //
+    // 与 legacy 主路径的三点本质差异：
+    //   1. **caller 归属**用 `ScopeTree::innermost_scope_containing`（口径 (iii)），
+    //      替换 `_find_caller_function_by_line` 的"行区间 first-wins"，闭包/嵌套函数
+    //      不再被误归外层；
+    //   2. **callee 解析**用 `resolve_call_with_config`（L1..L8 分层 + 支配规则），
+    //      索引来自 `build_resolution_index_from_graph`，**不经过**
+    //      `_build_function_name_index` 的同名塌缩，也**不使用**任何 `contains` 子串匹配；
+    //   3. **产边**按口径 A（每候选一条边）与口径 B（Unresolved 合成与 legacy 同形态的
+    //      幽灵节点+幽灵边，保证"有边的调用点数"覆盖中性）。
+    //
+    // 确定性：文件按路径排序遍历、调用点由 `call_sites_from_symbols_with_source` 内部
+    // 按 `(line, callee_name, guid)` 排序、候选顺序经 `rank_candidates`
+    // （最终键 `(level, rank, uuid)`，且 `source_key` 在 uuid 之前），
+    // 因此同一份源码两次建图的边多重集（含 4 个新字段）逐条相等。
+    // ============================================================================================
+    fn _analyze_petgraph_call_relations_layered(&mut self, code_graph: &mut PetCodeGraph) {
+        // 配置：`--levels=` 非法时 CLI 已在建图前拦截；这里再兜一层，绝不用 unwrap。
+        let config = self.resolution_config().unwrap_or_else(ResolutionConfig::all);
+        let max_candidates = config.max_candidates.max(1) as usize;
+
+        // 文件顺序必须确定（`file_functions` 是 HashMap，迭代顺序 = 每进程随机种子）。
+        let mut files: Vec<PathBuf> = self.file_functions.keys().cloned().collect();
+        files.sort();
+
+        // 为每个文件补齐 ctx：增量链路里被 MD5 跳过的文件没有 ctx，
+        // 而口径 C 要求"正确性绝不依赖缓存是否命中"⇒ 缺了就按需补建。
+        let mut per_file: HashMap<PathBuf, Arc<FileScopeCtx>> = HashMap::new();
+        for file in &files {
+            if let Some(ctx) = self.ensure_file_scope_ctx(file) {
+                per_file.insert(file.clone(), ctx);
+            }
+        }
+
+        // 索引只从"图节点 + 可用 ctx"构建（不塌缩同名候选）。
+        let index = build_resolution_index_from_graph(
+            code_graph,
+            &per_file,
+            self.resolution_root.as_deref(),
+        );
+
+        let mut total_calls = 0usize;
+        let mut resolved_calls = 0usize;
+        let mut ambiguous_calls = 0usize;
+        let mut unresolved_calls = 0usize;
+
+        for file in &files {
+            let Some(ctx) = per_file.get(file).cloned() else {
+                // ctx 建不出来 = 该文件解析失败，与 legacy 的 `parse_file` 失败口径一致。
+                continue;
+            };
+            let symbols = match self.ts_parser.parse_file(file) {
+                Ok(symbols) => symbols,
+                Err(e) => {
+                    warn!(
+                        "Failed to parse file {} for layered call analysis: {:?}",
+                        file.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            // P2a 口径①：生产路径必须走 `_with_source` 变体 —— AST 的 `namespace` 对调用
+            // 符号恒为空串，限定名前缀（`mod_a::pick` / `mod_y.helper`）只能从源码文本还原。
+            let source = fs::read_to_string(file).ok();
+            let sites =
+                call_sites_from_symbols_with_source(&symbols, ctx.as_ref(), source.as_deref());
+            // 本文件的函数节点快照（克隆出来，避免与 `&mut self` / 图的可变借用打架）。
+            let funcs: Vec<FunctionInfo> = self
+                .file_functions
+                .get(file)
+                .cloned()
+                .unwrap_or_default();
+
+            for site in sites {
+                total_calls += 1;
+                // (iii) caller 归属：innermost 优先，再沿作用域链向外回退到"能对齐图节点"的层。
+                let Some(caller) = self._layered_caller_node(&site, ctx.as_ref(), &funcs) else {
+                    continue;
+                };
+                let resolution =
+                    resolve_call_with_config(&site, Some(ctx.as_ref()), &index, &config);
+                match resolution.status {
+                    ResolutionStatus::Resolved => resolved_calls += 1,
+                    ResolutionStatus::Ambiguous => ambiguous_calls += 1,
+                    ResolutionStatus::Unresolved => unresolved_calls += 1,
+                }
+                self._emit_layered_resolution(
+                    &site,
+                    &caller,
+                    &resolution,
+                    code_graph,
+                    max_candidates,
+                );
+            }
+        }
+
+        info!(
+            "Layered call analysis completed: {} total calls, {} unique, {} ambiguous, {} unresolved",
+            total_calls, resolved_calls, ambiguous_calls, unresolved_calls
+        );
+    }
+
+    /// Phase P2b：caller 归属（口径 (iii)）。
+    ///
+    /// 实现在 `resolution::layered_caller_node`（与刷新链路、增量链路**共用同一段代码**，
+    /// 这是"全量 vs 增量结果一致"的前提）。这里只保留 `self` 上下文相关的转发。
+    fn _layered_caller_node(
+        &self,
+        site: &CallSite,
+        ctx: &FileScopeCtx,
+        funcs: &[FunctionInfo],
+    ) -> Option<FunctionInfo> {
+        resolution_caller_node(site, Some(ctx), funcs)
+    }
+
+    /// Phase P2b：把一个 `Resolution` 落成边（口径 A + 口径 B + 要求 (v)）。
+    ///
+    /// 实现在 `resolution::emit_layered_resolution`，与刷新链路、增量链路**共用同一段代码**
+    /// （"全量 vs 增量一致"的前提）。这里只做转发并返回写出的边数，供上层统计。
+    fn _emit_layered_resolution(
+        &self,
+        site: &CallSite,
+        caller: &FunctionInfo,
+        resolution: &Resolution,
+        code_graph: &mut PetCodeGraph,
+        max_candidates: usize,
+    ) {
+        resolution_emit(site, caller, resolution, code_graph, max_candidates);
+    }
+
     /// 分析单个文件的函数调用（用于petgraph）
     fn _analyze_file_calls_for_petgraph(
         &self,
@@ -1631,16 +1972,16 @@ impl CodeParser {
                         name_index
                     ) {
                         // 创建已解析的调用关系
-                        let relation = CallRelation {
-                            caller_id: caller.id,
-                            callee_id: callee_info.id,
-                            caller_name: caller.name.clone(),
-                            callee_name: callee_info.name.clone(),
-                            caller_file: caller.file_path.clone(),
-                            callee_file: callee_info.file_path.clone(),
-                            line_number: call_line,
-                            is_resolved: true,
-                        };
+                        let relation = CallRelation::legacy(
+                            caller.id,
+                            callee_info.id,
+                            caller.name.clone(),
+                            callee_info.name.clone(),
+                            caller.file_path.clone(),
+                            callee_info.file_path.clone(),
+                            call_line,
+                            true,
+                        );
                         
                         if let Err(e) = code_graph.add_call_relation(relation) {
                             warn!("Failed to add resolved call relation: {}", e);
@@ -1666,14 +2007,29 @@ impl CodeParser {
     }
     
     /// 解析被调用函数
+    ///
+    /// Phase P2b 交付物 2（接线点③，全量 petgraph 主路径的"四级降级"）：
+    /// `layered` 分支**一条都不走**下面的四级降级（本文件同名 first → 全局索引
+    /// → `find_functions_by_name().first()` → 限定名 `contains` 子串），
+    /// 而是把整条判定交给分层引擎；`legacy` 分支一字未改（红线 1）。
+    ///
+    /// 附带修正：原实现的 `_current_file` 被下划线忽略（"本文件优先"其实压根没查文件），
+    /// layered 分支**真正使用**它 —— 这是限定名与同名跨文件消歧的必要信息。
     fn _resolve_callee_function(
         &self,
         call_name: &str,
-        _current_file: &PathBuf,
+        current_file: &PathBuf,
         current_functions: &[FunctionInfo],
         code_graph: &PetCodeGraph,
         name_index: &FunctionNameIndex<'_>,
     ) -> Option<FunctionInfo> {
+        // ---- Phase P2b：layered 薄调用（绝不出现 first() / contains()）----
+        if self.resolver_mode == ResolverMode::Layered {
+            let callee_id =
+                self._layered_callee_first(call_name, current_file.as_path(), current_functions, code_graph)?;
+            return code_graph.get_function_by_id(&callee_id).cloned();
+        }
+
         // 1. 先在本文件查找
         for function in current_functions {
             if function.name == call_name {
@@ -1701,11 +2057,24 @@ impl CodeParser {
     }
     
     /// 解析限定函数名（如 Class.method, module.function）
+    ///
+    /// Phase P2b 交付物 2（接线点③的第二段）：`layered` 分支**禁止**下面这段
+    /// `func.namespace.contains(prefix) || func.name == method_name` ——
+    /// 后半个条件让前半个校验彻底失效（`func.name` 恒等于 `method_name`），
+    /// 前半个又是子串匹配（`"ab"` 能命中 `"abc.rs::x"`）。限定名在 layered 里由
+    /// L5 `QualifiedPath` 用**分段精确**比较处理（见 `resolver::module_chain_matches`）。
     fn _resolve_qualified_function_name(
         &self,
         qualified_name: &str,
         code_graph: &PetCodeGraph,
     ) -> Option<FunctionInfo> {
+        // ---- Phase P2b：layered 走引擎（限定前缀交 L5，绝不子串匹配）----
+        if self.resolver_mode == ResolverMode::Layered {
+            let callee_id = self
+                ._layered_callee_first(qualified_name, Path::new(""), &[], code_graph)?;
+            return code_graph.get_function_by_id(&callee_id).cloned();
+        }
+
         // 检查是否包含分隔符
         if let Some(dot_pos) = qualified_name.rfind('.') {
             let (prefix, method_name) = qualified_name.split_at(dot_pos);
@@ -1735,31 +2104,31 @@ impl CodeParser {
     ) {
         // 为未解析的调用创建一个临时函数节点
         let temp_callee_id = Uuid::new_v4();
-        let temp_callee = FunctionInfo {
-            id: temp_callee_id,
-            name: call_name.to_string(),
-            file_path: file_path.clone(),
-            line_start: call_line,
-            line_end: call_line,
-            namespace: "unresolved".to_string(),
-            language: caller.language.clone(),
-            signature: Some(format!("unresolved_call_{}", call_name)),
-        };
+        let temp_callee = FunctionInfo::legacy(
+            temp_callee_id,
+            call_name.to_string(),
+            file_path.clone(),
+            call_line,
+            call_line,
+            "unresolved".to_string(),
+            caller.language.clone(),
+            Some(format!("unresolved_call_{}", call_name)),
+        );
         
         // 添加到代码图
         let _node_index = code_graph.add_function(temp_callee);
         
         // 创建未解析的调用关系
-        let relation = CallRelation {
-            caller_id: caller.id,
-            callee_id: temp_callee_id,
-            caller_name: caller.name.clone(),
-            callee_name: call_name.to_string(),
-            caller_file: caller.file_path.clone(),
-            callee_file: file_path.clone(),
-            line_number: call_line,
-            is_resolved: false,
-        };
+        let relation = CallRelation::legacy(
+            caller.id,
+            temp_callee_id,
+            caller.name.clone(),
+            call_name.to_string(),
+            caller.file_path.clone(),
+            file_path.clone(),
+            call_line,
+            false,
+        );
         
         if let Err(e) = code_graph.add_call_relation(relation) {
             warn!("Failed to add unresolved call relation: {}", e);
@@ -1797,16 +2166,16 @@ impl CodeParser {
         // 为main函数创建到其他函数的调用关系
         for other_func in all_functions {
             if other_func.id != main_function.id {
-                let relation = CallRelation {
-                    caller_id: main_function.id,
-                    callee_id: other_func.id,
-                    caller_name: main_function.name.clone(),
-                    callee_name: other_func.name.clone(),
-                    caller_file: main_function.file_path.clone(),
-                    callee_file: other_func.file_path.clone(),
-                    line_number: main_function.line_start,
-                    is_resolved: false, // 启发式调用标记为未解析
-                };
+                let relation = CallRelation::legacy(
+                    main_function.id,
+                    other_func.id,
+                    main_function.name.clone(),
+                    other_func.name.clone(),
+                    main_function.file_path.clone(),
+                    other_func.file_path.clone(),
+                    main_function.line_start,
+                    false, // 启发式调用标记为未解析
+                );
                 
                 if let Err(e) = code_graph.add_call_relation(relation) {
                     warn!("Failed to add heuristic call relation: {}", e);
@@ -1831,16 +2200,16 @@ impl CodeParser {
                 
                 // 检查是否是被测试的函数
                 if test_name.contains(&other_name) || other_name.contains("test") {
-                    let relation = CallRelation {
-                        caller_id: test_function.id,
-                        callee_id: other_func.id,
-                        caller_name: test_function.name.clone(),
-                        callee_name: other_func.name.clone(),
-                        caller_file: test_function.file_path.clone(),
-                        callee_file: other_func.file_path.clone(),
-                        line_number: test_function.line_start,
-                        is_resolved: false, // 启发式调用标记为未解析
-                    };
+                    let relation = CallRelation::legacy(
+                        test_function.id,
+                        other_func.id,
+                        test_function.name.clone(),
+                        other_func.name.clone(),
+                        test_function.file_path.clone(),
+                        other_func.file_path.clone(),
+                        test_function.line_start,
+                        false, // 启发式调用标记为未解析
+                    );
                     
                     if let Err(e) = code_graph.add_call_relation(relation) {
                         warn!("Failed to add test call relation: {}", e);
@@ -2010,6 +2379,8 @@ if __name__ == "__main__":
             namespace: "global".to_string(),
             language: "rust".to_string(),
             signature: Some("fn main()".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
         
         let func2 = FunctionInfo {
@@ -2021,6 +2392,8 @@ if __name__ == "__main__":
             namespace: "global".to_string(),
             language: "rust".to_string(),
             signature: Some("fn calculate()".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
         
         // 添加到代码图
@@ -2063,6 +2436,8 @@ if __name__ == "__main__":
             namespace: "Calculator".to_string(),
             language: "rust".to_string(),
             signature: Some("fn process()".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
         
         code_graph.add_function(method.clone());
@@ -2283,6 +2658,8 @@ pub fn compute(y: i32) -> i32 {
             namespace: "global".to_string(),
             language: "rust".to_string(),
             signature: Some("fn existing()".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
 
         // 本批次待合并：dup_a / dup_b 与 existing 三元组完全一致（id 不同，模拟同批重复），
@@ -2296,6 +2673,8 @@ pub fn compute(y: i32) -> i32 {
             namespace: "global".to_string(),
             language: "rust".to_string(),
             signature: Some("fn dup_a()".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
         let dup_b = FunctionInfo {
             id: Uuid::new_v4(),
@@ -2306,6 +2685,8 @@ pub fn compute(y: i32) -> i32 {
             namespace: "global".to_string(),
             language: "rust".to_string(),
             signature: Some("fn dup_b()".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
         let unique = FunctionInfo {
             id: Uuid::new_v4(),
@@ -2316,6 +2697,8 @@ pub fn compute(y: i32) -> i32 {
             namespace: "global".to_string(),
             language: "rust".to_string(),
             signature: Some("fn unique()".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
         // pair_c / pair_d 的三元组 (50, 60) 在现有图中**不存在**，且本批次内出现两次。
         // 这一组才是"同批重复只添加一次"语义的关键：若忘记在 add_function 后回填 seen，
@@ -2329,6 +2712,8 @@ pub fn compute(y: i32) -> i32 {
             namespace: "global".to_string(),
             language: "rust".to_string(),
             signature: Some("fn pair_c()".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
         let pair_d = FunctionInfo {
             id: Uuid::new_v4(),
@@ -2339,6 +2724,8 @@ pub fn compute(y: i32) -> i32 {
             namespace: "global".to_string(),
             language: "rust".to_string(),
             signature: Some("fn pair_d()".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
 
         // ---------- PetCodeGraph 版本 ----------

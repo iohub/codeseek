@@ -18,7 +18,7 @@ use tracing::warn;
 /// 版本不符（或文件缺少版本字段，视作 0）一律判定为**缓存失效**，走既有的
 /// `Err(String)` → `persistence` → `parser::_load_existing_graph` 的
 /// `Err → warn → Ok(None)` → `PetCodeGraph::new()` 全量重建路径；绝不 panic、绝不 unwrap。
-pub const GRAPH_SCHEMA_VERSION: u32 = 1;
+pub const GRAPH_SCHEMA_VERSION: u32 = 2;
 
 /// `graph.bin` 文件头 magic（4 字节 ASCII，"CodeGraph Storage"）。
 ///
@@ -469,6 +469,8 @@ mod tests {
             namespace: "crate".to_string(),
             language: "rust".to_string(),
             signature: Some("alpha".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
         let beta = FunctionInfo {
             id: Uuid::new_v4(),
@@ -479,6 +481,8 @@ mod tests {
             namespace: "crate".to_string(),
             language: "rust".to_string(),
             signature: Some("beta".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
         let gamma = FunctionInfo {
             id: Uuid::new_v4(),
@@ -489,6 +493,8 @@ mod tests {
             namespace: "global".to_string(),
             language: "python".to_string(),
             signature: Some("gamma".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
 
         let ghost = FunctionInfo {
@@ -500,6 +506,8 @@ mod tests {
             namespace: "unresolved".to_string(),
             language: "rust".to_string(),
             signature: Some("unresolved_call_unknown_callee".to_string()),
+            module_path: None,
+            qualified_name: None,
         };
         let ghost_id = ghost.id;
 
@@ -522,6 +530,10 @@ mod tests {
                 callee_file: PathBuf::from("src/alpha.rs"),
                 line_number: 7,
                 is_resolved: true,
+                resolution_level: 0,
+                confidence: 0,
+                rank: 0,
+                candidate_count: 0,
             })
             .expect("同文件已解析边应能写入");
         graph
@@ -534,6 +546,10 @@ mod tests {
                 callee_file: PathBuf::from("src/alpha.rs"),
                 line_number: 4,
                 is_resolved: true,
+                resolution_level: 0,
+                confidence: 0,
+                rank: 0,
+                candidate_count: 0,
             })
             .expect("跨文件已解析边应能写入");
         graph
@@ -546,6 +562,10 @@ mod tests {
                 callee_file: PathBuf::from("src/alpha.rs"),
                 line_number: 2,
                 is_resolved: false,
+                resolution_level: 0,
+                confidence: 0,
+                rank: 0,
+                candidate_count: 0,
             })
             .expect("未解析边（指向临时幽灵节点）的写入应成功");
 
@@ -853,6 +873,8 @@ mod tests {
                 namespace: "crate".to_string(),
                 language: "rust".to_string(),
                 signature: None,
+                module_path: None,
+                qualified_name: None,
             });
         }
         large.update_stats();

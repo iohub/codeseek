@@ -12,6 +12,17 @@ use crate::codegraph::types::{
     FunctionInfo, ClassInfo, CallRelation
 };
 use crate::codegraph::treesitter::TreeSitterParser;
+// Phase P2b 交付物 2（接线点④）：增量链路也要能走分层解析器。
+// 与 `codegraph::parser` 共用 `resolution` 里的同一套 caller 归属与产边代码，
+// 这是"全量 vs 增量结果一致"（交付物 4 harness）成立的前提。
+use crate::cli::args::ResolverMode;
+use crate::codegraph::resolution::resolver::{
+    call_sites_from_symbols_with_source, resolve_call_with_config, ResolutionConfig,
+};
+use crate::codegraph::resolution::{
+    build_file_scope_ctx, build_resolution_index_from_graph,
+    emit_layered_resolution as resolution_emit, layered_caller_node as resolution_caller_node,
+};
 
 /// 增量更新管理器
 pub struct IncrementalManager {
@@ -23,6 +34,15 @@ pub struct IncrementalManager {
     snippet_index: SnippetIndex,
     /// TreeSitter解析器
     ts_parser: TreeSitterParser,
+    /// Phase P2a/P2b：`--resolver` 的取值（**默认 `Legacy`**）。
+    ///
+    /// P2a 里这个字段还不存在；P2b 起它与 `CodeParser::resolver_mode` 同口径，
+    /// 唯一的差别是本结构体不缓存 `FileScopeCtx`，layered 分支**现场**用
+    /// `parse_file_with_metadata` + `build_file_scope_ctx` 造 ctx（口径与
+    /// `CodeParser::ensure_file_scope_ctx` 逐参数一致）。
+    resolver_mode: ResolverMode,
+    /// Phase P2b：本轮的仓库根，用于 module path 推导（`None` ⇒ module path 降级为空串）。
+    resolution_root: Option<PathBuf>,
 }
 
 impl IncrementalManager {
@@ -32,7 +52,25 @@ impl IncrementalManager {
             file_index: FileIndex::default(),
             snippet_index: SnippetIndex::default(),
             ts_parser: TreeSitterParser::new(),
+            // Phase P2b：默认 legacy —— 不置 flag 时增量产边与 P1 完全一致（红线 1）。
+            resolver_mode: ResolverMode::Legacy,
+            resolution_root: None,
         }
+    }
+
+    /// Phase P2b：设置解析引擎模式（与 `CodeParser::set_resolver_mode` 同名同义）。
+    pub fn set_resolver_mode(&mut self, mode: ResolverMode) {
+        self.resolver_mode = mode;
+    }
+
+    /// Phase P2b：当前解析引擎模式（默认 `Legacy`）。
+    pub fn resolver_mode(&self) -> ResolverMode {
+        self.resolver_mode.clone()
+    }
+
+    /// Phase P2b：设置 module path 推导用的仓库根。
+    pub fn set_resolution_root(&mut self, root: Option<PathBuf>) {
+        self.resolution_root = root;
     }
 
     /// 计算文件的MD5哈希值
@@ -162,16 +200,16 @@ impl IncrementalManager {
 
             match symbol_ref.symbol_type() {
                 crate::codegraph::treesitter::structs::SymbolType::FunctionDeclaration => {
-                    let function = FunctionInfo {
-                        id: Uuid::new_v4(),
-                        name: symbol_ref.name().to_string(),
-                        file_path: file_path.clone(),
-                        line_start: symbol_ref.full_range().start_point.row + 1,
-                        line_end: symbol_ref.full_range().end_point.row + 1,
-                        namespace: namespace.clone(),
-                        language: language.clone(),
-                        signature: Some(symbol_ref.name().to_string()),
-                    };
+                    let function = FunctionInfo::legacy(
+                        Uuid::new_v4(),
+                        symbol_ref.name().to_string(),
+                        file_path.clone(),
+                        symbol_ref.full_range().start_point.row + 1,
+                        symbol_ref.full_range().end_point.row + 1,
+                        namespace.clone(),
+                        language.clone(),
+                        Some(symbol_ref.name().to_string()),
+                    );
                     functions.push(function);
                 },
                 crate::codegraph::treesitter::structs::SymbolType::StructDeclaration => {
@@ -199,12 +237,20 @@ impl IncrementalManager {
     }
 
     /// 分析文件的函数调用
+    ///
+    /// Phase P2b 交付物 2（接线点④）：按 `--resolver` 分叉。
+    /// - `Legacy`（默认）：下面原有的"本文件同名 first-wins + 全局 first-wins"**一字不改**；
+    /// - `Layered`：交给 [`IncrementalManager::_analyze_file_calls_layered`]。
     fn _analyze_file_calls(
-        &self,
+        &mut self,
         file_path: &PathBuf,
         function_ids: &[Uuid],
         call_graph: &mut PetCodeGraph,
     ) -> Result<(), String> {
+        if self.resolver_mode == ResolverMode::Layered {
+            return self._analyze_file_calls_layered(file_path, function_ids, call_graph);
+        }
+
         let symbols = self.ts_parser.parse_file(file_path)
             .map_err(|e| format!("Failed to parse file for call analysis: {:?}", e))?;
 
@@ -220,16 +266,16 @@ impl IncrementalManager {
                 if let Some(caller_id) = self._find_caller_function(file_path, call_line, function_ids, call_graph) {
                     // 查找被调用函数（先在本文件，再全局）
                     if let Some(callee_id) = self._find_callee_function(call_name, function_ids, call_graph) {
-                        let relation = CallRelation {
-                            caller_id: *caller_id,
+                        let relation = CallRelation::legacy(
+                            *caller_id,
                             callee_id,
-                            caller_name: "".to_string(), // 会在add_call_relation中填充
-                            callee_name: call_name.to_string(),
-                            caller_file: file_path.clone(),
-                            callee_file: file_path.clone(),
-                            line_number: call_line,
-                            is_resolved: true,
-                        };
+                            "".to_string(), // 会在add_call_relation中填充
+                            call_name.to_string(),
+                            file_path.clone(),
+                            file_path.clone(),
+                            call_line,
+                            true,
+                        );
                         if let Err(e) = call_graph.add_call_relation(relation) {
                             warn!("Failed to add call relation: {}", e);
                         }
@@ -239,6 +285,66 @@ impl IncrementalManager {
                     }
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    /// Phase P2b 交付物 2（接线点④的 layered 分支）：增量刷新单个文件时按分层引擎产边。
+    ///
+    /// 与 `CodeParser::_analyze_file_calls_layered` 共用
+    /// `resolution::{layered_caller_node, emit_layered_resolution}`，因此同一个调用点在
+    /// "全量建图"与"增量刷新"两条链路上得到**完全相同**的边（含 4 个新标量）——
+    /// 这正是交付物 4 的全量/增量一致性 harness 能成立的前提。
+    ///
+    /// 本结构体不缓存 `FileScopeCtx`，所以这里现场解析 + 现场建 ctx，口径与
+    /// `CodeParser::ensure_file_scope_ctx` 逐参数一致
+    /// （`parse_file_with_metadata` → `_detect_language` → `build_file_scope_ctx`）。
+    fn _analyze_file_calls_layered(
+        &mut self,
+        file_path: &PathBuf,
+        function_ids: &[Uuid],
+        call_graph: &mut PetCodeGraph,
+    ) -> Result<(), String> {
+        let ast = self
+            .ts_parser
+            .parse_file_with_metadata(file_path)
+            .map_err(|e| format!("Failed to parse file for call analysis: {:?}", e))?;
+        let symbols = ast.symbols;
+        let language = self._detect_language(file_path);
+        let ctx = build_file_scope_ctx(
+            file_path,
+            &symbols,
+            self.resolution_root.as_deref(),
+            &language,
+            ast.declared_package,
+        );
+
+        // 本文件的函数节点（从图里按 id 取 —— 图是增量链路的唯一真相）。
+        let funcs: Vec<FunctionInfo> = function_ids
+            .iter()
+            .filter_map(|id| call_graph.get_function_by_id(id))
+            .cloned()
+            .collect();
+
+        let mut per_file: HashMap<PathBuf, std::sync::Arc<_>> = HashMap::new();
+        per_file.insert(file_path.clone(), ctx.clone());
+        let config = ResolutionConfig::all();
+        let max_candidates = config.max_candidates.max(1) as usize;
+        let index =
+            build_resolution_index_from_graph(call_graph, &per_file, self.resolution_root.as_deref());
+
+        let source = std::fs::read_to_string(file_path).ok();
+        // P2a 口径①：生产路径必须走 `_with_source` 变体
+        // （AST 的 `namespace` 对调用符号恒空，限定前缀只能从源码文本还原）。
+        let sites = call_sites_from_symbols_with_source(&symbols, ctx.as_ref(), source.as_deref());
+
+        for site in sites {
+            let Some(caller) = resolution_caller_node(&site, Some(ctx.as_ref()), &funcs) else {
+                continue;
+            };
+            let resolution = resolve_call_with_config(&site, Some(ctx.as_ref()), &index, &config);
+            resolution_emit(&site, &caller, &resolution, call_graph, max_candidates);
         }
 
         Ok(())
@@ -260,7 +366,42 @@ impl IncrementalManager {
     }
 
     /// 查找被调用函数
+    ///
+    /// Phase P2b 交付物 2（接线点④的第二段）：`layered` 下**不再**返回
+    /// `find_functions_by_name().first()` 的同名塌缩结果，而是问分层引擎要最优候选；
+    /// `legacy` 分支一字未改（红线 1）。
+    ///
+    /// ⚠ 完整产边并不经过这里：layered 的 `_analyze_file_calls` 已在函数入口分叉到
+    /// [`IncrementalManager::_analyze_file_calls_layered`]（每候选一条边）。本方法只是
+    /// 保留给"只能返回一个 id"的旧签名，防止有人绕过发射器直接调它时又落回 first-wins。
     fn _find_callee_function(&self, call_name: &str, function_ids: &[Uuid], call_graph: &PetCodeGraph) -> Option<Uuid> {
+        if self.resolver_mode == ResolverMode::Layered {
+            // 与 `CodeParser::_layered_callee_first` 同口径：索引一律来自
+            // `build_resolution_index_from_graph`（不塌缩），这里**没有 ctx**
+            // （本结构体不缓存），因此引擎自然下沉到不依赖 ctx 的层 —— 更保守，不是更错。
+            let funcs: Vec<FunctionInfo> = function_ids
+                .iter()
+                .filter_map(|id| call_graph.get_function_by_id(id))
+                .cloned()
+                .collect();
+            let file = funcs
+                .first()
+                .map(|f| f.file_path.clone())
+                .unwrap_or_default();
+            let language = funcs.first().map(|f| f.language.clone()).unwrap_or_default();
+            let line = funcs.first().map(|f| f.line_start).unwrap_or(1);
+            let per_file: HashMap<PathBuf, std::sync::Arc<_>> = HashMap::new();
+            let index =
+                build_resolution_index_from_graph(call_graph, &per_file, self.resolution_root.as_deref());
+            let site = crate::codegraph::resolution::CallSite::new(&file, line, call_name, &language);
+            let config = ResolutionConfig::all();
+            let resolution = resolve_call_with_config(&site, None, &index, &config);
+            return resolution
+                .primary()
+                .filter(|candidate| candidate.callee_id != uuid::Uuid::nil())
+                .map(|candidate| candidate.callee_id);
+        }
+
         // 先在本文件查找
         for &func_id in function_ids {
             if let Some(func) = call_graph.get_function_by_id(&func_id) {
@@ -284,17 +425,16 @@ impl IncrementalManager {
         call_line: usize,
         call_graph: &mut PetCodeGraph,
     ) {
-        // 创建未解析的调用关系
-        let relation = CallRelation {
-            caller_id: *caller_id,
-            callee_id: Uuid::new_v4(), // 临时ID
-            caller_name: "".to_string(),
-            callee_name: call_name.to_string(),
-            caller_file: file_path.clone(),
-            callee_file: file_path.clone(),
-            line_number: call_line,
-            is_resolved: false,
-        };
+        let relation = CallRelation::legacy(
+            *caller_id,
+            Uuid::new_v4(), // 临时ID
+            "".to_string(),
+            call_name.to_string(),
+            file_path.clone(),
+            file_path.clone(),
+            call_line,
+            false,
+        );
 
         if let Err(e) = call_graph.add_call_relation(relation) {
             warn!("Failed to add unresolved call relation: {}", e);

@@ -41,6 +41,8 @@ fn make_graph(function_names: &[&str]) -> PetCodeGraph {
             namespace: "crate".to_string(),
             language: "rust".to_string(),
             signature: Some((*name).to_string()),
+            module_path: None,
+            qualified_name: None,
         });
     }
     graph
