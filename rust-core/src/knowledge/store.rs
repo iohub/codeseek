@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use futures::TryStreamExt;
 
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_QUERY_INSTRUCT};
 use crate::knowledge::record::KnowledgeRecord;
 use crate::knowledge::search::{build_result, rrf_fuse, KnowledgeSearchResult};
 use crate::knowledge::tantivy::KnowledgeTantivyIndex;
@@ -139,9 +139,15 @@ impl KnowledgeStore {
         } else {
             config.map(|c| c.embedding.model.clone()).unwrap_or_default()
         };
+        // 查询侧指令：仅用于 provider.format_query()；入库(add)路径不会读取它。
+        // 显式配置为空串 => effective_instruct() 返回 "" => 关闭前缀注入。
+        let instruct = config
+            .map(|c| c.embedding.effective_instruct().to_string())
+            .unwrap_or_else(|| DEFAULT_QUERY_INSTRUCT.to_string());
 
         let provider =
-            OpenAICompatibleEmbeddingProvider::new(api_token, base_url, model);
+            OpenAICompatibleEmbeddingProvider::new(api_token, base_url, model)
+                .with_instruct(instruct);
         Ok(Box::new(provider))
     }
 
@@ -156,6 +162,7 @@ impl KnowledgeStore {
             .await
             .context("failed to build embedding provider")?;
 
+        // 文档/入库侧：裸 embed_text，不加任何 instruct 前缀（保持与既有向量索引同分布）
         let vector = provider
             .get_embedding(&embed_text)
             .await
@@ -424,8 +431,10 @@ impl KnowledgeStore {
             .build_provider()
             .await
             .context("failed to build embedding provider")?;
+        // 查询侧注入官方 instruct 前缀；入库(add)侧保持裸文本，二者非对称。
+        let formatted_query = provider.format_query(query);
         let query_vector = provider
-            .get_embedding(query)
+            .get_embedding(&formatted_query)
             .await
             .map_err(|e| anyhow!("embedding API call failed for search query: {}", e))?;
 

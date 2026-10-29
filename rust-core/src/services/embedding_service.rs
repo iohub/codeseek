@@ -20,7 +20,7 @@ use anyhow::anyhow;
 
 use crate::codegraph::treesitter::TreeSitterParser;
 use crate::codegraph::parser::CodeParser;
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_QUERY_INSTRUCT};
 use crate::storage::traits_bm25::{TextSearchProvider, CodeChunk};
 
 use lancedb::table::OptimizeAction;
@@ -49,6 +49,27 @@ fn truncate_to_byte_limit(s: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+/// 按 Qwen3-Embedding 官方模板为**查询**拼接指令前缀：
+///
+/// ```text
+/// Instruct: {task_description}\nQuery:{query}
+/// ```
+///
+/// 格式细节（逐字符固定，官方 README `get_detailed_instruct`）：
+/// `Instruct:` 冒号后**有一个空格**；中间是 `\n`；`Query:` 冒号后**没有空格**，紧接查询原文。
+///
+/// ⚠️ 该函数**只允许出现在查询路径**。文档/代码入库路径（`process_file_content`、
+/// `KnowledgeStore::add`）必须继续发送裸文本，否则已建好的 LanceDB 向量索引全部失效。
+///
+/// - `instruct` 为空（配置显式关闭）→ 原样返回 query，不加任何前缀
+/// - `query` 为空白 → 原样返回，保持"空输入报错"的既有行为，不会把指令单独 embedding
+pub fn build_instruct_query(instruct: &str, query: &str) -> String {
+    if instruct.is_empty() || query.trim().is_empty() {
+        return query.to_string();
+    }
+    format!("Instruct: {}\nQuery:{}", instruct, query)
 }
 
 struct EmbeddingCache {
@@ -133,6 +154,9 @@ pub struct SearchResult {
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
     /// Get embedding for a single text (used for search queries).
+    ///
+    /// ⚠️ 输入**原样**发给 API：不在此处、也不在 `get_embeddings_batch` 内加任何指令前缀。
+    /// 查询侧前缀只由 [`EmbeddingProvider::format_query`] 在调用点构造。
     async fn get_embedding(&self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>>;
     /// Batch embed multiple texts in one API call. Default falls back to sequential single calls.
     async fn get_embeddings_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
@@ -142,6 +166,13 @@ pub trait EmbeddingProvider: Send + Sync {
         }
         Ok(results)
     }
+    /// **查询专用**：按 Qwen3-Embedding 官方模板给查询加指令前缀（非对称检索）。
+    ///
+    /// 默认实现是恒等变换 —— 不支持 instruction-aware 的模型 / 测试用 mock provider
+    /// 保持裸文本。文档、代码、知识记录的入库路径**禁止**调用本方法。
+    fn format_query(&self, query: &str) -> String {
+        query.to_string()
+    }
     fn model(&self) -> String;
 }
 
@@ -150,6 +181,9 @@ pub struct OpenAICompatibleEmbeddingProvider {
     api_token: String,
     base_url: String,
     model: String,
+    /// 查询侧指令（来自 `EmbeddingConfig::effective_instruct`）。空串 = 关闭注入。
+    /// 只被 `format_query` 读取，`get_embedding` / `get_embeddings_batch` 完全不受影响。
+    instruct: String,
 }
 
 impl OpenAICompatibleEmbeddingProvider {
@@ -162,7 +196,16 @@ impl OpenAICompatibleEmbeddingProvider {
             api_token,
             base_url,
             model,
+            // 缺省即官方推荐的 instruction-aware 用法；用 with_instruct("") 关闭
+            instruct: DEFAULT_QUERY_INSTRUCT.to_string(),
         }
+    }
+
+    /// 设置查询侧 instruct。传入空串表示关闭前缀注入。
+    /// 注意：该设置**只影响 `format_query`**，入库文本永远保持裸文本。
+    pub fn with_instruct(mut self, instruct: impl Into<String>) -> Self {
+        self.instruct = instruct.into();
+        self
     }
 }
 
@@ -170,6 +213,11 @@ impl OpenAICompatibleEmbeddingProvider {
 impl EmbeddingProvider for OpenAICompatibleEmbeddingProvider {
     fn model(&self) -> String {
         self.model.clone()
+    }
+
+    /// 查询侧加官方指令前缀；`instruct` 为空时保持裸文本（等效于关闭）。
+    fn format_query(&self, query: &str) -> String {
+        build_instruct_query(&self.instruct, query)
     }
 
     async fn get_embedding(&self, code_block: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -287,6 +335,8 @@ impl EmbeddingService {
         let mut base_url = None;
         let mut model = "Qwen/Qwen3-Embedding-4B".to_string(); // Default fallback
         let mut dimensions = 2560;
+        // 查询侧指令：无配置时用默认指令；配置里显式空串时关闭注入
+        let mut instruct = DEFAULT_QUERY_INSTRUCT.to_string();
 
         if let Some(conf) = config {
              let embedding_config = &conf.embedding;
@@ -299,12 +349,14 @@ impl EmbeddingService {
              if !embedding_config.model.is_empty() {
                  model = embedding_config.model.clone();
              }
+             instruct = embedding_config.effective_instruct().to_string();
              dimensions = embedding_config.dimensions as i32;
         }
         
         let api_token = api_token.ok_or("API Key not found in config or environment")?;
         
-        let provider = OpenAICompatibleEmbeddingProvider::new(api_token, base_url, model);
+        let provider = OpenAICompatibleEmbeddingProvider::new(api_token, base_url, model)
+            .with_instruct(instruct);
         
         let min_code_block_length = config
             .map(|cfg| cfg.index.min_code_block_length)
@@ -648,6 +700,7 @@ impl EmbeddingService {
             info!("Batch-embedding {} cache misses ({}x speedup)", cache_miss_queue.len(), BATCH_SIZE);
             for chunk in cache_miss_queue.chunks(BATCH_SIZE) {
                 let codes: Vec<String> = chunk.iter().map(|(_, code, _, _, _, _, _, _)| code.clone()).collect();
+                // 文档/入库侧：发送**裸源码**，禁止调用 format_query —— 否则已有向量索引全部失效
                 match self.embedding_provider.get_embeddings_batch(&codes).await {
                     Ok(embeddings) => {
                         for (item, vec) in chunk.iter().zip(embeddings) {
@@ -858,10 +911,20 @@ impl EmbeddingService {
         Ok(())
     }
 
+    /// **查询专用** helper：按配置的 instruct 把原始查询包装成官方非对称检索输入。
+    ///
+    /// 仅供检索入口调用；入库/文档路径（`process_file_content` → `get_embeddings_batch`）
+    /// 必须继续发送裸源码，否则历史 LanceDB 向量与查询向量落在不同分布。
+    pub fn format_query(&self, query: &str) -> String {
+        self.embedding_provider.format_query(query)
+    }
+
     /// Search for code blocks using semantic search
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, anyhow::Error> {
         // 1. Generate embedding for the query
-        let query_vector = self.embedding_provider.get_embedding(query).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        //    只对 query 侧注入 instruct 前缀（Qwen3-Embedding instruction-aware / 非对称检索）
+        let formatted_query = self.embedding_provider.format_query(query);
+        let query_vector = self.embedding_provider.get_embedding(&formatted_query).await.map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // 2. Search in LanceDB
         let table = self.connection.open_table(&self.table_name).execute().await?;
@@ -1016,6 +1079,180 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].symbol_name, "test_fn");
         assert_eq!(results[0].file_path, test_file_path_str);
+
+        Ok(())
+    }
+
+    // ---- query-side instruct prefix (Qwen3-Embedding asymmetric retrieval) ----
+
+    /// ①正常指令 + 查询：与官方 `get_detailed_instruct` 模板**逐字节**一致。
+    /// `Instruct:` 冒号后有一个空格，中间是 \n，`Query:` 冒号后**没有空格**。
+    #[test]
+    fn build_instruct_query_matches_official_template_byte_for_byte() {
+        let out = build_instruct_query(
+            "Given a web search query, retrieve relevant passages that answer the query",
+            "how to parse toml",
+        );
+        assert_eq!(
+            out.as_bytes(),
+            b"Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:how to parse toml"
+        );
+        assert_eq!(
+            out,
+            "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:how to parse toml"
+        );
+        // 结构细节：前缀以 "Instruct: " 开头，"Query:" 后紧跟原文且无空格
+        assert!(out.starts_with("Instruct: "));
+        assert!(out.contains("\nQuery:how"));
+        assert!(!out.contains("Query: h"), "Query: 之后不能有空格");
+    }
+
+    /// ②instruct 为空字符串（配置显式关闭）→ 返回原查询，不加任何前缀。
+    #[test]
+    fn build_instruct_query_with_empty_instruct_returns_raw_query() {
+        assert_eq!(build_instruct_query("", "find login handler"), "find login handler");
+        assert_eq!(build_instruct_query("", "解析配置文件"), "解析配置文件");
+        // 空 instruct 绝不产生 "Instruct:" 痕迹
+        assert!(!build_instruct_query("", "q").contains("Instruct:"));
+    }
+
+    /// ③中文查询原样保留在 `Query:` 之后（不被转写、不被截断、UTF-8 完整）。
+    #[test]
+    fn build_instruct_query_keeps_chinese_query_verbatim() {
+        let instruct = "Given a code search query, retrieve relevant functions or code snippets that answer the query.";
+        let query = "如何解析全局配置文件里的嵌入模型参数？";
+        let out = build_instruct_query(instruct, query);
+        assert_eq!(
+            out.as_bytes(),
+            format!("Instruct: {instruct}\nQuery:{query}").as_bytes()
+        );
+        let (head, tail) = out.split_once('\n').expect("one newline separator");
+        assert_eq!(head, format!("Instruct: {instruct}"));
+        assert_eq!(tail, format!("Query:{query}"));
+        assert_eq!(tail.strip_prefix("Query:"), Some(query));
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    /// ④空白查询：不加前缀，保持既有"空输入直接报错"的行为，避免只 embedding 指令本身。
+    #[test]
+    fn build_instruct_query_with_blank_query_returns_raw_query() {
+        assert_eq!(build_instruct_query("some instruct", ""), "");
+        assert_eq!(build_instruct_query("some instruct", "   "), "   ");
+    }
+
+    /// 默认指令必须是官方建议的英文单句（无换行），且逐字与需求一致。
+    #[test]
+    fn default_query_instruct_is_the_official_style_english_sentence() {
+        assert_eq!(
+            DEFAULT_QUERY_INSTRUCT,
+            "Given a code search query, retrieve relevant functions or code snippets that answer the query."
+        );
+        assert!(!DEFAULT_QUERY_INSTRUCT.contains('\n'));
+        assert!(DEFAULT_QUERY_INSTRUCT.is_ascii());
+    }
+
+    /// provider 层：默认 instruct 生效；with_instruct("") 关闭。
+    #[test]
+    fn provider_format_query_uses_configured_instruct() {
+        let p = OpenAICompatibleEmbeddingProvider::new(
+            "sk-not-used".to_string(),
+            Some("https://api.siliconflow.cn/v1".to_string()),
+            "Qwen/Qwen3-Embedding-4B".to_string(),
+        );
+        // new() 的缺省即默认指令
+        assert_eq!(
+            p.format_query("vector store").as_bytes(),
+            format!("Instruct: {DEFAULT_QUERY_INSTRUCT}\nQuery:vector store").as_bytes()
+        );
+        // 自定义
+        let p2 = p.with_instruct("Given a question, retrieve matching code".to_string());
+        assert_eq!(p2.format_query("abc"), "Instruct: Given a question, retrieve matching code\nQuery:abc");
+        // 显式关闭
+        let p3 = OpenAICompatibleEmbeddingProvider::new(
+            "sk-not-used".to_string(),
+            None,
+            "Qwen/Qwen3-Embedding-4B".to_string(),
+        )
+        .with_instruct(String::new());
+        assert_eq!(p3.format_query("abc"), "abc");
+    }
+
+    /// service 层查询入口把前缀委托给 provider；mock provider（恒等）不受影响。
+    #[tokio::test]
+    async fn service_format_query_delegates_to_provider() {
+        let dir = tempdir().unwrap();
+        let provider = Box::new(
+            OpenAICompatibleEmbeddingProvider::new(
+                "sk-not-used".to_string(),
+                None,
+                "Qwen/Qwen3-Embedding-4B".to_string(),
+            )
+            .with_instruct(DEFAULT_QUERY_INSTRUCT.to_string()),
+        );
+        let service =
+            EmbeddingService::new_with_provider(dir.path().to_str().unwrap(), "t".to_string(), provider)
+                .await
+                .unwrap();
+        assert_eq!(
+            service.format_query("查找索引重建入口").as_bytes(),
+            format!("Instruct: {DEFAULT_QUERY_INSTRUCT}\nQuery:查找索引重建入口").as_bytes()
+        );
+    }
+
+    /// 入库/文档路径使用的 mock provider 默认 format_query 必须是恒等（前缀是显式调用，不是隐式注入）。
+    #[tokio::test]
+    async fn mock_provider_format_query_is_identity_by_default() {
+        let dir = tempdir().unwrap();
+        let provider = Box::new(MockEmbeddingProvider::new());
+        let service =
+            EmbeddingService::new_with_provider(dir.path().to_str().unwrap(), "t2".to_string(), provider)
+                .await
+                .unwrap();
+        assert_eq!(service.format_query("fn main() {}"), "fn main() {}");
+        assert_eq!(service.format_query(""), "");
+    }
+
+    /// 端到端（不联网）：`EmbeddingService::new` 必须把 config.embedding.instruct 透传给 provider。
+    /// 缺省 → 默认指令；显式空串 → 完全不加前缀。
+    #[tokio::test]
+    async fn service_new_honours_config_instruct_three_states() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let db = dir.path().to_str().unwrap();
+
+        // 旧配置：没有 instruct 字段 → 默认指令生效
+        let cfg: Config = serde_json::from_str(
+            r#"{"embedding":{"api_token":"sk-not-used","model":"Qwen/Qwen3-Embedding-4B","dimensions":2560}}"#,
+        )?;
+        let svc = EmbeddingService::new(db, "t_default".to_string(), Some(&cfg), None).await?;
+        assert_eq!(
+            svc.format_query("find the entry point").as_bytes(),
+            format!("Instruct: {DEFAULT_QUERY_INSTRUCT}\nQuery:find the entry point").as_bytes()
+        );
+
+        // 显式空串 → 关闭注入
+        let cfg: Config = serde_json::from_str(
+            r#"{"embedding":{"api_token":"sk-not-used","dimensions":2560,"instruct":""}}"#,
+        )?;
+        let svc = EmbeddingService::new(db, "t_off".to_string(), Some(&cfg), None).await?;
+        assert_eq!(svc.format_query("find the entry point"), "find the entry point");
+
+        // 自定义指令 → 使用该指令
+        let cfg: Config = serde_json::from_str(
+            r#"{"embedding":{"api_token":"sk-not-used","dimensions":2560,"instruct":"Given a bug report, retrieve the faulty function"}}"#,
+        )?;
+        let svc = EmbeddingService::new(db, "t_custom".to_string(), Some(&cfg), None).await?;
+        assert_eq!(
+            svc.format_query("空指针崩溃"),
+            "Instruct: Given a bug report, retrieve the faulty function\nQuery:空指针崩溃"
+        );
+
+        // 维度/模型保持不变（本改动不得触碰维度、模型名、请求体结构）
+        let cfg: Config = serde_json::from_str(
+            r#"{"embedding":{"api_token":"sk-not-used","model":"Qwen/Qwen3-Embedding-4B","dimensions":2560}}"#,
+        )?;
+        let svc = EmbeddingService::new(db, "t_dims".to_string(), Some(&cfg), None).await?;
+        assert_eq!(svc.dimensions, 2560);
+        assert_eq!(svc.embedding_provider.model(), "Qwen/Qwen3-Embedding-4B");
 
         Ok(())
     }

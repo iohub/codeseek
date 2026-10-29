@@ -44,6 +44,15 @@ impl Default for HybridSearchConfig {
     }
 }
 
+/// Qwen3-Embedding 官方查询侧指令（instruction-aware，非对称检索）。
+///
+/// 官方规范：只有 **query** 侧需要加 `Instruct: {task}\nQuery:{query}` 前缀；
+/// document / passage（本项目即入库的代码块、知识记录）**绝对不加**任何指令，
+/// 否则已有 LanceDB 向量索引与新查询向量处于不同分布，检索质量退化。
+/// 官方另建议：指令用英文书写，每个 query 配一句任务描述。
+pub const DEFAULT_QUERY_INSTRUCT: &str =
+    "Given a code search query, retrieve relevant functions or code snippets that answer the query.";
+
 /// 嵌入配置
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct EmbeddingConfig {
@@ -57,12 +66,35 @@ pub struct EmbeddingConfig {
     pub api_base_url: String,
     #[serde(default = "default_dimensions")]
     pub dimensions: usize,
+    /// 查询侧 instruct 前缀中的任务描述。**仅作用于查询，不作用于入库**。
+    ///
+    /// 语义约定（三态）：
+    /// - 字段缺省（旧配置文件 / 整个 embedding 段缺失）→ 使用 [`DEFAULT_QUERY_INSTRUCT`]
+    /// - 显式配置为 `""`（或纯空白）→ **关闭** instruct 注入，查询保持裸文本
+    /// - 显式配置为其它文本 → 使用该文本
+    #[serde(default = "default_instruct")]
+    pub instruct: Option<String>,
 }
 
 fn default_provider() -> String { "openai-compatible".to_string() }
 fn default_model() -> String { "Qwen/Qwen3-Embedding-4B".to_string() }
 fn default_api_base_url() -> String { "https://api.siliconflow.cn/v1".to_string() }
 fn default_dimensions() -> usize { 2560 }
+fn default_instruct() -> Option<String> { Some(DEFAULT_QUERY_INSTRUCT.to_string()) }
+
+impl EmbeddingConfig {
+    /// 实际生效的查询侧指令文本。返回**空串**表示关闭 instruct 注入。
+    ///
+    /// `Option::None`（字段缺省）与 `Some("")`（显式关闭）走不同分支，
+    /// 因此调用方不能用 `unwrap_or_default()` 抹平这个区别。
+    pub fn effective_instruct(&self) -> &str {
+        match self.instruct.as_deref() {
+            None => DEFAULT_QUERY_INSTRUCT,
+            Some(s) if s.trim().is_empty() => "",
+            Some(s) => s.trim(),
+        }
+    }
+}
 
 /// 索引配置
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -248,4 +280,80 @@ impl Config {
     }
 
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 旧配置文件（完全没有 instruct 字段）必须能正常反序列化，并取到默认指令。
+    #[test]
+    fn embedding_config_without_instruct_field_uses_default() {
+        let json = r#"{
+            "provider": "openai-compatible",
+            "model": "Qwen/Qwen3-Embedding-4B",
+            "api_token": "sk-test",
+            "api_base_url": "https://api.siliconflow.cn/v1",
+            "dimensions": 2560
+        }"#;
+        let cfg: EmbeddingConfig = serde_json::from_str(json).expect("legacy config must deserialize");
+        assert_eq!(cfg.instruct.as_deref(), Some(DEFAULT_QUERY_INSTRUCT));
+        assert_eq!(cfg.effective_instruct(), DEFAULT_QUERY_INSTRUCT);
+    }
+
+    /// 显式配置为空字符串 → 字段保持空串（而不是被默认值覆盖），并且 effective_instruct 表示关闭。
+    #[test]
+    fn embedding_config_explicit_empty_instruct_stays_empty() {
+        let json = r#"{"instruct": ""}"#;
+        let cfg: EmbeddingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.instruct.as_deref(), Some(""));
+        assert_eq!(cfg.effective_instruct(), "");
+    }
+
+    /// 纯空白同样视为关闭（避免拼出 "Instruct: \nQuery:xxx" 这种污染查询）。
+    #[test]
+    fn embedding_config_whitespace_only_instruct_disables_injection() {
+        let cfg: EmbeddingConfig = serde_json::from_str(r#"{"instruct": "   "}"#).unwrap();
+        assert_eq!(cfg.effective_instruct(), "");
+    }
+
+    /// 自定义指令：原样使用（首尾空白裁掉）。
+    #[test]
+    fn embedding_config_custom_instruct_is_used_verbatim_after_trim() {
+        let cfg: EmbeddingConfig =
+            serde_json::from_str(r#"{"instruct": "  Given a question, retrieve matching documents  "}"#)
+                .unwrap();
+        assert_eq!(cfg.effective_instruct(), "Given a question, retrieve matching documents");
+    }
+
+    /// 整个 embedding 段缺失（`Config` 上挂了 `#[serde(default)]`）→ 走 Default(None) → 仍是默认指令。
+    #[test]
+    fn config_without_embedding_section_falls_back_to_default_instruct() {
+        let cfg: Config = serde_json::from_str(r#"{}"#).expect("empty config object must deserialize");
+        assert_eq!(cfg.embedding.instruct, None);
+        assert_eq!(cfg.embedding.effective_instruct(), DEFAULT_QUERY_INSTRUCT);
+        assert_eq!(DEFAULT_QUERY_INSTRUCT,
+            "Given a code search query, retrieve relevant functions or code snippets that answer the query.");
+    }
+
+    /// 保存/加载往返：自定义值与"显式关闭"都能无损写回 JSON。
+    #[test]
+    fn instruct_field_survives_serialization_round_trip() {
+        let cfg = EmbeddingConfig {
+            instruct: Some("custom instruct".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: EmbeddingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.effective_instruct(), "custom instruct");
+
+        let off = EmbeddingConfig {
+            instruct: Some(String::new()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&off).unwrap();
+        let back: EmbeddingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.instruct.as_deref(), Some(""));
+        assert_eq!(back.effective_instruct(), "");
+    }
 }
