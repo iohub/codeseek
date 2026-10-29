@@ -83,6 +83,10 @@ impl Default for CodeGraphStats {
 }
 
 /// 基于petgraph的代码图结构
+///
+/// 警告：结构体里的 `function_to_node` / `node_to_function` 缓存了 petgraph 的 `NodeIndex`，
+/// 整体 serde 落盘会把索引一起序列化，重新加载后与实际图结构耦合而失效。
+/// 落盘请走 `storage/petgraph_storage.rs` 的 `PetGraphStorage`（按函数/关系列表重建索引）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PetCodeGraph {
     /// petgraph有向图
@@ -138,21 +142,108 @@ impl PetCodeGraph {
         node_index
     }
 
+    /// 索引安全地删除一个函数节点（连带其全部关联边）。
+    ///
+    /// **必须经由本方法删除 `graph` 中的节点**：petgraph 的 `remove_node` 是 swap-remove，
+    /// 会把当前最后一个节点搬移到被删位置。若直接对 `self.graph` 调用 `remove_node`，
+    /// `function_to_node` / `node_to_function` 会静默失效，之后按 id 取到的 NodeIndex
+    /// 指向另一个函数，导致 `add_call_relation` / `get_callers` / `get_callees` 连错边。
+    ///
+    /// 返回是否真正删除了一个节点。
+    pub fn remove_function(&mut self, function_id: &Uuid) -> bool {
+        let node_index = match self.function_to_node.get(function_id).copied() {
+            Some(idx) => idx,
+            None => return false,
+        };
+
+        // remove_node 之后节点数据就没了，先取出来
+        let node_info = self
+            .graph
+            .node_weight(node_index)
+            .map(|f| (f.language.clone(), f.file_path.clone()));
+
+        // 随节点级联消失的边要递减调用计数；按 EdgeIndex 去重，避免自环被 Outgoing/Incoming 双计
+        let mut incident_edges: Vec<petgraph::graph::EdgeIndex> = self
+            .graph
+            .edges_directed(node_index, Direction::Outgoing)
+            .map(|e| e.id())
+            .collect();
+        incident_edges.extend(
+            self.graph
+                .edges_directed(node_index, Direction::Incoming)
+                .map(|e| e.id()),
+        );
+        let mut seen_edges = std::collections::HashSet::new();
+        for edge_index in incident_edges {
+            if !seen_edges.insert(edge_index) {
+                continue;
+            }
+            match self.graph.edge_weight(edge_index).map(|r| r.is_resolved) {
+                Some(true) => {
+                    self.stats.resolved_calls = self.stats.resolved_calls.saturating_sub(1)
+                }
+                Some(false) => {
+                    self.stats.unresolved_calls = self.stats.unresolved_calls.saturating_sub(1)
+                }
+                None => {}
+            }
+        }
+
+        // DiGraph 的节点索引恒为 0..node_count() 连续，故最后一个索引就是 swap 的搬移来源
+        let last_index = NodeIndex::new(self.graph.node_count() - 1);
+
+        self.graph.remove_node(node_index);
+
+        // 清掉被删节点自身的两条映射
+        if let Some(stale_id) = self.node_to_function.remove(&node_index) {
+            self.function_to_node.remove(&stale_id);
+        }
+        self.function_to_node.remove(function_id);
+
+        // 修正被搬移的节点：原 last_index 上的节点现在位于 node_index
+        if node_index != last_index {
+            if let Some(moved_id) = self.node_to_function.remove(&last_index) {
+                self.node_to_function.insert(node_index, moved_id);
+                self.function_to_node.insert(moved_id, node_index);
+            }
+        }
+
+        // 统计口径：按实际删除数递减，不在此处之外重复计算
+        self.stats.total_functions = self.stats.total_functions.saturating_sub(1);
+        if let Some((language, file_path)) = node_info {
+            if let Some(count) = self.stats.languages.get_mut(&language) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.stats.languages.remove(&language);
+                }
+            }
+            // 清理文件反向索引
+            if let Some(ids) = self.file_functions.get_mut(&file_path) {
+                ids.retain(|id| id != function_id);
+                if ids.is_empty() {
+                    self.file_functions.remove(&file_path);
+                }
+            }
+        }
+
+        // 清理函数名反向索引（支持重载的 Vec）
+        for ids in self.function_names.values_mut() {
+            ids.retain(|id| id != function_id);
+        }
+        self.function_names.retain(|_, ids| !ids.is_empty());
+
+        true
+    }
+
     /// 删除指定文件的所有函数及其调用关系（增量更新时使用）
+    ///
+    /// 逐个走索引安全的 `remove_function`；`stats.total_functions` / `stats.languages` /
+    /// 调用计数都在其中按实际删除数修正，此处不再重复递减。
     pub fn remove_functions_by_file(&mut self, file_path: &PathBuf) {
         if let Some(function_ids) = self.file_functions.remove(file_path) {
             for id in &function_ids {
-                if let Some(node_index) = self.function_to_node.remove(id) {
-                    self.node_to_function.remove(&node_index);
-                    // Remove all edges connected to this node
-                    self.graph.remove_node(node_index);
-                }
-                self.function_names.iter_mut().for_each(|(_, ids)| {
-                    ids.retain(|x| x != id);
-                });
-                self.function_names.retain(|_, ids| !ids.is_empty());
+                self.remove_function(id);
             }
-            self.stats.total_functions -= function_ids.len();
         }
     }
 
@@ -342,9 +433,26 @@ impl PetCodeGraph {
     }
 
     /// 更新统计信息
+    ///
+    /// 注意：`resolved_calls` / `unresolved_calls` 现在按 `graph.edge_weights()` 全量重算
+    /// （一次 O(E) 遍历），因此即使历史持久化文件里存了虚高数字也会被纠正；
+    /// 请在增量批次结束时调用，不要放进单条删除/添加的热路径。
+    /// `total_files` / `total_languages` 的重算保持原样。
     pub fn update_stats(&mut self) {
         self.stats.total_files = self.file_functions.len();
         self.stats.total_languages = self.stats.languages.len();
+
+        let mut resolved_calls = 0usize;
+        let mut unresolved_calls = 0usize;
+        for relation in self.graph.edge_weights() {
+            if relation.is_resolved {
+                resolved_calls += 1;
+            } else {
+                unresolved_calls += 1;
+            }
+        }
+        self.stats.resolved_calls = resolved_calls;
+        self.stats.unresolved_calls = unresolved_calls;
     }
 
     /// 获取所有函数
@@ -433,6 +541,10 @@ pub struct EntityEdge {
 }
 
 /// 实体图（类、函数等实体的结构关系图）
+///
+/// 警告：`entity_to_node` / `node_to_entity` 缓存了 petgraph 的 `NodeIndex`，
+/// 整体 serde 落盘会把索引一起序列化，重新加载后与实际图结构耦合而失效；
+/// 删除节点请走 `remove_entity`（内部会修正 swap 搬移的映射）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityGraph {
     /// petgraph有向图
@@ -618,46 +730,81 @@ impl EntityGraph {
         }
     }
 
+    /// 索引安全地从图中移除节点，并修正被 petgraph swap-remove 搬移的映射。
+    ///
+    /// 同 `PetCodeGraph::remove_function`：**不要**直接对 `self.graph` 调用 `remove_node`，
+    /// 否则 `entity_to_node` / `node_to_entity` 会静默失效（末位节点被搬移到被删位置）。
+    fn remove_node_index(&mut self, node_index: NodeIndex, entity_id: &Uuid) {
+        // DiGraph 节点索引恒为 0..node_count() 连续，故最后一个索引就是 swap 的搬移来源
+        let last_index = NodeIndex::new(self.graph.node_count() - 1);
+
+        self.graph.remove_node(node_index);
+
+        if let Some(stale_id) = self.node_to_entity.remove(&node_index) {
+            self.entity_to_node.remove(&stale_id);
+        }
+        self.entity_to_node.remove(entity_id);
+
+        // 修正被搬移的节点：原 last_index 上的实体现在位于 node_index
+        if node_index != last_index {
+            if let Some(moved_id) = self.node_to_entity.remove(&last_index) {
+                self.node_to_entity.insert(node_index, moved_id);
+                self.entity_to_node.insert(moved_id, node_index);
+            }
+        }
+    }
+
     /// 移除实体及其相关边
+    ///
+    /// 顺序：先取出节点信息并修正统计 → `remove_node` → 清两条映射 → 修正被搬移的映射项。
     pub fn remove_entity(&mut self, entity_id: &Uuid) -> bool {
-        if let Some(&node_index) = self.entity_to_node.get(entity_id) {
-            // 获取实体信息用于清理索引
-            if let Some(entity) = self.graph.node_weight(node_index) {
-                match entity {
-                    EntityNode::Class(class) => {
-                        // 清理类名索引
-                        if let Some(ids) = self.class_names.get_mut(&class.name) {
-                            ids.retain(|id| id != entity_id);
-                            if ids.is_empty() {
-                                self.class_names.remove(&class.name);
-                            }
-                        }
-                        // 清理文件索引
-                        if let Some(ids) = self.file_classes.get_mut(&class.file_path) {
-                            ids.retain(|id| id != entity_id);
-                            if ids.is_empty() {
-                                self.file_classes.remove(&class.file_path);
-                            }
-                        }
-                        self.stats.total_classes = self.stats.total_classes.saturating_sub(1);
-                    },
-                    EntityNode::Function(_) => {
-                        self.stats.total_functions = self.stats.total_functions.saturating_sub(1);
-                    }
+        let node_index = match self.entity_to_node.get(entity_id).copied() {
+            Some(idx) => idx,
+            None => return false,
+        };
+
+        // 先把要删的节点信息取出来再动手（remove_node 之后就取不到了）
+        let class_info = match self.graph.node_weight(node_index) {
+            Some(EntityNode::Class(class)) => {
+                Some((class.name.clone(), class.file_path.clone()))
+            }
+            _ => None,
+        };
+        let node_exists = self.graph.node_weight(node_index).is_some();
+        let is_function = matches!(
+            self.graph.node_weight(node_index),
+            Some(EntityNode::Function(_))
+        );
+
+        if let Some((class_name, class_file)) = class_info {
+            // 清理类名索引
+            if let Some(ids) = self.class_names.get_mut(&class_name) {
+                ids.retain(|id| id != entity_id);
+                if ids.is_empty() {
+                    self.class_names.remove(&class_name);
                 }
             }
-
-            // 从图中移除节点（会自动移除相关边）
-            self.graph.remove_node(node_index);
-            
-            // 清理映射
-            self.entity_to_node.remove(entity_id);
-            self.node_to_entity.remove(&node_index);
-            
-            true
-        } else {
-            false
+            // 清理文件索引
+            if let Some(ids) = self.file_classes.get_mut(&class_file) {
+                ids.retain(|id| id != entity_id);
+                if ids.is_empty() {
+                    self.file_classes.remove(&class_file);
+                }
+            }
         }
+
+        if node_exists {
+            if is_function {
+                self.stats.total_functions = self.stats.total_functions.saturating_sub(1);
+            } else {
+                self.stats.total_classes = self.stats.total_classes.saturating_sub(1);
+            }
+        }
+
+        // 从图中移除节点（会自动移除相关边）并修正映射
+        self.remove_node_index(node_index, entity_id);
+
+        true
     }
 
     /// 更新统计信息

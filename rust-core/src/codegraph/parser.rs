@@ -340,11 +340,8 @@ impl CodeParser {
         }
 
         for function_id in function_ids {
-            if let Some(node_index) = call_graph.get_node_index(&function_id) {
-                call_graph.graph.remove_node(node_index);
-                call_graph.function_to_node.remove(&function_id);
-                call_graph.node_to_function.remove(&node_index);
-            }
+            // 必须走索引安全的删除原语：直接 remove_node 会让 NodeIndex 映射因 swap 搬移而失效
+            call_graph.remove_function(&function_id);
         }
 
         // 清理索引
