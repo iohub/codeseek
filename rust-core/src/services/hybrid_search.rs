@@ -65,6 +65,10 @@ impl Default for HybridSearchConfig {
 ///      │
 ///      └──→ (Optional) Cross-Encoder Reranker ──→ Final Results
 /// ```
+///
+/// 降级方向（两通道对称）：dense 失败 → sparse-only；sparse 禁用/失败 → dense-only；
+/// dense 失败且无可用 sparse → 返回 `Err`，由调用方回退到 PetCodeGraph 名称搜索。
+/// 降级路径跳过 RRF 与 Reranker，详见 [`HybridSearchService::search`]。
 pub struct HybridSearchService {
     dense: Arc<EmbeddingService>,
     sparse: Arc<dyn TextSearchProvider>,
@@ -200,7 +204,16 @@ impl HybridSearchService {
     ///
     /// # Returns
     /// A vector of `FusedCandidate` sorted by fused RRF score (descending).
-    /// If sparse channel is disabled or unavailable, falls back to dense-only.
+    ///
+    /// 降级阶梯（两通道对称，任一条通道存活即出结果）：
+    /// - dense 失败 + sparse 可用 → sparse-only 候选（`Self::sparse_only_candidates`）
+    /// - sparse 禁用或失败 + dense 可用 → dense-only 候选（`Self::dense_only_candidates`）
+    /// - dense 失败且 sparse 被禁用 / 也失败 → 返回 `Err`，由调用方回退到
+    ///   PetCodeGraph 名称搜索（见 `main.rs` 的 `use_graph_fallback`）
+    ///
+    /// 降级路径**不执行 RRF 与 Reranker**：与现有 sparse 失败降级保持一致 —— 存活
+    /// 通道的候选缺少可比较的另一侧分数，且 BM25 命中不带 `code_block` 正文，
+    /// cross-encoder 无文本可打分，强行精排只会引入噪声。
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<FusedCandidate>> {
         if query.is_empty() {
             return Ok(Vec::new());
@@ -227,47 +240,52 @@ impl HybridSearchService {
             (self.dense.search(query, dense_limit).await, None)
         };
 
-        // Dense results are required — if they fail, the whole search fails
-        let dense_raw = dense_res.map_err(|e| {
-            anyhow!("Dense (vector) search failed: {}", e)
-        })?;
-
-        // Handle sparse results with graceful degradation
-        let sparse_results: Option<Vec<TextSearchResult>> = match sparse_res_opt {
-            None => None,
-            Some(Ok(results)) => {
-                debug!("Sparse channel returned {} results", results.len());
-                Some(results)
+        // 两通道结果对称处理：任一条通道存活即出结果，只有两条都不可用时才整体失败
+        let fused: Vec<FusedCandidate> = match (dense_res, sparse_res_opt) {
+            (Ok(dense), Some(Ok(sparse))) => {
+                debug!("Sparse channel returned {} results", sparse.len());
+                // Perform RRF fusion — 返回足够的候选供后续 rerank 使用
+                let rrf_limit = self.config.dense_limit.max(self.config.sparse_limit);
+                self.reciprocal_rank_fusion(dense, sparse, rrf_limit)
             }
-            Some(Err(e)) => {
+            (Ok(dense), Some(Err(e))) => {
                 warn!(
                     "Sparse (BM25) channel failed, falling back to dense-only: {}",
                     e
                 );
-                // Return dense results as dense-only candidates
-                return Ok(
-                    dense_raw
-                        .into_iter()
-                        .map(|sr| FusedCandidate {
-                            snippet_id: dense_snippet_id(&sr),
-                            final_score: sr.score as f64,
-                            file_path: sr.file_path,
-                            symbol_name: sr.symbol_name,
-                            language: sr.language,
-                            line_start: sr.line_start,
-                            line_end: sr.line_end,
-                            code_block: sr.code_block,
-                            source: CandidateSource::DenseOnly,
-                        })
-                        .take(limit)
-                        .collect(),
+                // 降级：不施加 RRF / 短代码惩罚，也不进 reranker
+                return Ok(Self::dense_only_candidates(dense, limit));
+            }
+            (Ok(dense), None) => {
+                // sparse 被禁用：空 sparse 走 fusion，等价于融合后的 dense-only 排序
+                let rrf_limit = self.config.dense_limit.max(self.config.sparse_limit);
+                self.reciprocal_rank_fusion(dense, Vec::new(), rrf_limit)
+            }
+            (Err(dense_e), Some(Ok(sparse))) => {
+                warn!(
+                    "Dense (vector) channel failed, falling back to sparse-only (BM25): {}",
+                    dense_e
                 );
+                // 降级：BM25 不存正文，cross-encoder 无文本可打分 → 同样跳过 reranker
+                return Ok(Self::sparse_only_candidates(sparse, limit));
+            }
+            (Err(dense_e), Some(Err(sparse_e))) => {
+                // 两条通道都不可用 → 聚合 Err，由调用方回退到 PetCodeGraph 名称搜索
+                return Err(anyhow!(
+                    "Hybrid search failed: dense (vector) channel: {}; sparse (BM25) channel: {}",
+                    dense_e,
+                    sparse_e
+                ));
+            }
+            (Err(e), None) => {
+                // 唯一通道（dense）失败且无备用通道 → 只能整体失败
+                return Err(anyhow!(
+                    "Dense (vector) search failed and sparse channel is disabled: {}",
+                    e
+                ));
             }
         };
 
-        // Perform RRF fusion — 返回足够的候选供后续 rerank 使用
-        let rrf_limit = self.config.dense_limit.max(self.config.sparse_limit);
-        let fused = self.reciprocal_rank_fusion(dense_raw, sparse_results.unwrap_or_default(), rrf_limit);
         debug!("Hybrid search returned {} fused candidates (before rerank)", fused.len());
 
         // Phase 2: Optional Cross-Encoder Rerank
@@ -281,6 +299,58 @@ impl HybridSearchService {
         let mut result = fused;
         result.truncate(limit);
         Ok(result)
+    }
+
+    /// 降级：仅 dense 通道可用时，把向量命中原样转成候选（不施加 RRF / 短代码惩罚）。
+    ///
+    /// 用于 sparse (BM25) 通道禁用之外的失败场景。顺序沿用 dense 通道自身的相似度
+    /// 排序，`final_score` 直接取向量分数，因此**不进 reranker**（另一侧分数缺失，
+    /// 融合与精排都没有可比对象）。纯函数，不依赖 `self`，便于单测。
+    fn dense_only_candidates(dense: Vec<SearchResult>, limit: usize) -> Vec<FusedCandidate> {
+        dense
+            .into_iter()
+            .map(|sr| FusedCandidate {
+                snippet_id: dense_snippet_id(&sr),
+                final_score: sr.score as f64,
+                file_path: sr.file_path,
+                symbol_name: sr.symbol_name,
+                language: sr.language,
+                line_start: sr.line_start,
+                line_end: sr.line_end,
+                code_block: sr.code_block,
+                source: CandidateSource::DenseOnly,
+            })
+            .take(limit)
+            .collect()
+    }
+
+    /// 降级：仅 sparse (BM25) 通道可用时，把 BM25 命中原样转成候选。
+    ///
+    /// BM25 不存储正文（schema 里 content 非 STORED），故 `code_block` 为空、
+    /// `line_end` 为 0；行号优先取 provider 已填充的 `line_start`，否则从
+    /// `snippet_id` 反解（见 [`sparse_line_start`]）。顺序沿用 BM25 相关性排序，
+    /// `final_score` 直接取 BM25 分数，因此同样**不进 reranker** —— cross-encoder
+    /// 没有正文可打分。纯函数，不依赖 `self`，便于单测。
+    fn sparse_only_candidates(sparse: Vec<TextSearchResult>, limit: usize) -> Vec<FusedCandidate> {
+        sparse
+            .into_iter()
+            .map(|sr| {
+                // 行号必须在任何字段被 move 之前求出（snippet_id 里带着真实行号）
+                let line_start = sparse_line_start(&sr);
+                FusedCandidate {
+                    snippet_id: sr.snippet_id.clone(),
+                    final_score: sr.score as f64,
+                    file_path: sr.file_path,
+                    symbol_name: sr.symbol_name,
+                    language: sr.language,
+                    line_start,
+                    line_end: 0,
+                    code_block: String::new(),
+                    source: CandidateSource::SparseOnly,
+                }
+            })
+            .take(limit)
+            .collect()
     }
 
     /// Reciprocal Rank Fusion (RRF) for combining ranked lists.
@@ -609,5 +679,73 @@ mod tests {
         assert_eq!(c.line_start, 5);
         assert_eq!(c.line_end, 9);
         assert_eq!(c.language, "rust");
+    }
+
+    #[test]
+    fn sparse_only_candidates_degrade_survives_dense_failure() {
+        // dense 通道失败时的降级路径：BM25 命中必须原样成为候选，而不是被整体 Err 丢掉
+        let id = CodeChunk::generate_id("/tmp/a.rs", 10, "foo");
+        let sparse = make_sparse(&id, "/tmp/a.rs", "foo", 0);
+        let expected_score = sparse.score;
+
+        let candidates = HybridSearchService::sparse_only_candidates(vec![sparse], 10);
+
+        assert_eq!(candidates.len(), 1);
+        let c = &candidates[0];
+        assert_eq!(c.source, CandidateSource::SparseOnly);
+        assert_eq!(c.snippet_id, id);
+        assert_eq!(c.file_path, "/tmp/a.rs");
+        assert_eq!(c.symbol_name, "foo");
+        assert_eq!(c.language, "rust");
+        assert_eq!(c.line_start, 10, "行号应从 snippet_id 反解得到");
+        assert_eq!(c.line_end, 0, "BM25 通道没有结束行");
+        assert!(c.code_block.is_empty(), "BM25 通道不存储正文");
+        assert_eq!(c.final_score, expected_score as f64, "降级不施加 RRF，分数原样保留");
+    }
+
+    #[test]
+    fn dense_only_candidates_truncates_to_limit() {
+        // sparse 通道失败时的降级路径：保持 dense 顺序并按 limit 截断
+        let dense = vec![
+            make_dense("/tmp/a.rs", "foo", 1, 9),
+            make_dense("/tmp/b.rs", "bar", 11, 19),
+            make_dense("/tmp/c.rs", "baz", 21, 29),
+        ];
+
+        let candidates = HybridSearchService::dense_only_candidates(dense, 2);
+
+        assert_eq!(candidates.len(), 2, "降级路径必须按 limit 截断");
+        assert_eq!(candidates[0].snippet_id, CodeChunk::generate_id("/tmp/a.rs", 1, "foo"));
+        assert_eq!(candidates[1].snippet_id, CodeChunk::generate_id("/tmp/b.rs", 11, "bar"));
+        for c in &candidates {
+            assert_eq!(c.source, CandidateSource::DenseOnly);
+            assert!(!c.code_block.is_empty(), "正文应由 dense 通道自带");
+            assert_eq!(c.final_score, 0.9_f32 as f64, "不做融合，取向量分数");
+        }
+    }
+
+    #[test]
+    fn sparse_only_candidates_preserves_input_rank_order() {
+        // 降级路径不重排：BM25 通道自身已按相关性排序，输出顺序必须一致
+        let high = {
+            let mut s = make_sparse(&CodeChunk::generate_id("/tmp/a.rs", 1, "high"), "/tmp/a.rs", "high", 1);
+            s.score = 8.0;
+            s
+        };
+        let low = {
+            let mut s = make_sparse(&CodeChunk::generate_id("/tmp/b.rs", 5, "low"), "/tmp/b.rs", "low", 5);
+            s.score = 2.0;
+            s
+        };
+
+        let candidates = HybridSearchService::sparse_only_candidates(vec![high, low], 10);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].symbol_name, "high");
+        assert_eq!(candidates[1].symbol_name, "low");
+        assert_eq!(candidates[0].final_score, 8.0);
+        assert_eq!(candidates[1].final_score, 2.0);
+        // provider 已给出非 0 行号时以它为准，不从 id 反解覆盖
+        assert_eq!(candidates[1].line_start, 5);
     }
 }
