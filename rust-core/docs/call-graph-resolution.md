@@ -2,14 +2,17 @@
 
 > 本文是 codeseek 调用边解析引擎的**权威文档**：改造动机、九级分层口径、边的元信息、
 > 幽灵节点规则、图缓存契约、唯一真源链路、已知缺口、回滚与验证。所有 `文件:行号`
-> 均为 `rg -n` 实测所得（本文措辞与源码注释的校准位于 HEAD 221888b；锚点处数随源码演进不稳定，故此处不写死具体处数，逐行漂移情况见下方"已知缺口"说明；文中引用的 8 个测试文件名当前均存在）。改解析行为之前先读这里，就能改对地方。
->
-> ⚠ 已知缺口：`993465f` 在 `rust-core/src/codegraph/parser.rs:1484` 附近净插入 9 行，因此该文件 1484 行之后的锚点（§1 的 `parser.rs:1701` / `1706` / `2014` / `2063` / `2088` 等）相对当前源码整体 **+9 漂移**；本轮按任务约束只校准戳与源码注释，正文锚点待专门一轮重校。
+> 均为 `rg -n` 实测所得，并已在本仓库 HEAD `ee91b65` 上**逐条重校**：全文 94 个唯一 `文件:行号`
+> 锚点中 **70** 处原样保留（行号即真）、**23** 处按真实行号修正（多为 `993465f` 在 `parser.rs`
+> 净插入 9 行造成的整体漂移，以及 `args.rs` +1 / `scope.rs` 重排造成的局部漂移）、
+> **1** 处修正的是区间端点（`src/codegraph/resolution/mod.rs:579`–`584`：原端点没盖住 `site.line`）、
+> **0** 处降级为无行号（每一条都能定位到唯一对应项，故无需"只留符号名不留行号"）；
+> 文中引用的 8 个测试文件名当前均存在。改解析行为之前先读这里，就能改对地方。
 
 CLI 默认 `--resolver=layered`；`--resolver=legacy` 是逐字节回滚逃生口
-（`src/cli/args.rs:93` 的 `default_value = "layered"`、`src/cli/args.rs:96` 的 `pub resolver`，
-默认值实现见 `src/cli/args.rs:46`）。`--max-candidates` 默认 8（`src/cli/args.rs:104`），
-`--levels` 诊断开关默认空串=全层开启（`src/cli/args.rs:127`），`--force-reindex`（`src/cli/args.rs:78`）。
+（`src/cli/args.rs:94` 的 `default_value = "layered"`、`src/cli/args.rs:97` 的 `pub resolver`，
+默认值实现见 `src/cli/args.rs:46`）。`--max-candidates` 默认 8（`src/cli/args.rs:105`），
+`--levels` 诊断开关默认空串=全层开启（`src/cli/args.rs:128`），`--force-reindex`（`src/cli/args.rs:79`）。
 
 ---
 
@@ -17,19 +20,19 @@ CLI 默认 `--resolver=layered`；`--resolver=legacy` 是逐字节回滚逃生�
 
 1. **名字相等就命中、多候选取第一个**：callee 解析走四级回退（本文件裸名 first-wins →
    全仓 `find_functions_by_name().first()` → 限定名子串），见 `src/codegraph/parser.rs:161`
-   的口径注释与 `src/codegraph/parser.rs:2014` 的实现描述。后果：同名函数必然只命中其一，
+   的口径注释与 `src/codegraph/parser.rs:2021`–`2024` 的实现描述。后果：同名函数必然只命中其一，
    且命中谁取决于扫描顺序。
 2. **同名在名字索引里被 `or_insert` 塌缩**：全量 legacy 每轮预建 `FunctionNameIndex`，
-   同名第二个及以后被 `or_insert` 静默丢弃 —— 定义在 `src/codegraph/parser.rs:1701`
-   （`_build_function_name_index`），塌缩发生在本文件 `src/codegraph/parser.rs:1706`
+   同名第二个及以后被 `or_insert` 静默丢弃 —— 定义在 `src/codegraph/parser.rs:1710`
+   （`_build_function_name_index`），塌缩发生在本文件 `src/codegraph/parser.rs:1715`
    （`index.entry(function.name.as_str()).or_insert(function)`）。
 3. **行区间 first-wins 决定 caller（闭包误归外层）**：caller 归属在"本文件函数切片"上
    按行区间取第一个覆盖它的函数，见 `src/codegraph/parser.rs:160`、`src/codegraph/parser.rs:185`。
    后果：内层闭包/嵌套函数里的调用点被误归到最外层函数。
 4. **`namespace.contains(prefix)` 子串伪限定名**：限定名解析用裸子串匹配，
-   实现在 `src/codegraph/parser.rs:2088`
+   实现在 `src/codegraph/parser.rs:2097`
    （`if func.namespace.contains(prefix) || func.name == method_name`），缺陷描述见
-   `src/codegraph/parser.rs:2063`。后果：`"ab"` 能命中 `"abc.rs::x"`，把不相干的模块算作限定命中。
+   `src/codegraph/parser.rs:2072`。后果：`"ab"` 能命中 `"abc.rs::x"`，把不相干的模块算作限定命中。
 
 > ⚠ 这四点是 P0 记录在案的"三套并行 first-wins 实现，改一处漏一处"缺陷的根源
 > （`src/codegraph/parser.rs:59`）。layered 引擎把上述判定**全部重做**，但 legacy 路径
@@ -111,7 +114,7 @@ is_resolved = (resolution_level > 0 && candidate_count == 1)
   `src/codegraph/resolution/mod.rs:571`–`573` 是实现：
   `.find_functions_by_name(&site.callee_name).into_iter().find(|f| f.namespace == "unresolved")`）。
 - **`file_path`/`line` 归属首个调用点（跨文件共享）**：查不到才新建幽灵节点，用**当前**调用点的
-  `site.file`/`site.line` 造节点（`src/codegraph/resolution/mod.rs:579`–`582`）；后续同裸名调用点复用该 id，
+  `site.file`/`site.line` 造节点（`src/codegraph/resolution/mod.rs:579`–`584`）；后续同裸名调用点复用该 id，
   因此节点身份来自**首个**把它造出来的调用点，可能被跨文件共享。
 - **边侧 `callee_file` 仍取 `site.file`**：`CallRelation::layered_ghost(...)` 传入
   `site.file.clone()`（`src/codegraph/resolution/mod.rs:592`–`598`），再走 `upsert_call_site_edges`
@@ -126,13 +129,13 @@ is_resolved = (resolution_level > 0 && candidate_count == 1)
   2. **节点入图顺序不依赖 HashMap 迭代**：全量分支过去直接 `for (_, fns) in &self.file_functions`
      （`HashMap`，迭代序 = 每进程 `RandomState` 种子）把函数灌进 `code_graph`，节点/
      `function_names` 的相对顺序随之抖动。现改为**先 `keys().collect() + sort()` 再入图**
-     （`src/codegraph/parser.rs:1489` 起的 `ordered_files`），入图顺序只由文件路径决定。
+     （`src/codegraph/parser.rs:1493`–`1494` 起的 `ordered_files`），入图顺序只由文件路径决定。
   3. **作用域/caller 的 tie-break 用"匿名安全名"**：tree-sitter 给匿名闭包/函数造的名字是
      `format!("anon-{guid}", guid = Uuid::new_v4())`（`src/codegraph/treesitter/parsers/js.rs:173`
      等），每次建图都是新随机串。`innermost_scope_containing` / `scopes_containing` /
      `ScopeTree::from_items` 的反推父候选排序若拿这个 `name` 当比较键，压缩 JS 里大量
      "同 span、同 depth、同为匿名"的作用域就会随机翻转最内层选择，使 caller 在 `onClick` 与
-     `Va` 之间来回跳。现统一经 `scope_sort_name`（`src/codegraph/resolution/scope.rs:20`）把
+     `Va` 之间来回跳。现统一经 `scope_sort_name`（`src/codegraph/resolution/scope.rs:33`）把
      `anon-*` 归一为空串 ⇒ 这些作用域在 name 档相等，落到 `self.scopes` 的稳定插入顺序
      （= tree-sitter 符号产出顺序）上，与进程种子彻底无关。
 
@@ -154,19 +157,19 @@ is_resolved = (resolution_level > 0 && candidate_count == 1)
   版本门禁 `src/storage/petgraph_storage.rs:206`；档位门禁
   `validate_resolution_stamp(expected_mode, expected_max_candidates)`
   （`src/storage/petgraph_storage.rs:228`，`resolver_mode` 不符或 `max_candidates` 不符均判失效）。
-  两个读者调用点：`src/codegraph/parser.rs:1544`（`_load_existing_graph` 用 `self.resolver_mode()`/
-  `self.max_candidates()`）与 `src/main.rs:103`（`init` 直接读缓存，用 `cli.resolver`/`cli.max_candidates`）。
+  两个读者调用点：`src/codegraph/parser.rs:1542`–`1543`（`_load_existing_graph` 的期望档位取自
+  `self.resolver_mode.as_str()` / `self.max_candidates`）与 `src/main.rs:103`（`init` 直接读缓存，用 `cli.resolver`/`cli.max_candidates`）。
   空串/0 档位同样过不了门禁，语义与"版本不符"一致。
 - **`--levels` 的 fail-fast 约束（本任务交付物 1）**：`--levels` 会改变产边结果，但它**不在**档位戳里
   （戳只有 `resolver_mode`/`max_candidates`）。为避免"改了诊断层却复用旧图"得到混档图，采取
   **显式拒绝**而非再升 schema：`--levels` 取**非默认值**（默认=空=全层开启）且**未同时传 `--force-reindex`**
   时，CLI 在任何缓存/图读取之前就返回可读 `Err(String)` 并退出非零码。守卫本体
-  `Cli::validate_levels_against_cache`（`src/cli/args.rs:185`），非默认判定
-  `Cli::levels_deviates_from_default`（`src/cli/args.rs:146`，比较时忽略 bit0 `Unresolved` 占位层，
+  `Cli::validate_levels_against_cache`（`src/cli/args.rs:186`），非默认判定
+  `Cli::levels_deviates_from_default`（`src/cli/args.rs:147`，比较时忽略 bit0 `Unresolved` 占位层，
   故 `all`/`l1-l8` 判为默认、不触发）。**派发点两处，均早于缓存读取**：`src/main.rs:63`（`Cli::parse()` 之后立即调用）
   与 `src/cli/runner.rs:30`（穷尽 match 分发入口同样先调用一次）—— 二者是并行的真实入口，都必须覆盖。
   端到端行为由 `tests/test_p3_final.rs` 的 `p3b_levels_flag_fail_fast_requires_force_reindex` 钉住。
-- **`--force-reindex` 逃生口**：置位时放行，强制全量重建（`src/cli/args.rs:78`）。
+- **`--force-reindex` 逃生口**：置位时放行，强制全量重建（`src/cli/args.rs:79`）。
 - **运维提示**：首次从 `GRAPH_SCHEMA_VERSION < 3` 的旧缓存升级、或首次切到 layered，都会触发一次
   全量重建（不报错、不 panic，只是变慢）；这是预期的一次性成本。
 
@@ -177,18 +180,18 @@ is_resolved = (resolution_level > 0 && candidate_count == 1)
 layered 全量建图的产边链路（定义 → 在全量主循环里的调用点）：
 
 1. **AST 符号 → 调用点**：`call_sites_from_symbols_with_source`
-   （定义 `src/codegraph/resolution/resolver.rs:391`；全量调用点 `src/codegraph/parser.rs:1866`，
+   （定义 `src/codegraph/resolution/resolver.rs:391`；全量调用点 `src/codegraph/parser.rs:1875`，
    刷新链路 `src/codegraph/parser.rs:259`）。用 `_with_source` 变体：AST 的 `namespace` 对调用符号
-   恒为空，限定名前缀只能从源码文本还原（口径注释 `src/codegraph/parser.rs:1863`）。
+   恒为空，限定名前缀只能从源码文本还原（口径注释 `src/codegraph/parser.rs:1871`–`1872`）。
 2. **不塌缩的候选索引**：`build_resolution_index_from_graph`
-   （定义 `src/codegraph/resolution/index.rs:556`；全量调用点 `src/codegraph/parser.rs:1835`，
+   （定义 `src/codegraph/resolution/index.rs:556`；全量调用点 `src/codegraph/parser.rs:1844`，
    增量 `src/codegraph/parser.rs:898`，刷新 `src/codegraph/parser.rs:254`）。
 3. **caller 归属**：`layered_caller_node`（定义 `src/codegraph/resolution/mod.rs:463`）→
-   作用域树 `innermost_scope_containing`（`src/codegraph/resolution/scope.rs:433`），
+   作用域树 `innermost_scope_containing`（`src/codegraph/resolution/scope.rs:472`），
    这是闭包/嵌套函数不再被误归外层的手段（`src/codegraph/resolution/mod.rs:454`）。
 4. **解析**：`resolve_call`（定义 `src/codegraph/resolution/resolver.rs:1352`；带配置的
    `resolve_call_with_config` `src/codegraph/resolution/resolver.rs:1296`，全量在
-   `src/codegraph/parser.rs:1881` 调用），内部 L0–L8 支配/排序分离 + `rank_candidates`
+   `src/codegraph/parser.rs:1890` 调用），内部 L0–L8 支配/排序分离 + `rank_candidates`
    （`src/codegraph/resolution/candidate.rs:243`）。
 5. **唯一边写入入口**：`PetCodeGraph::upsert_call_site_edges`
    （定义 `src/codegraph/types.rs:551`）—— 是 legacy/layered、全量/增量**四条产边路径共用**的
@@ -197,8 +200,8 @@ layered 全量建图的产边链路（定义 → 在全量主循环里的调用�
 
 ### 有意保留的 legacy 副本（登记）
 
-- 全量 legacy 路径仍用 `_analyze_file_calls_for_petgraph`（定义 `src/codegraph/parser.rs:1932`，
-  调用点 `src/codegraph/parser.rs:1775`）。**保留理由**（见 `src/codegraph/parser.rs:71`–`76`）：
+- 全量 legacy 路径仍用 `_analyze_file_calls_for_petgraph`（定义 `src/codegraph/parser.rs:1941`，
+  调用点 `src/codegraph/parser.rs:1784`）。**保留理由**（见 `src/codegraph/parser.rs:71`–`76`）：
   它带 `FunctionNameIndex` 的四级 callee 回退、且幽灵会**同时落成节点**，形成 legacy 特有的
   "同名幽灵跨行复用"，与刷新档口径本就不同；强行合并会改变 legacy 数值（红线 1）。它只服务
   `--resolver=legacy` 逃生口，layered 链路完全不经过它。
@@ -209,7 +212,7 @@ layered 全量建图的产边链路（定义 → 在全量主循环里的调用�
 
 - **闭包 `let f = |x| ...` 不产生可调用绑定**：layered 下这类调用点解析为 `level=0`（未解析）。
   根因是 AST 拿不到 lambda 事实 —— `ScopeKind::Closure` 目前只能由 `from_items` 手工建出
-  （`src/codegraph/resolution/scope.rs:710`），真实解析不产出；Rust 闭包也不进候选索引
+  （`src/codegraph/resolution/scope.rs:70`–`72`），真实解析不产出；Rust 闭包也不进候选索引
   （`src/codegraph/resolution/index.rs:551`）。**本轮不修**。
 - **js/ts 的 `const {x} = require("m")` 不产出 `ImportDeclaration`**：CJS 解构 require 未被识别为
   import，L4 拿不到绑定，调用点下沉到更粗的层（L6/L7）。见 `src/codegraph/resolution/imports.rs:42`
@@ -221,7 +224,7 @@ layered 全量建图的产边链路（定义 → 在全量主循环里的调用�
 - **~~压缩成单行的 JS fixture 有 caller 归属残余抖动~~（本已修复）**：此前 `simple_js_project/layered`
   的 `main.9d1c33d4.js` 在"有哈希、无图 ⇒ 全量重解析"这一轮（`p3b_incremental_rounds…` 的 R3）约 14%
   翻红：同一批幽灵边的 `caller_name` 在 `onClick` 与 `Va` 之间翻转。根因见 §4「确定性前提」第 2/3 条
-  （HashMap 入图顺序 + 匿名作用域名内嵌 `Uuid::new_v4()` 参与 tie-break）。现已通过 `parser.rs:1489` 的
+  （HashMap 入图顺序 + 匿名作用域名内嵌 `Uuid::new_v4()` 参与 tie-break）。现已通过 `parser.rs:1493` 的
   `ordered_files` 排序与 `scope.rs` 的 `scope_sort_name` 归一消除，并由新增守卫
   `tests/test_p3_final.rs::p3b_layered_reparse_is_deterministic_over_all_four_repos` 锁死（该守卫在修复前
   实测 7/10 翻红、修复后恒绿）。
@@ -231,7 +234,7 @@ layered 全量建图的产边链路（定义 → 在全量主循环里的调用�
 ## 8. 如何回滚
 
 `--resolver=legacy` 是逃生口：怀疑分层引擎把某仓产边弄坏时，一键退回与 P1 逐字节一致的行为
-（`src/cli/args.rs:93`/`96`）。**回滚必须搭配 `--force-reindex`**：因为 `resolver_mode` 在缓存档位戳里，
+（`src/cli/args.rs:94`/`97`）。**回滚必须搭配 `--force-reindex`**：因为 `resolver_mode` 在缓存档位戳里，
 mode 不符会被 `validate_resolution_stamp` 判失效并全量重建 —— 也就是说 legacy 与 layered 之间切换
 **天然要求重建一次**才能得到一致结果；带 `--force-reindex` 可显式表达意图、避免"半新半旧"的混档图。
 （注：仅切 mode 本身已会因档位戳不匹配触发重建；`--force-reindex` 用于在既有缓存上强制重算。）
