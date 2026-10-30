@@ -473,11 +473,11 @@ impl CodeParser {
         Some(ctx)
     }
 
-    /// 本轮使用的解析引擎模式（对应 CLI 的 `--resolver`）。
+    /// 本轮使用的解析引擎模式（对应 CLI 的 `--resolver`，默认 `Layered`）。
     ///
-    /// P2a：**只存不用**。P2b 起 `_find_callee_function` / `_resolve_callee_function` /
-    /// `_resolve_qualified_function_name` / `_build_function_name_index` /
-    /// `incremental.rs::_find_callee_function` 这五处才按它分叉。
+    /// 该模式在建图热路径上生效：`_analyze_file_calls` / `_build_function_name_index` /
+    /// `_resolve_callee_function` / `_resolve_qualified_function_name` 按它分叉；
+    /// 全量档的 legacy 路径另由 `_analyze_file_calls_for_petgraph` 独立实现。
     pub fn set_resolver_mode(&mut self, mode: ResolverMode) {
         self.resolver_mode = mode;
     }
@@ -861,8 +861,8 @@ impl CodeParser {
     /// Phase P2b：分层引擎的"单个最优答案"入口（接线点②③的共用薄调用）。
     ///
     /// 与 layered 发射器的区别只在**用法**：这里服务于"只能返回一个 id"的既有签名
-    /// （`_find_callee_function` / `_resolve_callee_function` /
-    /// `incremental.rs::_find_callee_function`），发射器才会把全部候选落成多条边。
+    /// （`_resolve_callee_function` / `_resolve_qualified_function_name`），
+    /// layered 发射器才会把全部候选落成多条边。
     ///
     /// 两条硬约束（任务交付物 2）：
     /// - 索引一律走 `build_resolution_index_from_graph`，**不读**

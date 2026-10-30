@@ -17,25 +17,26 @@ impl Default for StorageMode {
     }
 }
 
-/// Phase P2a 交付物 3：调用边 callee 的解析引擎（`--resolver`）。
+/// 调用边 callee 的解析引擎（对应 CLI 的 `--resolver`）。
 ///
-/// - `Legacy`（**默认**）：完全维持现状 —— 五处同名 first-wins
-///   （`codegraph/parser.rs` 的 `_find_callee_function` / `_resolve_callee_function` /
-///   `_resolve_qualified_function_name` / `_build_function_name_index` 与
-///   `storage/incremental.rs` 的 `_find_callee_function`）一字未改。
-/// - `Layered`：分层精度解析（L1 词法 → L2 外围类型 → L3 receiver 类型 → L4 import 绑定
-///   → L5 限定名 → L6 同模块 → L7 全仓唯一 → L8 启发式）。
+/// - `Layered`（**默认**）：分层精度解析（L1 词法 → L2 外围类型 → L3 receiver 类型 →
+///   L4 import 绑定 → L5 限定名 → L6 同模块 → L7 全仓唯一 → L8 启发式；level 0 为
+///   `Unresolved` 占位）。歧义调用点每个候选一条边，并把层级 / 置信度 / 候选总数写进
+///   `CallRelation`。分层引擎已接入全部建图路径（全量 / 刷新 / 增量），四条产边路径统一经
+///   `PetCodeGraph::upsert_call_site_edges` 发射；`CallRelation` 已带解析元信息，
+///   `GRAPH_SCHEMA_VERSION` 现为 3。
+/// - `Legacy`（**仅作回滚逃生口，非默认**）：旧的同名 first-wins，行为与改造前逐字节一致，
+///   数值红线由 `tests/test_p1_edges_unchanged.rs` 守护。legacy 侧仍存在的解析入口为
+///   `codegraph/parser.rs` 的 `_resolve_callee_function` /
+///   `_resolve_qualified_function_name` / `_build_function_name_index`，以及全量档的
+///   `_analyze_file_calls_for_petgraph` / `emit_legacy_call_edges_for_file`。
 ///
-/// ⚠ **P2a 阶段这个开关不改变任何产边结果**：分层引擎已经实现但没有接进建图管线
-/// （只有 `tests/test_resolution_engine.rs` 与 `CodeParser::resolution_config` 消费它）。
-/// 真正生效在 P2b（同时给 `CallRelation` 加解析元信息并把 `GRAPH_SCHEMA_VERSION` 1→2）。
-/// 之所以现在就加 flag：CLI 链路（`cli → main.rs → services/analyzer.rs → CodeParser`）
-/// 必须先在 legacy 下被验证是通的，P2b 才只需改一处分支。
+/// 完整设计、图缓存契约与回滚口径见 `docs/call-graph-resolution.md`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ResolverMode {
-    /// 现状：名字相等即命中、多候选时取第一个。
+    /// 回滚逃生口（**非默认**）：名字相等即命中、多候选取第一个，行为与改造前逐字节一致。
     Legacy,
-    /// 分层精度解析（P2b 起生效）。
+    /// 分层精度解析（**已生效且为默认**）：见本类型文档与 `docs/call-graph-resolution.md`。
     Layered,
 }
 

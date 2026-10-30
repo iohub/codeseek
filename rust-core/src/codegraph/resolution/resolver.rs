@@ -1,12 +1,12 @@
 //! Phase P1 交付物 3 + **Phase P2a 交付物 1/2**：解析入口签名（`CallSite` / `resolve_call`）
 //! 与分层解析引擎。
 //!
-//! ## P2a 的红线：仍然"只建不消费"
-//! `parser.rs` 的 `_find_callee_function`(`:418`)、`_resolve_callee_function`(`:1575`)、
-//! `_resolve_qualified_function_name`(`:1602`)、`_build_function_name_index`(`:1285`)
-//! 以及 `storage/incremental.rs:275` —— **这五处函数体一字未改**，默认路径依旧是 legacy。
-//! 本文件的引擎只被 `tests/test_resolution_engine.rs` 与 `CodeParser` 的新增只读 API 消费，
-//! 不参与任何 `FunctionInfo` / `CallRelation` / `Uuid` 的生成分支。
+//! ## 引擎已接线，且为默认档
+//! 本文件实现的分层引擎已接入建图热路径：`_build_function_name_index` /
+//! `_resolve_callee_function` / `_resolve_qualified_function_name` / `_analyze_file_calls`
+//! 在 `resolver_mode == Layered`（默认）时调用 `resolve_call` / `resolve_call_with_config`
+//! 并据此产边；`--resolver=legacy` 是逐字节回滚逃生口，其数值红线由
+//! `tests/test_p1_edges_unchanged.rs` 守护。完整口径见 `docs/call-graph-resolution.md`。
 //!
 //! ## P1 → P2a 的差别
 //! P1 只实现 L1（同文件词法）与 L7（全仓唯一同名），其余层留空钩子。
@@ -23,7 +23,7 @@
 //! | L7 `GlobalUnique` | 全仓同名唯一；带 receiver ⇒ 只允许成员候选 | 多候选 ⇒ 交 L8 |
 //! | L8 `Heuristic` | **只排序，绝不作为唯一性来源** | 保留全部候选并判 Ambiguous |
 //!
-//! ## 与当前实现的关键差异（P2b 才会显形，P2a 不影响图）
+//! ## legacy first-wins 与本引擎的关键差异
 //! 当前 first-wins 在"多个候选"时**偷偷取一个并标 is_resolved=true**；
 //! `resolve_call` 在同样情形返回 `ResolutionStatus::Ambiguous` + **全部候选**。
 //!
@@ -55,7 +55,7 @@ use crate::codegraph::treesitter::AstSymbolInstanceArc;
 /// `caller_scope`（P1 交付物 3 的 `ScopeTree` 句柄）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallSite {
-    /// 归属的调用者函数节点（当前 `_find_caller_function` 的行区间 first-wins 结果）。
+    /// 归属的调用者函数节点（当前 `_find_caller_function_by_line` 的行区间 first-wins 结果）。
     pub caller_id: Option<Uuid>,
     /// 调用点所在的**最内层**作用域（`ScopeTree::innermost_scope_containing(line)`）。
     /// P2a 由 `call_sites_from_symbols` 真实填上，作为 P2b 替换
