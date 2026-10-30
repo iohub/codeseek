@@ -1484,7 +1484,16 @@ impl CodeParser {
             self._merge_new_functions(&mut code_graph);
         } else {
             // 全量构建：直接添加所有函数
-            for (_file_path, functions) in &self.file_functions {
+            //
+            // Phase P3 收口 C 补强：`self.file_functions` 是 `HashMap`，直接 `for (…)` 迭代
+            // 的顺序 = 每进程随机种子。它决定函数节点进入 `code_graph` 的**先后**，进而
+            // 决定 `function_names[name]` / `get_all_functions()` 的 Vec 顺序。虽然解析器与
+            // 索引都对这些顺序做了排序，但"节点入图顺序随种子"仍是幽灵复用与稳定排序
+            // 的隐性依赖源 ⇒ 这里显式按文件路径排序，让入图顺序与种子彻底无关。
+            let mut ordered_files: Vec<&PathBuf> = self.file_functions.keys().collect();
+            ordered_files.sort();
+            for file_path in ordered_files {
+                let functions = &self.file_functions[file_path];
                 for function in functions {
                     code_graph.add_function(function.clone());
                 }

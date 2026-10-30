@@ -635,6 +635,63 @@ fn p3b_layered_is_deterministic_over_all_four_repos() {
 // ─── 交付物 2③：增量轮次绝不产出空图（口径 D，4 仓 × 两档）─────
 
 #[test]
+fn p3b_layered_reparse_is_deterministic_over_all_four_repos() {
+    // 为什么要单独一条守卫：`p3b_layered_is_deterministic_over_all_four_repos` 只比较
+    // **两次 force 全量建图**（同一条代码路径），而实测抖动发生在"有文件哈希、无图 ⇒
+    // 走 `_should_skip_file` 全量重解析"这条**非 force** 路径上（`p3b_incremental_rounds…`
+    // 的 R3 轮，约 14% 翻红：`simple_js_project/layered` 的 1126 条边多重集里
+    // `main.9d1c33d4.js` 若干条**幽灵边**的 `caller_name` 在 `onClick` 与 `Va` 之间翻转）。
+    // 该翻转依赖"本线程此前创建了多少个 HashMap"（`RandomState` 种子轨迹），所以守卫必须
+    // **在同一线程内重复多轮 reparse**、并跨轮交叉比较，才能在修复前稳定抓红。
+    //
+    // 断言口径：对每个仓做 N 次相互独立的"全量(force) + 只留哈希删图后的重解析(非force)"，
+    // 把这 2N 张图的全维度边多重集**全部**要求相等（force 之间、重解析之间、force vs 重解析）。
+    // 修复后全链路确定性 ⇒ 恒绿；修复前 ⇒ 只要任一对不等即红（实测能抓到）。
+    const REPS: usize = 4;
+    for (repo, _, _) in REPOS {
+        let mut builds: Vec<Vec<EdgeKey>> = Vec::new();
+        for rep in 0..REPS {
+            let sb = stage(repo, "reparseDet", 300 + rep);
+            let dir = sb.project_dir.clone();
+
+            // (a) force 全量建图 + 落盘图缓存 + 写哈希
+            let g_force = full_build(&dir, true);
+            persist_graph_as_cache(&dir, &g_force, "layered", 8);
+            builds.push(edge_multiset(&g_force, &dir));
+
+            // (b) 只留文件哈希、删掉图缓存 ⇒ 非 force 的全量重解析（正是 R3 的那条路径）
+            drop_graph_cache_only(&dir);
+            let mut p = new_parser(&dir, true, false);
+            let g_reparse = p
+                .build_petgraph_code_graph(&dir)
+                .unwrap_or_else(|e| panic!("[{repo}] 重解析建图失败: {e}"));
+            let counts = p.last_round_file_counts();
+            assert!(
+                counts.0 > 0 && counts.1 == 0,
+                "[{repo}] 重解析轮必须真的全量重扫（实得 {counts:?}）—— 否则本守卫走错了分支"
+            );
+            builds.push(edge_multiset(&g_reparse, &dir));
+        }
+        let base = &builds[0];
+        for (i, got) in builds.iter().enumerate().skip(1) {
+            assert_eq!(
+                base.len(),
+                got.len(),
+                "[{repo}] 第 {i} 次建图边数 {} != 基准 {}",
+                got.len(),
+                base.len()
+            );
+            assert_eq!(
+                base,
+                got,
+                "{}",
+                diff_report(base, got, &format!("{repo}/layered reparse 确定性·边全维度"))
+            );
+        }
+    }
+}
+
+#[test]
 fn p3b_incremental_rounds_never_yield_empty_graph_over_four_repos() {
     for (repo, _, _) in REPOS {
         for layered in [true, false] {

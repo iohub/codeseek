@@ -17,6 +17,26 @@
 //!   `ScopeTree::from_items` 是与之等价的纯数据入口，便于脱离 tree-sitter 单测。
 
 use std::collections::{HashMap, HashSet};
+
+/// 作用域/函数名比较用的**匿名安全名**。
+///
+/// tree-sitter 给匿名闭包/函数造的名字是 `format!("anon-{guid}", guid=Uuid::new_v4())`
+/// （见 `treesitter/parsers/{js,ts,cpp}.rs`），每次建图都是全新随机串。若把它当作
+/// tie-break 的排序键，压缩/单行 JS 里大量"同 span、同深度、同为匿名"的作用域就会
+/// 随进程内 HashMap/随机数翻转 —— 实测 caller 会在 `onClick` 与 `Va` 之间来回跳
+/// （`tests/test_p3_final.rs::p3b_incremental_rounds_never_yield_empty_graph_over_four_repos`
+/// 的 R3 边多重集全维度抖动）。
+///
+/// 归一为定长前缀后，所有匿名作用域在这一档**完全相等**，比较结果落到稳定插入顺序
+/// （`self.scopes` / `items` 的 Vec 下标 = tree-sitter 符号产出顺序，与进程种子无关），
+/// 既确定又不改变语义（匿名作用域本就没有可比较的名字身份）。
+pub(crate) fn scope_sort_name(name: &str) -> &str {
+    if name.starts_with("anon-") {
+        ""
+    } else {
+        name
+    }
+}
 use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
@@ -269,14 +289,14 @@ impl ScopeTree {
                                 // 作用域同 span、同名，比较结果整条落到 guid 那一位）。
                                 .then_with(|| {
                                     (
-                                        &items[*a].name,
+                                        scope_sort_name(&items[*a].name),
                                         items[*a].line_start,
                                         items[*a].line_end,
                                         items[*a].param_count,
                                         items[*a].has_body,
                                     )
                                         .cmp(&(
-                                            &items[*b].name,
+                                            scope_sort_name(&items[*b].name),
                                             items[*b].line_start,
                                             items[*b].line_end,
                                             items[*b].param_count,
@@ -416,9 +436,28 @@ impl ScopeTree {
                 .then_with(|| sb.depth.cmp(&sa.depth))
                 // Phase P3 收口 C：末位改用源码派生字段（`guid` 每次建图都是新 Uuid，
                 // 只保证同进程可复现，不保证同一份源码两次独立建图可复现）。
+                // ⚠ 收口 C 的补丁本身漏了一处：匿名作用域的 `name` 是
+                //   `format!("anon-{guid}")`（见 treesitter/parsers/js.rs / ts.rs / cpp.rs），
+                //   guid 仍是每次建图的新 Uuid ⇒ 拿 `name` 参与比较，压缩 JS 里
+                //   几十条同 span/同 depth 的匿名作用域照样随机翻转 caller（实测
+                //   `onClick` ↔ `Va`）。因此这里比较的是**匿名安全名**：`anon-*` 一律归一为
+                //   空串，让同 span 的匿名作用域落到 `self.scopes` 的稳定插入顺序
+                //   （= tree-sitter 符号产出顺序，与进程种子无关）上，绝不参与 name 比较。
                 .then_with(|| {
-                    (&sa.name, sa.line_start, sa.line_end, sa.param_count, sa.has_body)
-                        .cmp(&(&sb.name, sb.line_start, sb.line_end, sb.param_count, sb.has_body))
+                    (
+                        scope_sort_name(&sa.name),
+                        sa.line_start,
+                        sa.line_end,
+                        sa.param_count,
+                        sa.has_body,
+                    )
+                        .cmp(&(
+                            scope_sort_name(&sb.name),
+                            sb.line_start,
+                            sb.line_end,
+                            sb.param_count,
+                            sb.has_body,
+                        ))
                 })
         });
         hits
@@ -441,9 +480,23 @@ impl ScopeTree {
                     // Phase P3 收口 C：末位改用源码派生字段（`guid` 每次建图都是新 Uuid ⇒
                     // 同一份源码两次独立建图可能把调用点归到不同 caller，实测压缩 JS 里
                     // caller 会在 `onClick` 与 `Va` 之间来回跳）。
+                    // ⚠ 同 `scopes_containing`：匿名作用域的 `name` 内嵌 `anon-{guid}` 随机量，
+                    //   必须用 `scope_sort_name` 归一，否则"源码派生字段"这一档仍然随机。
                     .then_with(|| {
-                        (&a.name, a.line_start, a.line_end, a.param_count, a.has_body)
-                            .cmp(&(&b.name, b.line_start, b.line_end, b.param_count, b.has_body))
+                        (
+                            scope_sort_name(&a.name),
+                            a.line_start,
+                            a.line_end,
+                            a.param_count,
+                            a.has_body,
+                        )
+                            .cmp(&(
+                                scope_sort_name(&b.name),
+                                b.line_start,
+                                b.line_end,
+                                b.param_count,
+                                b.has_body,
+                            ))
                     })
             })
             .map(|scope| scope.id)

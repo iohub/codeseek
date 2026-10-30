@@ -117,8 +117,22 @@ is_resolved = (resolution_level > 0 && candidate_count == 1)
   仍是发起调用的文件，合并不引入假的跨文件边（取舍说明 `src/codegraph/resolution/mod.rs:566`–`567`）。
 - 索引侧对幽灵的识别谓词（`namespace == "unresolved"`、行区间压成 `(n,n)` 的假函数节点）见
   `src/codegraph/resolution/index.rs:520`、`src/codegraph/resolution/index.rs:547`。
-- **确定性前提**：文件处理顺序与文件系统无关（`src/codegraph/parser.rs:558` 的 `files.sort()`），
-  否则"同一份源码两次独立建图"会因 first-wins/先查再建落在不同文件上而不逐字段相等。
+- **确定性前提（实测校正，勿只写 `files.sort()`）**：同一份源码两次独立建图要**逐字段相等**，
+  三件事缺一不可，只靠 `files.sort()` 是被实测证伪的旧口径 ——
+  1. **文件发现顺序与文件系统无关**：`scan_directory` 末尾 `files.sort()`
+     （`src/codegraph/parser.rs:558`），消除 `fs::read_dir` 的物理布局抖动。
+  2. **节点入图顺序不依赖 HashMap 迭代**：全量分支过去直接 `for (_, fns) in &self.file_functions`
+     （`HashMap`，迭代序 = 每进程 `RandomState` 种子）把函数灌进 `code_graph`，节点/
+     `function_names` 的相对顺序随之抖动。现改为**先 `keys().collect() + sort()` 再入图**
+     （`src/codegraph/parser.rs:1489` 起的 `ordered_files`），入图顺序只由文件路径决定。
+  3. **作用域/caller 的 tie-break 用"匿名安全名"**：tree-sitter 给匿名闭包/函数造的名字是
+     `format!("anon-{guid}", guid = Uuid::new_v4())`（`src/codegraph/treesitter/parsers/js.rs:173`
+     等），每次建图都是新随机串。`innermost_scope_containing` / `scopes_containing` /
+     `ScopeTree::from_items` 的反推父候选排序若拿这个 `name` 当比较键，压缩 JS 里大量
+     "同 span、同 depth、同为匿名"的作用域就会随机翻转最内层选择，使 caller 在 `onClick` 与
+     `Va` 之间来回跳。现统一经 `scope_sort_name`（`src/codegraph/resolution/scope.rs:20`）把
+     `anon-*` 归一为空串 ⇒ 这些作用域在 name 档相等，落到 `self.scopes` 的稳定插入顺序
+     （= tree-sitter 符号产出顺序）上，与进程种子彻底无关。
 
 ---
 
@@ -202,8 +216,13 @@ layered 全量建图的产边链路（定义 → 在全量主循环里的调用�
   由"文件相对仓库根"推导，不含语言意义的 crate/module 根。因此 L5 不用子串、改用
   **右对齐分段精确**比较 —— `module_chain_matches`（`src/codegraph/resolution/resolver.rs:1181`，
   每段必须是 `module_path` 按分隔符切开后的整段相等）。
-- **压缩成单行的 JS fixture 有 caller 归属残余抖动**：单行内多个调用点的行区间退化，归属仍有抖动；
-  测试口径按 `tests/fixtures/resolution/README.md` 的既有约定处理（不在本轮消除）。
+- **~~压缩成单行的 JS fixture 有 caller 归属残余抖动~~（本已修复）**：此前 `simple_js_project/layered`
+  的 `main.9d1c33d4.js` 在"有哈希、无图 ⇒ 全量重解析"这一轮（`p3b_incremental_rounds…` 的 R3）约 14%
+  翻红：同一批幽灵边的 `caller_name` 在 `onClick` 与 `Va` 之间翻转。根因见 §4「确定性前提」第 2/3 条
+  （HashMap 入图顺序 + 匿名作用域名内嵌 `Uuid::new_v4()` 参与 tie-break）。现已通过 `parser.rs:1489` 的
+  `ordered_files` 排序与 `scope.rs` 的 `scope_sort_name` 归一消除，并由新增守卫
+  `tests/test_p3_final.rs::p3b_layered_reparse_is_deterministic_over_all_four_repos` 锁死（该守卫在修复前
+  实测 7/10 翻红、修复后恒绿）。
 
 ---
 
@@ -227,7 +246,7 @@ mode 不符会被 `validate_resolution_stamp` 判失效并全量重建 —— �
 | `tests/test_resolver_layers.rs` | 逐层（L1–L8）判定与 confidence；`--levels` 逐层关闭的诊断行为。 |
 | `tests/test_p2b_wiring.rs` | 真源链路端到端接线：全量/刷新/增量共用发射与 `upsert` 唯一入口、结果一致。 |
 | `tests/test_precision_report.rs` | 精度报告：resolved/ambiguous/unresolved 统计口径与候选数真实（不被截断谎报）。 |
-| `tests/test_p3_final.rs` | 缓存档位戳端到端 + **`--levels` fail-fast**（`p3b_levels_flag_fail_fast_requires_force_reindex`，覆盖非默认报错/带 force-reindex 放行/默认放行/等价全开放行）+ 决定性（`p3b_layered_is_deterministic_over_all_four_repos`）。 |
+| `tests/test_p3_final.rs` | 缓存档位戳端到端 + **`--levels` fail-fast**（`p3b_levels_flag_fail_fast_requires_force_reindex`，覆盖非默认报错/带 force-reindex 放行/默认放行/等价全开放行）+ 决定性（`p3b_layered_is_deterministic_over_all_four_repos`，两次 force 全量建图逐字段相等）+ **重解析路径确定性**（`p3b_layered_reparse_is_deterministic_over_all_four_repos`：同线程内多轮"有哈希、无图 ⇒ 全量重解析"交叉比较边全维度多重集，锁死 §4 的三条确定性前提；修复前实测会红）。 |
 | `tests/test_graph_cache_gate.rs` | 版本/档位门禁：`CGSP` 头、`schema_version` 不符、`resolver_mode`/`max_candidates` 不符一律判失效、不 panic。 |
 
 运行口径（红线）：`cargo build --tests` 保持 0 warning / 0 error；
