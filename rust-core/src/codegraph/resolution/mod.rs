@@ -1,33 +1,33 @@
-//! Phase P1 交付物 3：`codegraph::resolution` —— 名称解析的**数据层**。
+//! 分层精度名称解析引擎（`codegraph::resolution`）：作用域树 + import 绑定 + 不塌缩索引 + L0–L8 分层判定。
 //!
 //! # 这个模块是什么
-//! P0 把"版本门禁 + 基线测试"建好后，量化出当前调用边解析的缺陷面
-//! （4 组同名歧义名共 13 个候选，最终只体现为 11 条已解析边）。
-//! P1 的目标不是修复它，而是**把修复所需的原料与数据结构先做实**：
+//! 它把"callee 到底指向哪个函数"从"名字相等就取第一个"升级为**按层判定、歧义保留**。
+//! P0 量化出缺陷面（4 组同名歧义名共 13 个候选、只体现为 11 条已解析边）⇒ P1 做实原料与数据结构 ⇒
+//! P2/P3 接入产边链路：改造**已全部交付**，权威口径见 `docs/call-graph-resolution.md`。
 //!
 //! | 文件 | 职责 |
 //! |---|---|
-//! | `level` | 9 级 `ResolutionLevel`（`#[repr(u8)]`，P2 直接落盘）+ `ResolutionReason` |
+//! | `level` | 9 级 `ResolutionLevel`（`#[repr(u8)]`，已落盘为 `CallRelation::resolution_level`）+ `ResolutionReason` |
 //! | `candidate` | `Candidate` / `Resolution` / `ResolutionStatus` + 状态判定纯函数 |
 //! | `scope` | `ScopeTree` / `ScopeBuilder`：复用 `parent_guid`/`childs_guid` 建作用域树，提供 `innermost_scope_containing` |
 //! | `imports` | `ImportMap` / `ImportEntry`：把 `ImportDeclaration` 的原料忠实搬出来（7 语言形态各有单测） |
 //! | `index` | `ResolutionIndex`：`by_name: HashMap<String, Vec<FunctionTag>>` —— **不塌缩**的全仓函数索引 |
-//! | `resolver` | `CallSite` / `resolve_call`：只实现 L1 与 L7，其余层留 `// P2` 钩子 |
+//! | `resolver` | `CallSite` / `resolve_call`：**L0–L8 全部实现**。支配规则淘汰（按层升序，第一个产出非空候选的层接管并终止下探），同层排序不淘汰；≥2 候选保持 `Ambiguous` |
 //!
-//! # 硬约束（P1 的红线）
-//! - **只建不消费**：`resolve_call` 没有接进任何建图路径；`parser.rs` 的四处同名
-//!   first-wins（`parser.rs:344` / `1469` / `1496` / `1179`）与 `incremental.rs:275` **一字未改**。
+//! # 硬约束（历史 → 当前）
+//! - **只建不消费**（Phase P1 的历史红线，**已失效**）：当时 `resolve_call` 没接进任何建图路径，
+//!   四处同名 first-wins 与 `storage/incremental.rs` 的重复副本一字未改。**当前**：legacy 全量 /
+//!   legacy 刷新 / layered 全量 / layered 刷新（增量链路复用最后一项）四条产边路径全部收敛到唯一
+//!   写入口 `PetCodeGraph::upsert_call_site_edges`，`incremental.rs` 的重复副本已删除；legacy 分支
+//!   （`--resolver=legacy`）有意保留作回滚逃生口，数值红线不变 —— 这就是代码里仍有其副本的原因。
 //! - 纯函数、无 I/O：只有 `ScopeBuilder::build` / `ImportMap::build` 读取已经解析好的
-//!   `Vec<AstSymbolInstanceArc>`，不读文件、不碰数据库、不建图。
+//!   `Vec<AstSymbolInstanceArc>`，不读文件、不碰数据库、不建图（落边在 `emit_layered_resolution`）。
 //! - 无新依赖：只用 `std` + `uuid`。**禁止引入 `stack-graphs`**（已被 GitHub 归档，
 //!   挂 RUSTSEC-2026-0303）；本模块只借它的分层模型。
 //!
 //! # 与 `CodeParser` 的关系
-//! `CodeParser` 新增 `file_scopes: HashMap<PathBuf, Arc<FileScopeCtx>>`，在
-//! `parser.rs:197`（`_extract_entities_from_file`）与 `parser.rs:499`（`parse_file`）两处
-//! 符号消费循环里**额外**产出 `FileScopeCtx`，仅供
-//! `CodeParser::file_scope_ctx` 读取。产出过程不参与任何
-//! `FunctionInfo` / `CallRelation` / `Uuid` 的生成分支，因此调用边语义不变。
+//! `CodeParser::file_scopes` 由 `CodeParser::_extract_entities_from_file` 与 `CodeParser::parse_file`
+//! 两处符号消费循环产出，经 `file_scope_ctx` / `ensure_file_scope_ctx` 供本模块的 `resolve_call` 消费。
 
 pub mod candidate;
 pub mod imports;

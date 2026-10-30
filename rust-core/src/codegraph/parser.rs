@@ -308,32 +308,32 @@ pub struct CodeParser {
     /// 三个缓存读取点一律返回"缓存 miss"，于是 `build_code_graph` /
     /// `build_petgraph_code_graph` 必然重新解析每个文件，并在第 8 步重新写回哈希。
     force_reindex: bool,
-    /// Phase P1 交付物 3：**只建不消费**的文件级解析上下文缓存。
+    /// 文件级解析上下文缓存：作用域树 + import 绑定表 + module path（见 `codegraph::resolution`）。
     ///
-    /// 内容 = 作用域树 + import 绑定表 + module path（见 `codegraph::resolution`）。
     /// 与 `file_functions` / `function_registry` / `file_index` / `snippet_index` 严格平行：
-    /// 每个文件解析成功时写入，`_remove_file_entities` 移除，两个 `build_*` 入口按新的仓库根重建。
+    /// 每个文件解析成功时写入，`_remove_file_entities` 移除，两个 `build_*` 入口按新的仓库根重建；
+    /// 内容未变（MD5 命中）而被跳过的文件由 `ensure_file_scope_ctx` 按需补建。
     ///
-    /// 硬约束：这里的任何数据都**不参与** `FunctionInfo` / `CallRelation` / `Uuid` 的生成，
-    /// 四处同名 first-wins（`parser.rs` 的 `_find_callee_function`、`_resolve_callee_function`、
-    /// `_resolve_qualified_function_name`、`_build_function_name_index` 与 `storage/incremental.rs`
-    /// 的 `_find_callee_function`）一字未改 —— 本缓存唯一的读者是
-    /// `CodeParser::file_scope_ctx`（P2 才接入解析路径）与其单测。
+    /// **现在是 layered 解析的真实输入**：`_analyze_file_calls_layered` 经 `file_scope_ctx`、
+    /// `_analyze_petgraph_call_relations_layered` 经 `ensure_file_scope_ctx` 取到它，再喂给
+    /// `resolve_call` —— 作用域树决定 caller 归属与 L1/L2 的遮蔽判定，import 绑定表喂 L4，
+    /// module path 喂 L5/L6。历史（Phase P1）里这里只建不消费；legacy 的同名 first-wins
+    /// （`_resolve_callee_function`、`_resolve_qualified_function_name`、`_build_function_name_index`）作为 `--resolver=legacy` 逃生口有意保留，数值红线不变。
     file_scopes: HashMap<PathBuf, Arc<FileScopeCtx>>,
     /// 本轮建图的仓库根，用于 `resolution` 的 module path 推导。
     ///
-    /// `None`（例如直接调用 `parse_file` 而没走 `build_*`）时 module path 一律降级为空串，
-    /// 见 `resolution::index::derive_module_path` 的 TODO(P2)。
+    /// module path 已按"文件相对本根 + Java `package` 声明"真实推导（`derive_module_path`）；
+    /// 为 `None`（例如直接调用 `parse_file` 而没走 `build_*`）时降级为空串，构建配置尚未读取。
     resolution_root: Option<PathBuf>,
-    /// Phase P2a 交付物 3：`--resolver` 的取值（Phase P3 起**默认 `Layered`**，`Legacy` 为回滚逃生口）。
+    /// `--resolver` 的取值：**默认 `Layered`**（见 `CodeParser::new`），`Legacy` 是逐字节回滚逃生口。
     ///
-    /// ⚠ P2a 里这个字段**只存不用**：`build_code_graph` / `build_petgraph_code_graph` /
-    /// `refresh_file` / `incremental` 的任何一条产边分支都不读它，因此置成 `Layered`
-    /// 也不会改变一个节点、一条边。真正的接线在 P2b。
-    /// 唯一的消费者是新增的只读诊断 API（[`CodeParser::resolution_config`]）与其单测，
-    /// 这样既能保证 CLI 链路是通的，又不会碰到五处 first-wins 红线。
+    /// 已被全部产边路径读取：`_analyze_file_calls` / `_analyze_petgraph_call_relations` /
+    /// `_resolve_callee_function` / `_resolve_qualified_function_name` 都按它分叉，layered 分支
+    /// 走 `codegraph::resolution`，legacy 分支走原有的 first-wins（红线：数值口径不变）。
+    /// 它同时是图缓存档位戳的一部分：`_load_existing_graph` 用 `validate_resolution_stamp`
+    /// 校验 `CGSP` 缓存里的 `resolver_mode` / `max_candidates`，档位不符即判定缓存失效。
     resolver_mode: ResolverMode,
-    /// Phase P2a 交付物 3：`--max-candidates`（默认 8）。同样**只存不用**，P2b 用它截断落盘候选。
+    /// `--max-candidates`（默认 `DEFAULT_MAX_CANDIDATES` = 8）：**已生效**，layered 逐个候选落边时按它截断**条数**，但边上的 `candidate_count` 仍写截断前的真实候选数（歧义不会被伪装成唯一命中）。
     max_candidates: usize,
     /// Phase P2a 交付物 4：`--levels=` 的原始字符串（`None` = 全层开启）。
     /// 解析口径由 [`ResolutionConfig::from_levels_spec`] 唯一决定；非法值在建图入口即报错，
