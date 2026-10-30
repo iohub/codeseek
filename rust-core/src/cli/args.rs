@@ -86,6 +86,7 @@ pub struct Cli {
     ///   怀疑分层引擎把某仓产边弄坏时，`--resolver=legacy` 一键退回与 P1 逐字节一致的行为。
     ///
     /// 默认值在 Phase P3 由 `legacy` 切到 `layered`（P2 阶段逐字节验证已完成，红线解除）。
+    /// 分层解析的完整设计、缓存契约与回滚口径见 `docs/call-graph-resolution.md`。
     #[clap(
         long,
         value_enum,

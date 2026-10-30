@@ -561,7 +561,8 @@ pub fn emit_layered_resolution(
         // rust 46→49、python 45→55、ts 92→121、js 1577→1607）。
         // legacy 之所以"更少"，是因为它的全局 `find_functions_by_name()` 会命中早先造出的
         // 同名幽灵并跨行/跨文件复用。本轮先按「同文件 + 同裸名」对齐（下面这条谓词），
-        // 实测仍高于 legacy ⇒ 进一步放宽到「同裸名」，见 P3 报告。
+        // 实测仍高于 legacy ⇒ 进一步放宽到「全仓同裸名」（只按裸名 + `namespace == "unresolved"`
+        // 复用，忽略行号与文件）。完整口径见 `docs/call-graph-resolution.md`「幽灵节点规则」一节。
         // ⚠ 关键取舍：幽灵**节点**可以全仓共用一个，但幽灵**边**的 `callee_file`
         //   一律写调用点自己的文件（下面 `CallRelation::layered_ghost` 传的是 `site.file`），
         //   因此这次合并不引入任何假的跨文件边 —— 这正是 legacy 靠"跨文件复用同名幽灵"
