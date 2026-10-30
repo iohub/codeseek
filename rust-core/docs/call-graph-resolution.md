@@ -2,7 +2,7 @@
 
 > 本文是 codeseek 调用边解析引擎的**权威文档**：改造动机、九级分层口径、边的元信息、
 > 幽灵节点规则、图缓存契约、唯一真源链路、已知缺口、回滚与验证。所有 `文件:行号`
-> 均为 `rg -n` 实测所得（HEAD 之后）。改解析行为之前先读这里，就能改对地方。
+> 均为 `rg -n` 实测所得（本次校准于 HEAD 5aa18bf，全文 91 处 `文件:行号` 与 8 个测试文件名逐个复核）。改解析行为之前先读这里，就能改对地方。
 
 CLI 默认 `--resolver=layered`；`--resolver=legacy` 是逐字节回滚逃生口
 （`src/cli/args.rs:93` 的 `default_value = "layered"`、`src/cli/args.rs:96` 的 `pub resolver`，
@@ -39,7 +39,7 @@ CLI 默认 `--resolver=layered`；`--resolver=legacy` 是逐字节回滚逃生�
 
 枚举与置信度的唯一定义在 `src/codegraph/resolution/level.rs`（`#[repr(u8)]` 固定判别式，
 `src/codegraph/resolution/level.rs:25`）；从持久化 u8 还原时未知值一律降级为 `Heuristic` 而非 panic
-（`src/codegraph/resolution/level.rs:75` 区间的 `from_u8`）。
+（`src/codegraph/resolution/level.rs:77` 的 `from_u8`）。
 
 | 层 | 名称 | confidence | 判定依据（能否产出"唯一"） |
 |----|------|-----------|----------------------------|

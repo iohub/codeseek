@@ -7,12 +7,12 @@
 //!
 //! | 文件 | 职责 |
 //! |---|---|
-//! | [`level`] | 9 级 `ResolutionLevel`（`#[repr(u8)]`，P2 直接落盘）+ `ResolutionReason` |
-//! | [`candidate`] | `Candidate` / `Resolution` / `ResolutionStatus` + 状态判定纯函数 |
-//! | [`scope`] | `ScopeTree` / `ScopeBuilder`：复用 `parent_guid`/`childs_guid` 建作用域树，提供 `innermost_scope_containing` |
-//! | [`imports`] | `ImportMap` / `ImportEntry`：把 `ImportDeclaration` 的原料忠实搬出来（7 语言形态各有单测） |
-//! | [`index`] | `ResolutionIndex`：`by_name: HashMap<String, Vec<FunctionTag>>` —— **不塌缩**的全仓函数索引 |
-//! | [`resolver`] | `CallSite` / `resolve_call`：只实现 L1 与 L7，其余层留 `// P2` 钩子 |
+//! | `level` | 9 级 `ResolutionLevel`（`#[repr(u8)]`，P2 直接落盘）+ `ResolutionReason` |
+//! | `candidate` | `Candidate` / `Resolution` / `ResolutionStatus` + 状态判定纯函数 |
+//! | `scope` | `ScopeTree` / `ScopeBuilder`：复用 `parent_guid`/`childs_guid` 建作用域树，提供 `innermost_scope_containing` |
+//! | `imports` | `ImportMap` / `ImportEntry`：把 `ImportDeclaration` 的原料忠实搬出来（7 语言形态各有单测） |
+//! | `index` | `ResolutionIndex`：`by_name: HashMap<String, Vec<FunctionTag>>` —— **不塌缩**的全仓函数索引 |
+//! | `resolver` | `CallSite` / `resolve_call`：只实现 L1 与 L7，其余层留 `// P2` 钩子 |
 //!
 //! # 硬约束（P1 的红线）
 //! - **只建不消费**：`resolve_call` 没有接进任何建图路径；`parser.rs` 的四处同名
@@ -25,8 +25,8 @@
 //! # 与 `CodeParser` 的关系
 //! `CodeParser` 新增 `file_scopes: HashMap<PathBuf, Arc<FileScopeCtx>>`，在
 //! `parser.rs:197`（`_extract_entities_from_file`）与 `parser.rs:499`（`parse_file`）两处
-//! 符号消费循环里**额外**产出 [`FileScopeCtx`]，仅供
-//! [`CodeParser::file_scope_ctx`] 读取。产出过程不参与任何
+//! 符号消费循环里**额外**产出 `FileScopeCtx`，仅供
+//! `CodeParser::file_scope_ctx` 读取。产出过程不参与任何
 //! `FunctionInfo` / `CallRelation` / `Uuid` 的生成分支，因此调用边语义不变。
 
 pub mod candidate;

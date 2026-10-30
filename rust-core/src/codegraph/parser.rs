@@ -318,7 +318,7 @@ pub struct CodeParser {
     /// 四处同名 first-wins（`parser.rs` 的 `_find_callee_function`、`_resolve_callee_function`、
     /// `_resolve_qualified_function_name`、`_build_function_name_index` 与 `storage/incremental.rs`
     /// 的 `_find_callee_function`）一字未改 —— 本缓存唯一的读者是
-    /// [`CodeParser::file_scope_ctx`]（P2 才接入解析路径）与其单测。
+    /// `CodeParser::file_scope_ctx`（P2 才接入解析路径）与其单测。
     file_scopes: HashMap<PathBuf, Arc<FileScopeCtx>>,
     /// 本轮建图的仓库根，用于 `resolution` 的 module path 推导。
     ///

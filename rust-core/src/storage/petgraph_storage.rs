@@ -214,7 +214,7 @@ impl PetGraphStorage {
 
     /// **解析档位门禁**：校验这份缓存是不是"当前档位 + 当前候选上限"建的。
     ///
-    /// 与 [`validate_schema_version`] 的分工：版本门禁由三个 `load_*` 反序列化咽喉自动执行
+    /// 与 `validate_schema_version` 的分工：版本门禁由三个 `load_*` 反序列化咽喉自动执行
     /// （那里拿不到"当前档位"，档位是**消费者**的配置），而档位门禁必须由知道本轮配置的
     /// 调用方执行 —— 生产上只有两处：
     ///  - `codegraph/parser.rs::CodeParser::_load_existing_graph`（用 `self.resolver_mode()`

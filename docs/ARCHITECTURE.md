@@ -110,6 +110,8 @@ pub struct PetCodeGraph {
 
 **边**：`CallRelation`，包含 `caller_id`、`callee_id`、`is_resolved`（是否成功解析）、行号
 
+> 调用边的**分层精度解析**以 [rust-core/docs/call-graph-resolution.md](../rust-core/docs/call-graph-resolution.md) 为权威文档：九级分层口径、边上的解析元信息（level/confidence/rank/candidate_count）、幽灵节点规则、图缓存契约与 legacy 回滚。改解析行为前先读它。
+
 **核心查询方法**：
 
 | 方法 | 说明 |
