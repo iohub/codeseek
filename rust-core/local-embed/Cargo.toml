@@ -1,0 +1,31 @@
+[package]
+name = "local-embed"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Local ONNX text-embedding backend for codeseek (ONNX Runtime + HuggingFace tokenizers)"
+
+[features]
+default = []
+# 诊断 CLI（rembed）与自测基准。codeseek 只依赖 lib target，不需要拉进 clap，
+# 所以把 CLI 整体门控在这里。
+cli = ["dep:clap"]
+
+[dependencies]
+# 依赖行与 refs/ort_embed/Cargo.toml 逐字一致：ort-sys 的预编译库缓存目录是按
+# (版本, 平台, feature 集合) 取哈希的，feature 一变就会去 github 重新下载 —— 本机
+# github.com 不可达，必须命中 ~/Library/Caches/ort.pyke.io 里已缓存的静态库。
+ort = { version = "2.0.0-rc.15", features = ["half"] }
+# HuggingFace tokenizers，用来加载 tokenizer.json（BPE）。feature 同样与 refs 对齐。
+tokenizers = { version = "0.23", default-features = false, features = ["onig", "fancy-regex"] }
+# 张量容器（版本需与 ort 内部使用的 ndarray 一致）
+ndarray = "0.17"
+# fp16 <-> f32 转换
+half = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"], optional = true }
+
+[[bin]]
+name = "rembed"
+path = "src/bin/rembed.rs"
+required-features = ["cli"]

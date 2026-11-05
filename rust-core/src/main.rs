@@ -67,10 +67,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load().ok();
 
     match &cli.command {
-        Commands::Init { interactive: _ } => {
+        Commands::Init { interactive: _, rebuild, yes } => {
             let project_root = detect_project()?;
             let (index_dir, lock_path) = project_paths(&project_root);
             let _lock = FileLock::exclusive(lock_path)?;
+
+            // --rebuild 会删数据，必须与 --yes 同时给出才执行。
+            if *rebuild && !*yes {
+                return Err("--rebuild drops the vector index for the current embedding backend; add --yes to confirm".into());
+            }
 
             eprintln!("  Project:    {}", project_root.display());
             eprintln!("  Index dir:  {}", index_dir.display());
@@ -185,16 +190,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             storage.set_graph(pet_graph);
 
-            // Phase 4: Embedding (90→100%) — only if API token configured
+            // Phase 4: Embedding (90→100%) — 仅当当前嵌入后端可用时才做
+            // （远程看 API token，本地看 ONNX 模型文件在不在；原因进 warn 日志）
             let mut embedding_done = false;
             if let Some(ref cfg) = config {
-                if !cfg.embedding.api_token.is_empty() {
+                // 可用性判定按后端分化（远程看 token，本地看模型文件在不在）。
+                // 原因必须打进日志：否则用户只看到「退回图搜索」，不知道是 model_dir 配错。
+                let embed_availability = cfg.embedding.check_available();
+                if let Err(e) = &embed_availability {
+                    warn!("Vector embedding phase skipped: {}", e);
+                }
+                if embed_availability.is_ok() {
                     pb.set_pct(90);
                     pb.set_phase("Building vector embeddings...");
                     pb.set_stats(stats.total_files, stats.total_functions);
 
                     let db_path = Config::lancedb_dir(&project_hash).to_string_lossy().to_string();
-                    let collection = format!("codeseek_{}", &project_hash[..8]);
+                    let collection = cfg.embedding.code_table_name(&project_hash);
 
                     // 创建BM25索引用于稀疏检索通道
                     let bm25_dir = Config::bm25_dir(&project_hash);
@@ -205,12 +217,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     embedding_done = true; // mark attempted; actual success tracked below
                     match EmbeddingService::new(&db_path, collection, Some(cfg), bm25_index).await {
                         Ok(es) => {
-                            if let Err(e) = es.ensure_collection().await {
+                            if *rebuild {
+                                // 只删当前指纹的表 + 增量哈希；其它后端的索引保持原样。
+                                if let Err(e) = es.drop_table().await {
+                                    warn!("--rebuild: dropping vector table failed: {}", e);
+                                    embedding_done = false;
+                                }
+                                EmbeddingService::delete_hashes(&project_hash, &es.fingerprint);
+                            }
+                            if embedding_done {
+                              if let Err(e) = es.ensure_collection().await {
                                 warn!("Embedding table setup failed: {}", e);
                                 embedding_done = false;
-                            } else {
+                              } else {
                                 // Load previous file hashes to detect deletions
-                                let existing_hashes = EmbeddingService::load_hashes(&project_hash);
+                                let existing_hashes = EmbeddingService::load_hashes(&project_hash, &es.fingerprint);
                                 match es.vectorize_directory(
                                     &project_root.to_string_lossy(),
                                     existing_hashes.as_ref(),
@@ -218,7 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Ok(new_hashes) => {
                                         pb.set_stats(new_hashes.len(), stats.total_functions);
                                         // Persist hashes for next incremental run
-                                        if let Err(e) = EmbeddingService::save_hashes(&project_hash, &new_hashes) {
+                                        if let Err(e) = EmbeddingService::save_hashes(&project_hash, &es.fingerprint, &new_hashes) {
                                             warn!("Failed to save embedding hashes: {}", e);
                                         }
                                     }
@@ -227,6 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         embedding_done = false;
                                     }
                                 }
+                              }
                             }
                         }
                         Err(e) => {
@@ -285,9 +307,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _lock = FileLock::shared(lock_path)?;
 
             let results = if let Some(ref cfg) = config {
-                if !cfg.embedding.api_token.is_empty() {
+                if cfg.embedding.check_available().is_ok() {
                     let project_hash = Config::compute_project_hash(&project_root);
-                    let collection = format!("codeseek_{}", &project_hash[..8]);
+                    let collection = cfg.embedding.code_table_name(&project_hash);
                     // LanceDB 存储在项目目录下的 lancedb/ 子目录
                     let db_path = Config::lancedb_dir(&project_hash).to_string_lossy().to_string();
 

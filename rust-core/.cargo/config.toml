@@ -1,0 +1,8 @@
+# ONNX Runtime 的预编译静态库（ort-sys `download-binaries`）是以 macOS 13.4 为部署目标编译的。
+# 用 rustc 默认的较低部署目标链接时会报 `___isPlatformVersionAtLeast` 未定义（符号来自 CoreML EP
+# 的目标文件）。这里统一把部署目标抬到 13.4，与 refs/ort_embed/.cargo/config.toml 保持一致。
+#
+# 注意作用域：本文件位于 workspace 根，因此 MACOSX_DEPLOYMENT_TARGET 会同时作用于
+# `codeseek` 主 package 与 `local-embed`。在 Linux/CI 上该变量被链接器忽略，无副作用。
+[env]
+MACOSX_DEPLOYMENT_TARGET = "13.4"

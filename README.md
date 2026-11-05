@@ -278,16 +278,69 @@ No daemon, no HTTP server. Every command is a standalone process.
 }
 ```
 
-> `embedding.instruct` — Qwen3-Embedding query-side instruction (asymmetric retrieval). Only the
-> search query gets the official `Instruct: {instruct}\nQuery:{query}` prefix; indexed code stays
-> raw, so existing vector indexes remain valid. Omit it to use the default shown above; set it to
-> `""` to turn the prefix off.
+> `embedding.instruct` — query-side instruction (asymmetric retrieval). Only the
+> search query gets the official prefix; indexed code stays raw, so existing vector indexes
+> remain valid. Omit it to use the default shown above; set it to `""` to turn the prefix off.
+> The template itself is fixed per backend: `Instruct: {instruct}\nQuery:{query}` for
+> `openai-compatible` (no space after `Query:`) and `Instruct: {instruct}\nQuery: {query}`
+> for `local-onnx` (one space), matching each model family's official wording.
+
+### Local (offline) embeddings
+
+`provider` selects the embedding backend, and the two are mutually exclusive by construction —
+a `local-onnx` block cannot carry an `api_token` that silently takes effect.
+
+```json
+{
+  "embedding": {
+    "provider": "local-onnx",
+    "model_dir": "/Users/ydl/modelhub/harrier-oss-v1-0.6b-ONNX",
+    "onnx_rel_path": "onnx/onnx/model_fp16.onnx",
+    "max_length": 2048,
+    "intra_threads": 0,
+    "instruct": "Given a code search query, retrieve relevant functions or code snippets that answer the query."
+  }
+}
+```
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `model_dir` | `/Users/ydl/modelhub/harrier-oss-v1-0.6b-ONNX` | directory holding `tokenizer.json` and the ONNX graph |
+| `onnx_rel_path` | `onnx/onnx/model_fp16.onnx` | the doubled `onnx/onnx/` is the exporter's layout, not a typo |
+| `max_length` | `2048` | tokenizer truncation; the model allows up to 32768 |
+| `intra_threads` | `0` | `0` lets ONNX Runtime pick; ONNX already saturates cores per run |
+| `instruct` | same default as remote | same tri-state semantics (absent / `""` / custom) |
+
+There is deliberately **no `dimensions` field** for `local-onnx`: the output dimension is probed
+from the ONNX graph signature (harrier exports `sentence_embedding: float32[batch, 1024]`, with
+last-token pooling and L2 normalization already built into the graph).
+
+Switching backends does not migrate data. The backend identity (model + dimension + truncation
+length) is hashed into a fingerprint that names the LanceDB table (`codeseek_<project>_<fp>`),
+the incremental hash file (`embedding_hashes_<fp>.json`) and every embedding-cache key, so each
+backend keeps its own index and a dimension mismatch cannot happen silently. Re-run
+`codeseek init` after switching; to discard the current backend's index and re-embed everything:
+
+```bash
+codeseek init --rebuild --yes
+```
+
+`--rebuild` only drops the table belonging to the backend currently in `config.json` — switching
+back to the other backend later still finds its index intact. Requires `--yes` because it deletes
+index data.
+
+Build notes (macOS arm64): the ONNX Runtime static library references clang's
+`___isPlatformVersionAtLeast`, which neither the macOS SDK nor Rust's `compiler_builtins`
+provides. `rust-core/local-embed/build.rs` locates `libclang_rt.osx.a` via
+`clang -print-resource-dir` and links it, so `lto = "fat"` still works and no `RUSTFLAGS` are
+needed. See `rust-core/docs/local-embedding-backend.md` for the full design and measurements.
 
 ### Model Roles
 
 | Model | Role | When |
 |-------|------|------|
 | `Qwen/Qwen3-Embedding-4B` | Converts code → vectors for dense search | Index building |
+| `harrier-oss-v1-0.6b` (ONNX, local) | Same, fully offline via ONNX Runtime | Index building |
 | `Qwen/Qwen3-Reranker-4B` | Scores (query, code) pairs for precision | Search time |
 
 Set via the interactive wizard on first run, or create manually.

@@ -44,7 +44,7 @@ impl CodeSeekRunner {
         };
 
         match cli.command {
-            Commands::Init { interactive: _ } => {
+            Commands::Init { interactive: _, rebuild: _, yes: _ } => {
                 // 真正的索引逻辑在 `src/main.rs` 的 `Commands::Init` 分支：
                 // 该 flag 经 `CodeAnalyzer::set_force_reindex` → `CodeParser::set_force_reindex`
                 // 让三个缓存读取点一律返回"缓存 miss"。

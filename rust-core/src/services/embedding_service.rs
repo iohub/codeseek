@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::fs;
 use std::sync::{Arc, Mutex};
-use std::env;
 use lancedb::{connect, Connection};
 use lancedb::query::{QueryBase, ExecutableQuery};
 use arrow::array::{
@@ -20,13 +19,31 @@ use anyhow::anyhow;
 
 use crate::codegraph::treesitter::TreeSitterParser;
 use crate::codegraph::parser::CodeParser;
-use crate::config::{Config, DEFAULT_QUERY_INSTRUCT};
+use crate::config::{
+    Config, EmbeddingBackend, RemoteEmbedding, DEFAULT_QUERY_INSTRUCT,
+    LOCAL_QUERY_TEMPLATE, REMOTE_QUERY_TEMPLATE,
+};
 use crate::storage::traits_bm25::{TextSearchProvider, CodeChunk};
+use crate::storage::vector_schema::require_dims_match;
 
 use lancedb::table::OptimizeAction;
 use lance::dataset::optimize::{CompactionMode, CompactionOptions};
 use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::TimeDelta;
+
+/// 后端指纹的稳定短哈希（与 `EmbeddingBackend::fingerprint` 同算法，供测试注入的
+/// provider 使用 —— 那条路径没有 `EmbeddingBackend` 可问）。
+fn short_fingerprint(identity: &str) -> String {
+    format!("{:x}", md5::compute(identity.as_bytes()))[..8].to_string()
+}
+
+/// 嵌入缓存的 key：`md5(后端指纹 + 原文)`。
+///
+/// 用指纹而不是模型名：指纹含维度与 `max_length`，所以改截断长度（向量会变）
+/// 时旧缓存自动失效。旧实现只含 model()，改 max_length 会读到过期向量。
+pub fn embedding_cache_key(fingerprint: &str, code_block: &str) -> String {
+    format!("{:x}", md5::compute(format!("{fingerprint}{code_block}").as_bytes()))
+}
 
 /// 累积软删除次数阈值，达到后自动触发 LanceDB compaction
 const OPTIMIZE_DELETE_THRESHOLD: u64 = 10;
@@ -69,7 +86,7 @@ pub fn build_instruct_query(instruct: &str, query: &str) -> String {
     if instruct.is_empty() || query.trim().is_empty() {
         return query.to_string();
     }
-    format!("Instruct: {}\nQuery:{}", instruct, query)
+    crate::config::render_query(REMOTE_QUERY_TEMPLATE, instruct, query)
 }
 
 struct EmbeddingCache {
@@ -184,6 +201,8 @@ pub struct OpenAICompatibleEmbeddingProvider {
     /// 查询侧指令（来自 `EmbeddingConfig::effective_instruct`）。空串 = 关闭注入。
     /// 只被 `format_query` 读取，`get_embedding` / `get_embeddings_batch` 完全不受影响。
     instruct: String,
+    /// 查询模板。远程后端固定 [`REMOTE_QUERY_TEMPLATE`]（`Query:` 后无空格）。
+    query_template: &'static str,
 }
 
 impl OpenAICompatibleEmbeddingProvider {
@@ -198,6 +217,7 @@ impl OpenAICompatibleEmbeddingProvider {
             model,
             // 缺省即官方推荐的 instruction-aware 用法；用 with_instruct("") 关闭
             instruct: DEFAULT_QUERY_INSTRUCT.to_string(),
+            query_template: REMOTE_QUERY_TEMPLATE,
         }
     }
 
@@ -217,7 +237,7 @@ impl EmbeddingProvider for OpenAICompatibleEmbeddingProvider {
 
     /// 查询侧加官方指令前缀；`instruct` 为空时保持裸文本（等效于关闭）。
     fn format_query(&self, query: &str) -> String {
-        build_instruct_query(&self.instruct, query)
+        crate::config::render_query(self.query_template, &self.instruct, query)
     }
 
     async fn get_embedding(&self, code_block: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -299,11 +319,155 @@ impl EmbeddingProvider for OpenAICompatibleEmbeddingProvider {
     }
 }
 
+/// 本地 ONNX 后端 provider。
+///
+/// `local_embed::Embedder` 的推理是**同步 CPU** 调用，且 `Session::run` 需要 `&mut self`
+/// （`ort/src/session/run.rs:48`；`run_async` 只为 wasm 编译），而本 trait 的方法是
+/// `&self` + async。因此用 `Arc<Mutex<Embedder>>` 提供可变性、`spawn_blocking` 把阻塞
+/// 挪出 tokio worker。
+///
+/// 会话池固定为 1：16GB 机器上 1.2GB 权重只该有一份，且 ORT 的 intra-op 并行已经在单次
+/// 推理内吃满多核 —— 多会话只会互相抢核并线性放大内存。`Mutex` 带来的串行化不是瓶颈。
+pub struct LocalOnnxEmbeddingProvider {
+    inner: Arc<Mutex<local_embed::Embedder>>,
+    /// 由 ONNX 图输出签名探测的维度（不接受配置）
+    dimensions: usize,
+    model_id: String,
+    instruct: String,
+    /// 送进 tokenizer 前的字节上限（防超长文本把 BPE 编码本身拖垮）
+    input_byte_cap: usize,
+}
+
+impl LocalOnnxEmbeddingProvider {
+    /// 加载权重并构造 provider。放在 `spawn_blocking` 里：1.2GB 的 commit 是重 CPU/IO 活。
+    pub async fn build(backend: &EmbeddingBackend) -> Result<Self, Box<dyn std::error::Error>> {
+        let cfg = match backend {
+            EmbeddingBackend::LocalOnnx(l) => l.clone(),
+            other => return Err(format!("backend is not a local-onnx config: {other:?}").into()),
+        };
+        // 先做可用性检查，报错文案里带模型路径 —— 否则用户只看到「退回图搜索」，
+        // 不知道是 model_dir 配错了。
+        backend.check_available().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+        let instruct = backend.effective_instruct().to_string();
+        let model_id = backend.model_id();
+        let input_byte_cap = cfg.input_byte_cap();
+        let max_length = cfg.max_length;
+
+        let embedder = tokio::task::spawn_blocking(move || {
+            local_embed::Embedder::load(
+                &cfg.model_dir,
+                &cfg.onnx_rel_path,
+                cfg.max_length,
+                cfg.intra_threads,
+            )
+        })
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> {
+            format!("local embedding model loader panicked: {e}").into()
+        })?
+        .map_err(|e| -> Box<dyn std::error::Error> {
+            format!("failed to load local ONNX embedding model: {e}").into()
+        })?;
+
+        let dimensions = embedder.dim();
+        info!(
+            "Local embedding model loaded: dim={dimensions} max_length={max_length} model={model_id}"
+        );
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(embedder)),
+            dimensions,
+            model_id,
+            instruct,
+            input_byte_cap,
+        })
+    }
+
+    /// 探测出的输出维度，供工厂填进 `BackendHandle`。
+    pub fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for LocalOnnxEmbeddingProvider {
+    fn model(&self) -> String {
+        self.model_id.clone()
+    }
+
+    /// harrier 官方模板：`Query:` 冒号后**有一个空格**（与远程 Qwen 模板不同）。
+    fn format_query(&self, query: &str) -> String {
+        crate::config::render_query(LOCAL_QUERY_TEMPLATE, &self.instruct, query)
+    }
+
+    async fn get_embedding(&self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        if text.is_empty() {
+            return Err("Embedding input is empty".into());
+        }
+        let owned = text.to_string();
+        let mut vecs = self.get_embeddings_batch(std::slice::from_ref(&owned)).await?;
+        vecs.pop()
+            .ok_or_else(|| "local embedding returned no vectors".into())
+    }
+
+    /// 一次 batch 只走一次 session.run。
+    ///
+    /// 与远程路径不同，这里**不做** batch 切分：调用方（`process_file_content`）已经按
+    /// `BATCH_SIZE` 切好了，本地再把 batch 拆小只会增加 padding 浪费。
+    async fn get_embeddings_batch(
+        &self,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 本地按 token 截断（tokenizer 内建），这里先做一道便宜的字节预截断，
+        // 避免几 MB 的单条文本把 BPE 编码本身拖垮。截断点对齐 UTF-8 char boundary。
+        let capped: Vec<String> = texts
+            .iter()
+            .map(|t| truncate_to_byte_limit(t, self.input_byte_cap).to_string())
+            .collect();
+
+        let inner = Arc::clone(&self.inner);
+        let count = capped.len();
+
+        let (vecs, truncated) = tokio::task::spawn_blocking(move || {
+            // 锁中毒说明上一次推理在 session 内 panic 过；ORT 每次 run 都会重建
+            // 内部状态，继续用比让整个 CLI 崩掉更有用。
+            let mut embedder = inner.lock().unwrap_or_else(|e| e.into_inner());
+            let vecs = embedder
+                .embed(&capped)
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>((vecs, embedder.truncation_hit()))
+        })
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> {
+            format!("local embedding task panicked: {e}").into()
+        })?
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+        if truncated {
+            // 启发式信号（batch 内最长序列恰好等于上限时也会触发），但静默截断
+            // 会让「向量为什么召回不到函数尾部」变成无法排查的问题。
+            warn!(
+                "Local embedding: a text in this batch of {count} reached the configured \
+                 max_length; its tail was truncated"
+            );
+        }
+
+        Ok(vecs)
+    }
+}
+
 pub struct EmbeddingService {
     connection: Connection, 
     pub table_name: String,
-    embedding_provider: Box<dyn EmbeddingProvider + Send + Sync>,
+    embedding_provider: Arc<dyn EmbeddingProvider>,
     pub dimensions: i32,
+    /// 后端指纹：决定表名、增量哈希文件名与缓存 key（见 `EmbeddingBackend::fingerprint`）。
+    pub fingerprint: String,
     cache: Arc<EmbeddingCache>,
     /// Optional BM25 text search index for sparse channel.
     /// When Some, chunks are indexed here alongside LanceDB vector indexing.
@@ -330,43 +494,26 @@ impl EmbeddingService {
         fs::create_dir_all(&cache_dir)?;
         let cache = Arc::new(EmbeddingCache::new(cache_dir.join("embedding_cache.sqlite").to_str().unwrap())?);
 
-        // Initialize HTTP client and get API token
-        let mut api_token = env::var("SILICONFLOW_API_KEY").ok();
-        let mut base_url = None;
-        let mut model = "Qwen/Qwen3-Embedding-4B".to_string(); // Default fallback
-        let mut dimensions = 2560;
-        // 查询侧指令：无配置时用默认指令；配置里显式空串时关闭注入
-        let mut instruct = DEFAULT_QUERY_INSTRUCT.to_string();
+        // Provider 来自进程级工厂：本地后端下这避免每次 new 都重读 1.2GB 权重。
+        // 无配置时退化为「远程 + 环境变量 token」，与重构前的默认行为逐字一致。
+        let backend = match config {
+            Some(c) => c.embedding.clone(),
+            None => EmbeddingBackend::Remote(RemoteEmbedding::default()),
+        };
+        let handle = crate::services::provider_factory::shared_handle(&backend)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
 
-        if let Some(conf) = config {
-             let embedding_config = &conf.embedding;
-             if !embedding_config.api_token.is_empty() {
-                 api_token = Some(embedding_config.api_token.clone());
-             }
-             if !embedding_config.api_base_url.is_empty() {
-                 base_url = Some(embedding_config.api_base_url.clone());
-             }
-             if !embedding_config.model.is_empty() {
-                 model = embedding_config.model.clone();
-             }
-             instruct = embedding_config.effective_instruct().to_string();
-             dimensions = embedding_config.dimensions as i32;
-        }
-        
-        let api_token = api_token.ok_or("API Key not found in config or environment")?;
-        
-        let provider = OpenAICompatibleEmbeddingProvider::new(api_token, base_url, model)
-            .with_instruct(instruct);
-        
         let min_code_block_length = config
             .map(|cfg| cfg.index.min_code_block_length)
             .unwrap_or(16);
-        
+
         Ok(Self {
             connection,
             table_name,
-            embedding_provider: Box::new(provider),
-            dimensions,
+            embedding_provider: Arc::clone(&handle.provider),
+            dimensions: handle.dimensions as i32,
+            fingerprint: backend.fingerprint(),
             cache,
             bm25_index,
             min_code_block_length,
@@ -389,11 +536,14 @@ impl EmbeddingService {
         let cache_path = cache_dir.join("embedding_cache.sqlite");
         let cache = Arc::new(EmbeddingCache::new(cache_path.to_str().unwrap())?);
 
+       let fingerprint = short_fingerprint(&format!("provider|{}|2560", provider.model()));
+
        Ok(Self {
             connection,
             table_name,
-            embedding_provider: provider,
+            embedding_provider: Arc::from(provider),
             dimensions: 2560,
+            fingerprint,
             cache,
             bm25_index: None,
             min_code_block_length: 16,
@@ -407,8 +557,8 @@ impl EmbeddingService {
         if !table_names.contains(&self.table_name) {
             info!("Creating table: {}", self.table_name);
             
-            // Qwen/Qwen3-Embedding-4B has 2560 dimensions
-            let vector_size = self.dimensions; 
+            // 维度来自后端：远程取配置，本地取图签名探测结果
+            let vector_size = self.dimensions;
             
             let schema = Arc::new(Schema::new(vec![
                 Field::new("id", DataType::Utf8, false),
@@ -428,7 +578,14 @@ impl EmbeddingService {
             self.connection.create_empty_table(&self.table_name, schema).execute().await?;
             info!("Table {} created successfully", self.table_name);
         } else {
-            info!("Table {} already exists", self.table_name);
+            // 表已存在也要校验向量列长度。旧实现只打一行 "already exists" 就放行，
+            // 于是换后端后会对着维度错的表静默丢行（见 upload_points）。
+            let expected = self.dimensions as usize;
+            let table = self.connection.open_table(&self.table_name).execute().await?;
+            let schema = table.schema().await?;
+            require_dims_match(&schema, "vector", expected, &self.table_name)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            info!("Table {} already exists ({}-dim vector verified)", self.table_name, expected);
         }
 
         Ok(())
@@ -528,8 +685,11 @@ impl EmbeddingService {
 
     /// Load persisted file hashes from project index directory.
     /// Returns None if the hashes file doesn't exist or is corrupted.
-    pub fn load_hashes(project_hash: &str) -> Option<std::collections::HashMap<String, String>> {
-        let path = Config::project_index_dir(project_hash).join("embedding_hashes.json");
+    pub fn load_hashes(
+        project_hash: &str,
+        fingerprint: &str,
+    ) -> Option<std::collections::HashMap<String, String>> {
+        let path = Config::project_index_dir(project_hash).join(format!("embedding_hashes_{fingerprint}.json"));
         if !path.exists() {
             return None;
         }
@@ -552,8 +712,12 @@ impl EmbeddingService {
     }
 
     /// Persist file hashes to project index directory.
-    pub fn save_hashes(project_hash: &str, hashes: &std::collections::HashMap<String, String>) -> Result<(), Box<dyn std::error::Error>> {
-        let path = Config::project_index_dir(project_hash).join("embedding_hashes.json");
+    pub fn save_hashes(
+        project_hash: &str,
+        fingerprint: &str,
+        hashes: &std::collections::HashMap<String, String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let path = Config::project_index_dir(project_hash).join(format!("embedding_hashes_{fingerprint}.json"));
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -653,9 +817,7 @@ impl EmbeddingService {
                 }
 
                 // Check cache first; collect cache-miss items for batch processing
-                let model = self.embedding_provider.model();
-                let hash_input = format!("{}{}", model, code_block);
-                let hash = format!("{:x}", md5::compute(&hash_input));
+                let hash = embedding_cache_key(&self.fingerprint, &code_block);
 
                 let embedding = if let Some(cached) = self.cache.get(&hash) {
                     cached
@@ -803,15 +965,18 @@ impl EmbeddingService {
         let mut line_end_builder = Int64Builder::new();
         let mut code_block_builder = StringBuilder::new();
         
+        // 维度不符说明上游校验被绕过。旧实现在这里 error! + continue —— 命令报成功、
+        // 表里悄悄少行，是最难排查的失败形态，所以改成直接失败。
+        if let Some(bad) = points.iter().find(|pt| pt.vector.len() != vector_size as usize) {
+            return Err(format!(
+                "vector dimension mismatch: backend produces {} but symbol '{}' has {}",
+                vector_size, bad.symbol_name, bad.vector.len()
+            )
+            .into());
+        }
+
         for p in points {
             id_builder.append_value(&p.id);
-            
-            // Ensure vector size matches
-            if p.vector.len() != vector_size as usize {
-                error!("Vector size mismatch: expected {}, got {}", vector_size, p.vector.len());
-                continue;
-            }
-
             vector_builder.values().append_slice(&p.vector);
             vector_builder.append(true);
             
@@ -844,6 +1009,41 @@ impl EmbeddingService {
         table.add(data).execute().await?;
 
         Ok(())
+    }
+
+    /// 删除**当前后端指纹**的向量表（`--rebuild` 用）。
+    ///
+    /// 只动这一张表：其它嵌入后端（例如还留在磁盘上的远程索引）不受影响，
+    /// 切回去时它们的索引仍然完整。
+    pub async fn drop_table(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // 表本来就不存在时视为成功：否则首次 `--rebuild` 会因为 drop 报错而把整个
+        // 嵌入阶段跳过，用户看到的是一个「什么都没做」的重建。
+        let names = self.connection.table_names().execute().await?;
+        if !names.contains(&self.table_name) {
+            info!("Nothing to drop: vector table {} does not exist", self.table_name);
+            return Ok(());
+        }
+
+        self.connection
+            .drop_table(&self.table_name, &[])
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!("failed to drop vector table '{}': {}", self.table_name, e).into()
+            })?;
+        info!("Dropped vector table: {}", self.table_name);
+        Ok(())
+    }
+
+    /// 删除某后端在当前项目上的增量哈希清单，使下一次 index 重新处理所有文件。
+    pub fn delete_hashes(project_hash: &str, fingerprint: &str) {
+        let path = Config::project_index_dir(project_hash)
+            .join(format!("embedding_hashes_{fingerprint}.json"));
+        if path.exists() {
+            match fs::remove_file(&path) {
+                Ok(()) => info!("Removed incremental hashes: {:?}", path),
+                Err(e) => error!("Failed to remove {}: {}", path.display(), e),
+            }
+        }
     }
 
     /// 优化 LanceDB 存储：compact 碎片整理 + prune 旧版本清理

@@ -1,3 +1,6 @@
+[workspace]
+members = ["local-embed"]
+
 [package]
 name = "codeseek"
 version = "0.1.31"
@@ -58,14 +61,17 @@ anyhow = "1"
 
 lance = "=8.0.0"
 
+# 本地 ONNX 嵌入后端（workspace member，ort + tokenizers 都被关在那里）
+local-embed = { path = "local-embed" }
+
 # BM25 full-text search
 tantivy = "0.22"
 
 [dev-dependencies]
 tempfile = "3.8"
 
-[profile.release]
-lto = "fat"
-opt-level = "z"
-codegen-units = 1
-strip = "symbols"
+# [profile.release]
+# lto = "fat"
+# opt-level = "z"
+# codegen-units = 1
+# strip = "symbols"

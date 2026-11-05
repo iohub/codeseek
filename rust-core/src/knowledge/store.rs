@@ -12,11 +12,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use futures::TryStreamExt;
 
-use crate::config::{Config, DEFAULT_QUERY_INSTRUCT};
+use crate::config::{Config, EmbeddingBackend};
 use crate::knowledge::record::KnowledgeRecord;
 use crate::knowledge::search::{build_result, rrf_fuse, KnowledgeSearchResult};
 use crate::knowledge::tantivy::KnowledgeTantivyIndex;
-use crate::services::embedding_service::{EmbeddingProvider, OpenAICompatibleEmbeddingProvider};
+use crate::services::provider_factory::{self, BackendHandle};
+use crate::storage::vector_schema::require_dims_match;
 
 /// Project-level knowledge store: LanceDB for vectors + Tantivy for BM25.
 pub struct KnowledgeStore {
@@ -26,6 +27,8 @@ pub struct KnowledgeStore {
     table_name: String,
     /// BM25 full-text index (optional, always initialised).
     bm25: Option<KnowledgeTantivyIndex>,
+    /// 建库时生效的嵌入后端。表名由它的指纹决定，因此同一项目的远程/本地索引互不干扰。
+    backend: EmbeddingBackend,
 }
 
 impl KnowledgeStore {
@@ -42,15 +45,26 @@ impl KnowledgeStore {
         let bm25 = KnowledgeTantivyIndex::open_or_create(&bm25_dir)
             .context("failed to open/create Tantivy index")?;
 
+        // 配置缺失时退回默认后端（远程），与 Config::load 的既有容错一致。
+        let backend = Config::load()
+            .map(|c| c.embedding)
+            .unwrap_or_default();
+        let table_name = format!("knowledge_{}", backend.fingerprint());
+
         Ok(Self {
             db_path,
-            table_name: "knowledge".to_string(),
+            table_name,
             bm25: Some(bm25),
+            backend,
         })
     }
 
     /// Ensure the LanceDB table exists with the correct schema.
-    pub async fn ensure_table(&self) -> anyhow::Result<()> {
+    ///
+    /// `dimensions` 为 `Some` 时（add/search 路径，已知后端维度）会校验已有表的
+    /// `vector` 列长度；为 `None` 时（删除/列表等不需要向量的路径）只做存在性检查，
+    /// 避免为了删一条记录去加载 1.2GB 模型。
+    pub async fn ensure_table(&self, dimensions: Option<usize>) -> anyhow::Result<()> {
         let db_path_str = self.db_path.to_string_lossy().to_string();
         let connection = connect(&db_path_str)
             .execute()
@@ -66,12 +80,27 @@ impl KnowledgeStore {
             .with_context(|| "failed to list LanceDB tables")?;
 
         if table_names.contains(&self.table_name) {
+            if let Some(expected) = dimensions {
+                let table = connection
+                    .open_table(&self.table_name)
+                    .execute()
+                    .await
+                    .with_context(|| format!("failed to open table '{}'", self.table_name))?;
+                let schema = table
+                    .schema()
+                    .await
+                    .with_context(|| format!("failed to read schema of '{}'", self.table_name))?;
+                require_dims_match(&schema, "vector", expected, &self.table_name)?;
+            }
             return Ok(());
         }
 
-        let dimensions = Config::load()
-            .map(|c| c.embedding.dimensions)
-            .unwrap_or(2560);
+        // 建新表必须有维度：远程后端取自配置，本地后端只能由探测结果传入。
+        let dimensions = dimensions
+            .or_else(|| self.backend.known_dimensions())
+            .ok_or_else(|| anyhow!(
+                "local-onnx backend must probe the embedding dimension first;                  this path should not be creating a knowledge table"
+            ))?;
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -120,35 +149,14 @@ impl KnowledgeStore {
         Ok(())
     }
 
-    /// Build an embedding provider from config (or environment fallback).
-    async fn build_provider(&self) -> anyhow::Result<Box<dyn EmbeddingProvider>> {
-        let config = Config::load().ok();
-        let config = config.as_ref();
-        let api_token = if config.map(|c| &c.embedding.api_token).unwrap_or(&String::new()).is_empty() {
-            std::env::var("SILICONFLOW_API_KEY").unwrap_or_default()
-        } else {
-            config.map(|c| c.embedding.api_token.clone()).unwrap_or_default()
-        };
-        let base_url = if config.map(|c| &c.embedding.api_base_url).unwrap_or(&String::new()).is_empty() {
-            None
-        } else {
-            Some(config.map(|c| c.embedding.api_base_url.clone()).unwrap_or_default())
-        };
-        let model = if config.map(|c| &c.embedding.model).unwrap_or(&String::new()).is_empty() {
-            "Qwen/Qwen3-Embedding-4B".to_string()
-        } else {
-            config.map(|c| c.embedding.model.clone()).unwrap_or_default()
-        };
-        // 查询侧指令：仅用于 provider.format_query()；入库(add)路径不会读取它。
-        // 显式配置为空串 => effective_instruct() 返回 "" => 关闭前缀注入。
-        let instruct = config
-            .map(|c| c.embedding.effective_instruct().to_string())
-            .unwrap_or_else(|| DEFAULT_QUERY_INSTRUCT.to_string());
-
-        let provider =
-            OpenAICompatibleEmbeddingProvider::new(api_token, base_url, model)
-                .with_instruct(instruct);
-        Ok(Box::new(provider))
+    /// 取进程级共享的 provider handle（按后端指纹缓存）。
+    ///
+    /// 旧实现在每次 add/search 都新建 provider：远程后端只是多一个 reqwest client，
+    /// 本地后端等于每次检索重读 1.2GB 权重，故必须走工厂。
+    async fn handle(&self) -> anyhow::Result<Arc<BackendHandle>> {
+        provider_factory::shared_handle(&self.backend)
+            .await
+            .context("failed to build embedding provider")
     }
 
     /// Insert a knowledge record into both LanceDB and the BM25 index.
@@ -157,20 +165,16 @@ impl KnowledgeStore {
         record = record.sanitize();
         let embed_text = record.embed_text();
 
-        let provider = self
-            .build_provider()
-            .await
-            .context("failed to build embedding provider")?;
+        let handle = self.handle().await?;
 
         // 文档/入库侧：裸 embed_text，不加任何 instruct 前缀（保持与既有向量索引同分布）
-        let vector = provider
+        let vector = handle
+            .provider
             .get_embedding(&embed_text)
             .await
-            .map_err(|e| anyhow!("embedding API call failed: {}", e))?;
+            .map_err(|e| anyhow!("embedding call failed: {}", e))?;
 
-        let dimensions = Config::load()
-            .map(|c| c.embedding.dimensions)
-            .unwrap_or(2560);
+        let dimensions = handle.dimensions;
         if vector.len() != dimensions {
             return Err(anyhow!(
                 "embedding dimension mismatch: expected {}, got {}",
@@ -180,11 +184,7 @@ impl KnowledgeStore {
         }
         record.vector = vector;
 
-        self.ensure_table().await?;
-
-        let dimensions = Config::load()
-            .map(|c| c.embedding.dimensions)
-            .unwrap_or(2560);
+        self.ensure_table(Some(dimensions)).await?;
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -326,7 +326,7 @@ impl KnowledgeStore {
 
     /// Delete a record by ID from both LanceDB and the BM25 index.
     pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
-        self.ensure_table().await?;
+        self.ensure_table(None).await?;
 
         let db_path_str = self.db_path.to_string_lossy().to_string();
         let table = connect(&db_path_str)
@@ -362,7 +362,7 @@ impl KnowledgeStore {
         type_filter: Option<&str>,
         tag_filter: Option<&str>,
     ) -> anyhow::Result<Vec<KnowledgeRecord>> {
-        self.ensure_table().await?;
+        self.ensure_table(None).await?;
 
         let db_path_str = self.db_path.to_string_lossy().to_string();
         let connection = connect(&db_path_str)
@@ -427,19 +427,18 @@ impl KnowledgeStore {
 
         let type_values = crate::knowledge::search::domain_to_type_values(domains);
 
-        let provider = self
-            .build_provider()
-            .await
-            .context("failed to build embedding provider")?;
+        let handle = self.handle().await?;
         // 查询侧注入官方 instruct 前缀；入库(add)侧保持裸文本，二者非对称。
-        let formatted_query = provider.format_query(query);
-        let query_vector = provider
+        let formatted_query = handle.provider.format_query(query);
+        let query_vector = handle
+            .provider
             .get_embedding(&formatted_query)
             .await
-            .map_err(|e| anyhow!("embedding API call failed for search query: {}", e))?;
+            .map_err(|e| anyhow!("embedding call failed for search query: {}", e))?;
 
         // ── Vector search ──
-        self.ensure_table().await?;
+        // 带上后端维度做校验：表是别的后端建的时，宁可报错也不要按错分布的向量排出垃圾结果。
+        self.ensure_table(Some(handle.dimensions)).await?;
         let db_path_str = self.db_path.to_string_lossy().to_string();
         let connection = connect(&db_path_str)
             .execute()
@@ -693,6 +692,7 @@ mod tests {
             bm25: Some(
                 KnowledgeTantivyIndex::open_or_create(&bm25_dir).unwrap(),
             ),
+            backend: crate::config::EmbeddingBackend::default(),
         };
 
         let record = KnowledgeRecord::new(

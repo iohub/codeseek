@@ -1,6 +1,7 @@
 pub mod analyzer;
 pub mod snippet_service;
 pub mod embedding_service;
+pub mod provider_factory;
 pub mod hybrid_search;
 pub mod reranker_service;
 pub mod callgraph_service;

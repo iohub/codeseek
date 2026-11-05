@@ -218,6 +218,13 @@ pub enum Commands {
         /// Interactive configuration wizard
         #[clap(short = 'i', long, action)]
         interactive: bool,
+        /// Drop the current backend's vector table and incremental hashes, then re-embed
+        /// every file. Requires --yes; other backends' indexes are left untouched.
+        #[clap(long, action)]
+        rebuild: bool,
+        /// Confirm a destructive --rebuild (it deletes index data)
+        #[clap(long, action)]
+        yes: bool,
     },
     /// Show index statistics (functions, files, last update)
     Status {

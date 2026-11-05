@@ -164,20 +164,31 @@ pub struct StorageManager {
 
 核心属性：
 
-- **嵌入提供者**：`OpenAICompatibleEmbeddingProvider`，兼容任意 OpenAI API 格式的嵌入服务
-- **向量数据库**：LanceDB（嵌入式，零外部依赖）
-- **嵌入缓存**：SQLite，key 为 `md5(model + code_block)`
-- **增量更新**：通过 `projects.json` 存储文件 MD5 哈希，仅重新处理变更文件
+- **嵌入后端**：`config.embedding.provider` 二选一
+  - `openai-compatible` —— `OpenAICompatibleEmbeddingProvider`，兼容任意 OpenAI API 格式的嵌入服务
+  - `local-onnx` —— `LocalOnnxEmbeddingProvider`，走 `rust-core/local-embed`（ONNX Runtime + tokenizers），完全离线
+  两个后端都实现同一个 `EmbeddingProvider` trait，检索链路（RRF 融合、BM25 通道、降级阶梯）不感知后端。
+- **provider 单例**：`services::provider_factory::shared_handle()` 按后端指纹缓存。本地后端加载
+  1.2GB 权重，必须复用；远程后端构造廉价，每次都新建（否则同进程改配置会沿用旧的查询前缀）。
+- **向量数据库**：LanceDB（嵌入式，零外部依赖）。无 ANN 索引，`nearest_to` 为暴力 KNN；
+  分数 `1/(1+L2距离)`，两后端输出都是 L2 归一化向量，故排序与余弦等价。
+- **嵌入缓存**：SQLite（`~/.codeseek/cache/embedding_cache.sqlite`），
+  key 为 `md5(后端指纹 + code_block)`
+- **增量更新**：`projects/<hash>/embedding_hashes_<后端指纹>.json` 存文件 MD5，仅重新处理变更文件
+
+表名规则：`codeseek_<md5(project_root) 前 8 位>_<后端指纹>`，知识表为 `knowledge_<后端指纹>`。
 
 嵌入流程：
 
 ```
 源码文件 → tree-sitter 解析 → 提取函数/结构体 → 查询 SQLite 缓存
   ├─ 命中 → 使用缓存向量
-  └─ 未命中 → 调用嵌入 API → 写入缓存 + LanceDB
+  └─ 未命中 → 按 BATCH_SIZE=20 批量嵌入（远程 API 或本地 ONNX 推理）→ 写缓存 + LanceDB
 ```
 
-表名规则：`{repo_dir_name}_{md5(repo_full_path)}`
+后端指纹 = `md5(模型身份 + 维度 + 截断长度)` 的前 8 位，同时决定表名、增量哈希文件名与缓存
+key。这样换后端等于换一整套独立索引：维度错配在结构上不可能发生，也不会因为「文件 MD5 没变」
+而在新后端下跳过全部文件（那会产出一个报成功但内容为空的索引）。
 
 ## HTTP API 设计
 

@@ -13,7 +13,7 @@ use clap::{Arg, ArgAction, CommandFactory, FromArgMatches, Parser};
 /// 本地模型目录默认值（只在本模块的 `#[arg]` 里用，故不 `pub`）
 const DEFAULT_MODEL_DIR: &str = "/Users/ydl/modelhub/harrier-oss-v1-0.6b-ONNX";
 /// 默认截断长度（同上，只在本模块使用）
-const DEFAULT_MAX_LENGTH: usize = 512;
+const DEFAULT_MAX_LENGTH: usize = 2048;
 /// 查询侧默认指令前缀（web search 场景，来自官方 model card）
 pub const WEB_SEARCH_INSTRUCTION: &str =
     "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ";

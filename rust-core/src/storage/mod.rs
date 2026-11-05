@@ -4,6 +4,7 @@ pub mod petgraph_storage;
 pub mod traits;
 pub mod traits_bm25;
 pub mod tantivy_index;
+pub mod vector_schema;
 pub mod prelude;
 pub mod lock;
 

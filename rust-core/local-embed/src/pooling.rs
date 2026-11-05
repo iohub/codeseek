@@ -11,7 +11,7 @@ use crate::vectors::l2_normalize;
 
 /// 池化策略：由模型输出签名决定
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Pooling {
+pub enum Pooling {
     /// 图内已内建 last-token pooling + L2 normalize（harrier 的 model_fp16.onnx 就属于这种）
     BuiltIn,
     /// 图只输出 last_hidden_state，需要 Rust 侧自己做 last-token pooling + L2 normalize
@@ -23,7 +23,7 @@ impl Pooling {
     ///
     /// 判定顺序与重构前一致：先看「名字是 sentence_embedding 或 rank==2」→ BuiltIn，
     /// 再看 rank==3 → LastToken，其余报错。
-    pub(crate) fn detect(output_name: &str, dims: &[i64]) -> Result<(Self, usize)> {
+    pub fn detect(output_name: &str, dims: &[i64]) -> Result<(Self, usize)> {
         let (strategy, what) = if output_name == "sentence_embedding" || dims.len() == 2 {
             (Self::BuiltIn, "嵌入")
         } else if dims.len() == 3 {
@@ -45,7 +45,7 @@ impl Pooling {
     /// - `dim`：期望的嵌入维度
     /// - `shape` / `data`：图输出的形状与扁平 f32 数据
     /// - `mask`：长度 `batch * seq_len` 的 attention_mask
-    pub(crate) fn apply(
+    pub fn apply(
         &self,
         batch: usize,
         dim: usize,

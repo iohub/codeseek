@@ -240,16 +240,67 @@ codeseek uninstall
 }
 ```
 
-> `embedding.instruct` —— Qwen3-Embedding 的查询侧指令（非对称检索）。只有**查询**会被加上官方
-> 前缀 `Instruct: {instruct}\nQuery:{查询原文}`（`Instruct:` 后有一个空格，`Query:` 后无空格）；
-> 入库的代码保持裸文本，已有向量索引不受影响。省略该字段即使用上面这条默认指令；
-> 配置为 `""` 则完全关闭前缀注入。
+> `embedding.instruct` —— 查询侧指令（非对称检索）。只有**查询**会被加上官方
+> 前缀（`Instruct:` 后有一个空格）；入库的代码保持裸文本，已有向量索引不受影响。
+> 省略该字段即使用上面这条默认指令；配置为 `""` 则完全关闭前缀注入。
+> 模板字面量由后端固定：`openai-compatible` 用 `Instruct: {指令}\nQuery:{查询}`
+> （`Query:` 后**无**空格），`local-onnx` 用 `Instruct: {指令}\nQuery: {查询}`
+> （`Query:` 后**有**一个空格），各自对齐所属模型族的官方写法。
+
+### 本地（离线）向量化
+
+`provider` 决定嵌入后端，两者在结构上互斥 —— `local-onnx` 的配置块里不可能带着一个
+会悄悄生效的 `api_token`。
+
+```json
+{
+  "embedding": {
+    "provider": "local-onnx",
+    "model_dir": "/Users/ydl/modelhub/harrier-oss-v1-0.6b-ONNX",
+    "onnx_rel_path": "onnx/onnx/model_fp16.onnx",
+    "max_length": 2048,
+    "intra_threads": 0,
+    "instruct": "Given a code search query, retrieve relevant functions or code snippets that answer the query."
+  }
+}
+```
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `model_dir` | `/Users/ydl/modelhub/harrier-oss-v1-0.6b-ONNX` | 存放 `tokenizer.json` 与 ONNX 图的目录 |
+| `onnx_rel_path` | `onnx/onnx/model_fp16.onnx` | 双层 `onnx/onnx/` 是导出工具的目录结构，不是笔误 |
+| `max_length` | `2048` | tokenizer 截断长度；模型本身支持到 32768 |
+| `intra_threads` | `0` | `0` 交给 ONNX Runtime 决定；单次推理内部已用满多核 |
+| `instruct` | 与远程同一默认 | 三态语义一致（缺省 / `""` / 自定义） |
+
+`local-onnx` **故意没有 `dimensions` 字段**：输出维度由 ONNX 图签名探测。harrier 的图
+输出是 `sentence_embedding: float32[batch, 1024]`，last-token 池化与 L2 归一化都已内建在
+图里，所以 Rust 侧不需要再做，也不该被配置项覆盖。
+
+切换后端不会迁移数据。后端身份（模型 + 维度 + 截断长度）会被哈希成一个指纹，并同时决定
+LanceDB 表名（`codeseek_<项目>_<指纹>`）、增量哈希文件名（`embedding_hashes_<指纹>.json`）
+以及每条嵌入缓存的 key —— 因此两个后端各自拥有一套索引，维度错配不可能静默发生。
+切换后重新执行 `codeseek init` 即可；若要丢弃当前后端的索引并全量重嵌：
+
+```bash
+codeseek init --rebuild --yes
+```
+
+`--rebuild` 只删 `config.json` 里当前后端那一张表；之后切回另一个后端时它的索引仍然完整。
+因为会删除索引数据，必须与 `--yes` 同时给出。
+
+构建说明（macOS arm64）：ONNX Runtime 静态库引用了 clang 的
+`___isPlatformVersionAtLeast`，而 macOS SDK 与 Rust 的 `compiler_builtins` 都不提供它。
+`rust-core/local-embed/build.rs` 通过 `clang -print-resource-dir` 定位并链接
+`libclang_rt.osx.a`，因此 `lto = "fat"` 可以保留，也不需要任何 `RUSTFLAGS`。
+完整设计与实测数据见 `rust-core/docs/local-embedding-backend.md`。
 
 ### 模型角色
 
 | 模型 | 作用 | 时机 |
 |------|------|------|
 | `Qwen/Qwen3-Embedding-4B` | 将代码转为向量，用于密集搜索 | 构建索引时 |
+| `harrier-oss-v1-0.6b`（ONNX，本地） | 同上，走 ONNX Runtime 完全离线 | 构建索引时 |
 | `Qwen/Qwen3-Reranker-4B` | 为 (查询, 代码) 配对精确打分 | 搜索时 |
 
 首次运行交互式向导自动填写，也可以手动创建。
