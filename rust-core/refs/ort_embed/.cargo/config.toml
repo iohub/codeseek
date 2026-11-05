@@ -1,0 +1,8 @@
+# 说明：ort-sys 在 macOS arm64 上下载的 onnxruntime 静态库是以 macOS 13.4 为部署目标编译的。
+# 若使用 rustc 默认的更低部署目标（11.0），链接时会报 `___isPlatformVersionAtLeast` 未定义
+# （该符号来自 CoreML EP 的目标文件）。这里统一把部署目标抬高到 13.4。
+#
+# 另外注意：**不要**在 Cargo.toml 里开启 `lto`。开启 LTO 后链接器会把
+# onnxruntime 的 CoreML EP 目标文件一并拉入，同样触发上述未定义符号错误。
+[env]
+MACOSX_DEPLOYMENT_TARGET = "13.4"
