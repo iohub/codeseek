@@ -49,8 +49,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing_subscriber::EnvFilter::new("warn")
         }
     });
+    // 日志一律写 stderr：stdout 是**结果通道**（`--json` 时必须是纯 JSON）。
+    //
+    // tracing 的 fmt subscriber 默认 writer 是 stdout，任何一个 warn! 都会把
+    // 「` WARN codeseek::services::hybrid_search: ...」混进 JSON 正文，让下游
+    // `json.loads(stdout)` 直接失败。并发检索触发降级告警时已实测复现过。
     tracing_subscriber::fmt()
         .with_env_filter(filter_layer)
+        .with_writer(std::io::stderr)
         .init();
 
     // Phase P3 收口 B（交付物 1）：`--levels` 的**缓存陈旧** fail-fast。
@@ -317,6 +323,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (_index_dir, lock_path) = project_paths(&project_root);
             let _lock = FileLock::shared(lock_path)?;
 
+            // 检索管线是否发生过降级（后端打开失败 / 检索出错）。两个用途：
+            // 1) 解释「为什么结果是空的」—— 否则基础设施故障会被误读成检索能力不足；
+            // 2) 降级时禁止回退到 graph 名字匹配（见下方 use_graph_fallback）。
+            //
+            // 三处告警统一用 `eprintln!` 而非 `warn!`：tracing 的 fmt subscriber 默认
+            // 写 stdout，会污染 `--json` 的输出（下游按 stdout 解析 JSON）。
+            let mut search_degraded = false;
+
             let results = if let Some(ref cfg) = config {
                 if !cfg.embedding.api_token.is_empty() {
                     let project_hash = Config::compute_project_hash(&project_root);
@@ -326,16 +340,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .to_string_lossy()
                         .to_string();
 
-                    if let Ok(es) =
-                        EmbeddingService::new(&db_path, collection, Some(cfg), None).await
-                    {
-                        // BM25 索引存储在项目目录下的 tantivy_bm25/ 子目录
+                    let embedding =
+                        EmbeddingService::new(&db_path, collection, Some(cfg), None).await;
+                    if let Err(e) = &embedding {
+                        eprintln!(
+                            "[codeseek] warning: 向量检索初始化失败（LanceDB: {}），本次检索降级：{}",
+                            db_path, e
+                        );
+                        search_degraded = true;
+                    }
+
+                    if let Ok(es) = embedding {
+                        // BM25 索引存储在项目目录下的 tantivy_bm25/ 子目录。
+                        //
+                        // 必须用 open_readonly：open_or_create 结尾会创建 IndexWriter，
+                        // 而 tantivy 的 writer 对索引目录持有**独占**的 .tantivy-writer.lock。
+                        // 搜索只需要 reader，却因此去抢一把用不到的写锁 —— 第二个并发
+                        // search 进程会立即 LockBusy 失败，进而静默降级并打印空结果。
                         let bm25_dir = Config::bm25_dir(&project_hash);
-                        let bm25_index =
-                            TantivyBm25Index::open_or_create(&bm25_dir).ok().map(|idx| {
-                                Arc::new(idx)
-                                    as Arc<dyn codeseek::storage::traits_bm25::TextSearchProvider>
-                            });
+                        let bm25_index = match TantivyBm25Index::open_readonly(&bm25_dir) {
+                            Ok(idx) => Some(Arc::new(idx)
+                                as Arc<dyn codeseek::storage::traits_bm25::TextSearchProvider>),
+                            Err(e) => {
+                                eprintln!(
+                                    "[codeseek] warning: BM25 索引打开失败（{}），稀疏通道不可用：{}",
+                                    bm25_dir.display(),
+                                    e
+                                );
+                                search_degraded = true;
+                                None
+                            }
+                        };
 
                         if let Some(bm25) = bm25_index {
                             let hybrid_cfg = &cfg.index.hybrid;
@@ -377,7 +412,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     },
                                 )
                             };
-                            Some(hybrid.search(query, *limit).await.unwrap_or_default())
+                            // 不能再用 unwrap_or_default()：它把「检索出错」变成「检索没命中」，
+                            // 两者对下游（评测、诊断）的意义完全不同。
+                            match hybrid.search(query, *limit).await {
+                                Ok(hits) => Some(hits),
+                                Err(e) => {
+                                    eprintln!(
+                                        "[codeseek] warning: 混合检索失败，本次按空结果返回：{}",
+                                        e
+                                    );
+                                    search_degraded = true;
+                                    Some(Vec::new())
+                                }
+                            }
                         } else {
                             None
                         }
@@ -391,8 +438,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
 
-            // Fallback to graph-based name search when embeddings unavailable or empty
-            let use_graph_fallback = results.as_ref().map(|r| r.is_empty()).unwrap_or(true);
+            // Fallback to graph-based name search.
+            //
+            // 只在「检索管线健康、但确实没有命中」时才回退：find_functions_by_name 是拿整段
+            // query 做函数名子串匹配（评测场景下 query 是几百字符的 description），几乎必然
+            // 0 命中。若在后端已降级（search_degraded）时仍回退，就会把基础设施故障伪装成
+            // 「检索无结果」，并让输出 schema 从 9 字段退化成 5 字段 —— 这正是评测侧把并发
+            // 故障误判为模型失败的原因。
+            let results_empty = results.as_ref().map(|r| r.is_empty()).unwrap_or(true);
+            let use_graph_fallback = results_empty && !search_degraded;
 
             if use_graph_fallback {
                 let storage = Arc::new(StorageManager::new());
@@ -400,8 +454,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Ok(Some(graph)) = storage.get_persistence().load_graph(&project_hash) {
                     let funcs = graph.find_functions_by_name(query);
                     if *json {
+                        // 必须遵守 --limit：旧实现无条件输出全部命中，长 query 下可能刷出
+                        // 几十 KB。这里刻意**不补 code_block 键** —— 下游正是靠「有无
+                        // code_block」判断本次是否走了名字匹配降级，补空串会让两者混淆。
                         let output: Vec<_> = funcs
                             .iter()
+                            .take(*limit)
                             .map(|f| {
                                 serde_json::json!({
                                     "name": f.name,

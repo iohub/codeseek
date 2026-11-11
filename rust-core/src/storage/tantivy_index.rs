@@ -387,6 +387,79 @@ impl TantivyBm25Index {
         })
     }
 
+    /// 只读打开一个**已存在**的索引：不建目录、不建 `IndexWriter`。
+    ///
+    /// # 为什么必须有这个入口
+    ///
+    /// [`Self::open_or_create`] 为了支持写入，结尾无条件执行 `index.writer(...)`。
+    /// tantivy 的 `IndexWriter` 会对索引目录持有**独占**的 `.tantivy-writer.lock`，
+    /// 而搜索路径只需要 reader —— 它被迫去抢一把自己根本用不到的写锁。后果是第二个
+    /// 并发 `codeseek search` 进程在这里**立即**失败（LockBusy，毫秒级），一旦调用方把
+    /// 该错误吞成 `None`，就会静默降级成 PetCodeGraph 的函数名匹配并打印空结果，
+    /// 表现为「并发 search 随机返回 `[]`、耗时仅 0.03s、stderr 无任何输出」。
+    ///
+    /// 本入口只走 `Index::open_in_dir`（多进程可并发共享），并把 `writer` 置为 `None`：
+    /// - 读方法 [`TextSearchProvider::search`] / `document_count` / `is_ready` 只用
+    ///   `self.index.reader()`，完全不受影响；
+    /// - 写方法 `index_chunks` / `remove_by_path` / `commit` 在 `None` 时返回明确的
+    ///   `Err("Tantivy writer is dropped")`，**不会 panic** —— 该字段本就是 `Option`。
+    ///
+    /// # 错误语义
+    ///
+    /// - 目录不存在或不是合法 tantivy 索引 → 返回 `Err`（**绝不**副作用创建空索引，
+    ///   否则「从未 init 就 search」会得到一个永远空的索引而不报错）；
+    /// - 索引合法但 0 文档 → 返回 `Ok`（空库是合法状态，由调用方按空结果处理）。
+    pub fn open_readonly<P: AsRef<Path>>(dir: P) -> Result<Self> {
+        let dir_path = dir.as_ref();
+        if !dir_path.is_dir() {
+            return Err(anyhow!(
+                "Tantivy index not found at {:?} (read-only open); run 'codeseek init' first",
+                dir_path
+            ));
+        }
+
+        let index = Index::open_in_dir(dir_path).map_err(|e| {
+            anyhow!(
+                "Failed to open Tantivy index at {:?} (read-only): {}",
+                dir_path,
+                e
+            )
+        })?;
+
+        // schema 与字段句柄必须从**打开后的索引**读回：`Field` 是 schema 内的序号，
+        // 若拿新建 builder 的 schema 去读，列会整体错位。
+        let schema = index.schema();
+        let field_of = |name: &str| -> Result<Field> {
+            schema
+                .get_field(name)
+                .map_err(|e| anyhow!("Tantivy index {:?} is missing field '{}': {}", dir_path, name, e))
+        };
+
+        let snippet_id_field = field_of("snippet_id")?;
+        let file_path_field = field_of("file_path")?;
+        let content_field = field_of("content")?;
+        let symbol_name_field = field_of("symbol_name")?;
+        let language_field = field_of("language")?;
+
+        // QueryParser 构建查询时要按 schema 里记录的分词器名查找分析器，必须先注册。
+        let code_analyzer =
+            tantivy::tokenizer::TextAnalyzer::builder(CodeTokenizer::default()).build();
+        index.tokenizers().register(CODE_TOKENIZER, code_analyzer);
+
+        Ok(Self {
+            index,
+            schema,
+            // 只读实例：绝不创建 IndexWriter，因而不触碰 .tantivy-writer.lock
+            writer: Arc::new(Mutex::new(None)),
+            snippet_id_field,
+            file_path_field,
+            content_field,
+            symbol_name_field,
+            language_field,
+            rebuilt: false,
+        })
+    }
+
     /// 本次打开是否发生过索引重建（schema/tokenizer 变更导致）。
     ///
     /// 为 `true` 时调用方应放弃增量索引、改为全量重建，否则稀疏通道会一直是空的。
