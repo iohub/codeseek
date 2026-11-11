@@ -226,7 +226,8 @@ repoqa.compute_score --model-output-path={model-output}.jsonl
 - 证据截图：
   - 榜单：`/Users/ydl/.yagent/data/browser/5315c972-6383-407d-a5d6-55f0b07c/repoqa-leaderboard-16k.png`
   - 论文摘要：`/Users/ydl/.yagent/data/browser/5315c972-6383-407d-a5d6-55f0b07c/repoqa-arxiv-abstract.png`
-  - 说明：原始记录里该目录名被写作 `...55f0b07c7de`，磁盘上的真实目录名为 `...55f0b07c`（无 `7de` 后缀），此处按实际存在的路径给出。
+  - 同一榜单页另有 `repoqa-leaderboard.png`，它与 `repoqa-leaderboard-16k.png` 是同一页面两次截取（尺寸同为 756x469，字节数均为 68588 B）。
+  - 说明：本次取证会话的 task id 为 `...55f0b07c7fde`，而磁盘上实际保存截图的目录名是 `...55f0b07c`（相对 task id 截断了 `7fde` 后缀）；以上路径均为实测存在的文件（每张均为 756x469 视口截图，非整页长图）。
 
 **网络说明**
 
