@@ -134,6 +134,12 @@ python -m repoqa_eval selftest
 evals/repoqa/
 ├── README.md
 ├── requirements.txt
+├── results/                # 已跑通的实测结果归档（见第 8 节）
+│   ├── README.md
+│   ├── 2026-11-11-report.md           # backend=nltk
+│   ├── 2026-11-11-report.json
+│   ├── 2026-11-11-report.builtin.md   # backend=builtin（对拍基线）
+│   └── 2026-11-11-report.builtin.json
 └── repoqa_eval/
     ├── __init__.py
     ├── data.py      # 下载/缓存/子集抽样/仓库快照/Task/needle 切片
@@ -171,3 +177,20 @@ evals/repoqa/
   加 `--auto-build` 可让脚本自己构建（仅在你显式要求时执行）。
 - **报告里 `unknown_empty` 很多**：说明 search 没返回可解析 JSON（索引没建好 / 二进制不匹配），
   先手工跑一次 `cd <repo> && codeseek init && codeseek search "..." --json` 定位。
+
+## 8. 实测结果
+
+2026-11-11 已用本套件跑通首次端到端评测（100 题子集，5 语言 × 2 仓库 × 10 needle，`threshold=0.8`，
+`backend=nltk`，`hybrid` 检索 100%，0 空结果）：
+
+| 语言 | 通过/总数 | accuracy |
+| --- | --- | --- |
+| python | 18/20 | 90.0% |
+| cpp | 9/20 | 45.0% |
+| java | 17/20 | 85.0% |
+| typescript | 20/20 | 100.0% |
+| rust | 10/20 | 50.0% |
+| **all** | **74/100** | **74.0%** |
+
+- 报告与逐题明细：[`results/README.md`](results/README.md)（`results/2026-11-11-report.md` / `.json`，另有 builtin BLEU 对拍基线 `*.builtin.*`）
+- 三条关键洞察（切块同源 73/74 逐字相同、cpp 45% 主因是切块粒度 +30pt 上限、rust 50% 主因是检索选错符号）见该目录说明。

@@ -14,7 +14,7 @@
 - [8. 常见误传与澄清](#8-常见误传与澄清)
 - [9. 维护状态](#9-维护状态)
 - [10. 参考链接](#10-参考链接)
-- [11. 信息核实说明（含未获证实的常见误传）](#11-信息核实说明含未获证实的常见误传)
+- [11. 信息核实说明（含常见误传核实与修订记录）](#11-信息核实说明含常见误传核实与修订记录)
 
 ## 1. 基本信息
 
@@ -60,13 +60,17 @@ file_01.ext … file_10.ext（同一仓库的多个源文件顺序拼接）
 
 | 维度 | 内容 |
 |------|------|
-| 测试数量 | **500** = 5 语言 × 10 仓库 × 10 针函数 |
-| 语言 | Python / C++ / Java / TypeScript / Rust |
-| 仓库 | 每语言 **10** 个 ≥100 stars 的热门仓库，共 **50** 个 |
+| 测试数量 | **500**（论文/README 口径，5 语言）｜**600**（官方 release `2024-06-23` 实测，6 语言含 `go`） |
+| 语言 | 论文/README 写 Python / C++ / Java / TypeScript / Rust 五种；**官方 release 实测为 6 种，另含 `go`** |
+| 仓库 | 每语言 **10** 个 ≥100 stars 的热门仓库，共 **50** 个（论文口径）；release 实测为 **60** 个（含 `go` 的 10 个） |
 | 上下文长度 | 固定 **16K tokens**。注意三处口径不一致（原文如此）：论文用 CodeLlama tokenizer；README 的 CLI 默认 `--code-context-size 16384` 但写的是 DeepSeekCoder tokenizer；官方 homepage 写的是 CodeLlama |
-| 针函数位置 | 每个仓库内按 **10%、20% … 100%** 的深度均匀植入 |
+| 针函数位置 | 论文表述为 10%、20% … 100% 深度；**实际数据为 0.05、0.15 … 0.95**（代码 `(i + 0.5) / 10`，i=0..9） |
 
-"深度"指针函数在上下文中的相对位置：10% 表示针函数出现在靠近上下文开头的位置，100% 表示出现在末尾。每个仓库植入 10 个针函数、覆盖 10 个深度档位，因此同一个仓库会被测量 10 次，用于观察"位置越靠后是否越难"。
+> **口径说明（500 vs 600）**：论文与 README 的「500 = 5 语言 × 10 仓库 × 10 针函数」是**写作时的口径**；后续官方 release 扩充了 `go`，下载 `repoqa-2024-06-23.json.gz` 实测为**6 语言 × 10 仓库 × 10 针函数 = 600 条 needle**（`python` / `cpp` / `java` / `typescript` / `rust` / `go` 各 100 条）。引用数据集规模时应注明采用的是哪一口径。
+
+"深度"指针函数在（按依赖顺序拼接后的）上下文中的**目标**相对位置：0.05 表示针函数被放在靠近上下文开头处，0.95 表示靠近末尾。每个仓库抽取 10 个针函数并覆盖 10 个位置分箱，再由 harness 依次赋予 10 个深度档位——`search_needle_function.py` 对第 i 条 needle 取 `position_ratio = (i + 0.5) / len(repo["needles"])`，并按 `prefix_size = int(code_context_size * position_ratio - ntoken_needle / 2)` 计算前缀长度。因此同一个仓库会被测量 10 次，用于观察"位置越靠后是否越难"。
+
+需要留意：这个 ratio 是**被 padding 出来的目标位置**，不是 needle 在原始仓库文件里的自然字节偏移（实测同一 repo 内不同 needle 的 `global_start_byte / 总字节数` 与 `(i + 0.5) / 10` 并不对应）。论文的 "depths of 10%, 20%, ⋯, 100%" 与实现的 0.05–0.95 相差一档半步（5% 步长、两端各留半档），不要按字面理解成"针函数一定出现在第 10% 处"。
 
 需要留意的是，16K 是**固定窗口**而非可变区间；数据集并不覆盖 2K 或 100K 级别的长度（见 [第 8 节](#8-常见误传与澄清)）。
 
@@ -75,8 +79,10 @@ file_01.ext … file_10.ext（同一仓库的多个源文件顺序拼接）
 只有单一指标：**Retrieval Accuracy（0–100%）**。对每个测试而言，判定必须**同时**满足以下条件：
 
 1. **后处理**：用 tree-sitter 从模型输出中提取第一个语法正确的代码块；
-2. **(i) 相对排序第一**：该函数与针函数的相似度，在全部候选函数中最相似（候选函数同样经 tree-sitter 解析）；
+2. **(i) 相对排序第一**：该函数与针函数的相似度，在该仓库的**候选集**中最相似。README 原文写的是"与其它经 tree-sitter 系统解析的函数中最接近"，但**实测 `compute_score.py` 的候选集就是该 repo 的 10 条 needle 切片**——按各自 `start_line:end_line` 从 `content` 切出，既不解析仓库、也不枚举全部函数；
 3. **(ii) 绝对阈值**：相似度 ≥ 默认阈值 **0.8**；相似度采用带平滑的 BLEU（Chen & Cherry, 2014）。
+
+> **口径差异（实测）**：tree-sitter 只用于从**模型输出**中提取"第一个函数定义"，**不用于构建候选池**。因此判定的真实含义是"模型输出与这 10 条 needle 中哪一条最像，且相似度是否 ≥ 0.8"，比"与全仓库函数竞争排序第一"**宽松得多**：只要在该 repo 的 10 条候选里排第一即可，不存在被仓库中另一个更相似的函数"挤掉"的风险。跨口径比较时（与官方榜单、与自建的全仓库检索评测）分数不能直接互换。
 
 **不使用 LLM-as-judge**：判分完全由语法解析 + BLEU 相似度决定，不存在"让另一个大模型打分"的环节，因此分数是可复现的、确定性的。
 
@@ -88,7 +94,7 @@ README 对判定规则的英文原文：
 
 > "By aggregating the success rate of retrieving needle functions across all tests, we obtain a final accuracy score from 0 to 100 (%) to represent the long-context code retrieval ability of the model."
 
-由于判定要求"相似度最高"与"相似度 ≥ 0.8"同时成立，模型即使输出了一个高度相似的函数，只要仓库中存在另一个更相似的函数，该测试仍记为失败——这使指标比单纯的 BLEU 阈值更严格。
+由于判定要求"在 10 条候选中最相似"与"相似度 ≥ 0.8"同时成立，实际起主要约束作用的是**后者**；但当模型输出的函数恰好与另一条 needle 更像时（相似度可能很低但仍排第一），该题会记为失败（`wrong_target`）。因此该指标比单纯的 BLEU 阈值更严格，也比"真实仓库检索"的难度口径更宽松。
 
 ## 5. 使用方式（CLI）
 
@@ -113,7 +119,7 @@ repoqa.compute_score --model-output-path={model-output}.jsonl
 
 ## 6. 官方榜单（16K 上下文，thresh = 0.8）
 
-**榜单不在 GitHub README 里**，而托管在项目 homepage：<https://evalplus.github.io/repoqa.html> 。页面共 **33 行**（第 22 位并列两名），列序为 `.py / .cpp / .rs / .java / .ts / Avg`，相似度阈值 `thresh = 0.8`。
+**榜单不在 GitHub README 里**，而托管在项目 homepage：<https://evalplus.github.io/repoqa.html> 。页面共 **33 行**（第 22 位并列两名），列序为 `.py / .cpp / .rs / .java / .ts / Avg`，相似度阈值 `thresh = 0.8`。榜单单据只有这 5 种语言、**没有 go 列**（尽管 release 数据含 go 的 100 条 needle，见 [第 3 节](#3-数据构成)口径说明），因此本表不能直接与含 go 的 600 题口径互换。
 
 | # | Model | 宣称上下文 | Py | C++ | Rust | Java | TS | Avg |
 |---|-------|-----------|----|-----|------|------|----|-----|
@@ -186,9 +192,12 @@ repoqa.compute_score --model-output-path={model-output}.jsonl
 |------|----------|
 | arXiv 编号是 2406.06036 | ❌ 2406.06036 是一篇无关的数学论文；正确编号为 **2406.06025** |
 | 评测覆盖 2K–2M tokens 的变长上下文 | ❌ 论文与官网只有 **16K 固定窗口**，没有变长评测 |
-| 存在 Go 语言子集，以及 `repoqa-2024-06-23` / `repoqa-2024-06-24` 等数据集版本 | ❌ README、arXiv 全文、HuggingFace 上的 evalplus 组织页均无任何依据；HF 上只有第三方（如 `Nutanix/RepoQA-neo4j` 等）镜像，非官方发布 |
+| 存在 Go 语言子集 | ✅ **确实存在**（实测口径，此前判为"误传"是错的）。官方 release `repoqa-2024-06-23` 顶层 keys 为 `['python','cpp','java','typescript','rust','go']`，`go` 含 10 仓库 × 10 needle = **100 条**。论文/README 只写 5 语言是**写作时未含 go**，后续 release 扩充 |
+| 存在 `repoqa-2024-06-23` / `repoqa-2024-06-24` 等数据集版本 | ✅ `repoqa-2024-06-23` **确实存在**：它就是官方 `repoqa/data.py` 中 `REPOQA_DATA_VERSION` 的默认值，也是 `evalplus/repoqa_release` 的 GitHub Release tag（下载地址见 [第 10 节](#10-参考链接)）。`2024-06-24` 这一 tag 本次未核实 |
 | README 里就有 leaderboard 表格 | ❌ README 只有安装、用法与引用信息；榜单在 homepage（`evalplus.github.io/repoqa.html`） |
 | 判分使用 LLM-as-judge | ❌ 判定为 tree-sitter 解析 + 平滑 BLEU ≥ 0.8 且排序第一，全程没有 LLM 评审 |
+
+> 上表中「存在 Go 语言子集」与「存在 `repoqa-2024-06-23` 等数据集版本」两条此前被列为"误传"，2026-11-11 下载官方 release 数据并复刻 `compute_score.py` 判分后**已推翻**：错因是当时只查了 README、arXiv 全文与 HuggingFace 组织页，而数据集本身既不在仓库里、也不在 HF 上，只存在于 `evalplus/repoqa_release` 的 GitHub Release 二进制中。
 
 ## 9. 维护状态
 
@@ -200,7 +209,7 @@ repoqa.compute_score --model-output-path={model-output}.jsonl
 | Releases | 7 个，最新为 v0.1.2 |
 | 最新 commit | `ae876de`，时间 2024-10-29，信息 `refactor(hf): use stop_strings over external lib` |
 | 许可证 | Apache-2.0 |
-| 数据集获取方式 | 不在 HuggingFace 上托管，通过仓库内的 `repoqa_release` 加载 |
+| 数据集获取方式 | 不在 HuggingFace 上托管；由 `repoqa/data.py` 从 `evalplus/repoqa_release` 的 GitHub Release 下载（默认 tag = `REPOQA_DATA_VERSION` = `2024-06-23`） |
 
 仓库的最新 commit 停留在 2024-10-29，榜单也未增补 2025 年的模型，可视为进入低频维护状态。若要用于新模型的横向对比，需要按 [第 5 节](#5-使用方式cli) 的 CLI 自行运行评测，并注意保持 `--code-context-size` 与 tokenizer 设置与官方一致，否则分数不可比。
 
@@ -211,13 +220,14 @@ repoqa.compute_score --model-output-path={model-output}.jsonl
 | 论文摘要页（arXiv abs） | <https://arxiv.org/abs/2406.06025> |
 | 论文全文（arXiv HTML，v1） | <https://arxiv.org/html/2406.06025v1> |
 | GitHub 仓库 | <https://github.com/evalplus/repoqa> |
+| **数据集下载（实测可用）** | <https://github.com/evalplus/repoqa_release/releases/download/2024-06-23/repoqa-2024-06-23.json.gz>（**12.5 MB gz**，HTTP 200 / `12525636` B，解压后 **71,510,991 B**） |
 | 官方榜单页 | <https://evalplus.github.io/repoqa.html> |
 | EvalPlus 组织页 | <https://github.com/evalplus> |
 | HF evalplus 组织页 | <https://huggingface.co/evalplus>（**无** RepoQA 数据集） |
 
 表中 arXiv HTML 链接指向 v1 的 HTML 版本；该 HTML 页面的可访问性本次**未逐次核实**，若链接失效，请以摘要页提供的 PDF 为准。
 
-## 11. 信息核实说明（含未获证实的常见误传）
+## 11. 信息核实说明（含常见误传核实与修订记录）
 
 **采集时间与方式**
 
@@ -236,11 +246,22 @@ repoqa.compute_score --model-output-path={model-output}.jsonl
 **未核实项**
 
 - **2K–2M 变长上下文数据**：论文与官网均只有 16K 固定窗口，未发现任何变长评测的证据。
-- **needle 深度分层性能曲线**：数据集按 10%–100% 深度植入针函数，但论文与官网都没有给出"分数随深度变化"的曲线；本仓库中也未找到该数据的公开出处。
-- **Go 语言成绩**：RepoQA 的 5 种语言中不含 Go，任何 Go 子集成绩均无一手依据。
+- **needle 深度分层性能曲线**：数据集按 0.05–0.95 十个档位植入针函数，但论文与官网都没有给出"分数随深度变化"的曲线；本仓库中也未找到该数据的公开出处。
+- **Go 语言成绩**：官方 homepage 榜单与论文 Table 2 只报 5 种语言、**没有 go 列**，因此 go 的"官方成绩"仍无一手依据；但 go 的**数据子集确实存在**（官方 release 含 100 条 go needle），要 go 的成绩只能自行运行评测。
 - **2025 年后的新模型成绩**：榜单未更新，官方未提供相应数据，需自行运行评测。
 - **"Repository Question Answering" 作为正式全称**：论文标题与摘要只写 RepoQA，未做全称展开；该说法属社区按字面理解，非官方定义。
 
 **关于"常见误传"的进一步说明**
 
-[第 8 节](#8-常见误传与澄清)列出的五条传闻，均是在检索过程中反复出现、但无法在一手页面中找到依据的说法。其中最容易被误引的是 arXiv 编号（`2406.06036` 与 `2406.06025` 仅差一位）与"变长上下文"——后者很可能是把其他长上下文基准的设定张冠李戴到了 RepoQA 上。引用本文档中的任何分数时，请同时注明来源是 homepage 榜单还是论文 Table 2，因为两者存在 4 处 1 分之差。
+[第 8 节](#8-常见误传与澄清)列出的六条传闻中，四条仍是在检索过程中反复出现、但无法在一手页面中找到依据的说法（arXiv 编号、变长上下文、README 榜单、LLM-as-judge）；另两条（go 子集、`repoqa-2024-06-23` 版本）经 2026-11-11 的数据实测**已确认属实**，原来的"误传"判定是取证范围不足造成的误判。其中最容易被误引的是 arXiv 编号（`2406.06036` 与 `2406.06025` 仅差一位）与"变长上下文"——后者很可能是把其他长上下文基准的设定张冠李戴到了 RepoQA 上。引用本文档中的任何分数时，请同时注明来源是 homepage 榜单还是论文 Table 2，因为两者存在 4 处 1 分之差。
+
+**修订记录（2026-11-11，基于官方数据实测）**
+
+依据：宿主机下载了官方 release `repoqa-2024-06-23.json.gz`（`12525636` B，解压 `71,510,991` B），并用**官方 `repoqa/compute_score.py` + `metric.py` 的逻辑复刻**（BLEU-4 / Chen & Cherry method4 / 候选集=该 repo 的 10 条 needle / threshold 0.8）对 codeseek 的真实检索结果判分后逐项核对，推翻/修正了以下 4 处（均为**论文/文档口径**与**代码/数据实测口径**的差异，原文说法保留并标注）：
+
+1. **Go 语言子集确实存在**：数据顶层 keys 为 `['python','cpp','java','typescript','rust','go']`，`go` 含 10 仓库 × 10 needle = 100 条。第 8 节原判"❌ 无任何依据"已改为 ✅，第 11 节"5 种语言中不含 Go"已改正。
+2. **测试数量 500 → 实为 600**：论文与 README 的 `500 = 5×10×10` 是写作时口径；release 实测为 `6×10×10 = 600`（第 3 节表格已并列两个口径）。
+3. **needle 深度 10%–100% → 实为 0.05–0.95**：`search_needle_function.py` 取 `position_ratio = (i + 0.5) / len(needles)`（i=0..9），即 5% 步长、两端各留半档（第 3 节「针函数位置」行已改）。
+4. **候选集不是"全仓库 tree-sitter 解析"**：`compute_score.py` 的候选集就是该 repo 的 10 条 needle 按 `start_line:end_line` 切片；tree-sitter 只用于从**模型输出**中取第一个函数，不参与构建候选池（第 4 节已改，并补充"判定比与全仓库函数竞争宽松得多"的影响说明）。
+
+> 附带结论：`repoqa-2024-06-23` 也确实是 `data.py` 中 `REPOQA_DATA_VERSION` 的默认 tag，第 10 节已补上实测可用的下载地址。
