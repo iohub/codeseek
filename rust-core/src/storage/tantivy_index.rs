@@ -286,6 +286,15 @@ pub struct TantivyBm25Index {
     content_field: Field,
     symbol_name_field: Field,
     language_field: Field,
+    /// 代码块起始行（1-based）。`None` 只会出现在「老索引 + `open_readonly`」路径上
+    /// —— 那时字段不存在，读回 0（未知），绝不 panic。
+    line_start_field: Option<Field>,
+    /// 代码块结束行（1-based 闭区间）。语义同 [`Self::line_start_field`]。
+    ///
+    /// 为什么必须落库：命中后回填正文时若只有 `line_start`，只能按固定窗口（60 行）
+    /// 向后推算结束行，真实 4 行的短函数会被膨胀成 60 行跨距，从而在排序期的父子
+    /// 包含判定里被当成「容器」错误降权。
+    line_end_field: Option<Field>,
     /// 本次 `open_or_create` 是否因 schema/tokenizer 变更重建了索引目录。
     /// 重建后磁盘上的稀疏索引为空，调用方必须触发一次全量索引（传 `None`）才能回填。
     rebuilt: bool,
@@ -310,6 +319,12 @@ impl TantivyBm25Index {
         let symbol_name_field =
             schema_builder.add_text_field("symbol_name", code_text_options(true));
         let language_field = schema_builder.add_text_field("language", STRING | STORED);
+        // 行号只被「回填/排序」读取，从不参与检索，因此只 STORED 不 INDEXED：
+        // 建索引不产生任何倒排开销，query 侧也不会有按行号过滤的隐式期望。
+        // 新增这两个字段会让 schema_matches 判定不一致 → 老索引自动整目录重建，
+        // 因此不需要双 schema 分支。
+        let line_start_field = schema_builder.add_u64_field("line_start", STORED);
+        let line_end_field = schema_builder.add_u64_field("line_end", STORED);
 
         let schema = schema_builder.build();
 
@@ -383,6 +398,8 @@ impl TantivyBm25Index {
             content_field,
             symbol_name_field,
             language_field,
+            line_start_field: Some(line_start_field),
+            line_end_field: Some(line_end_field),
             rebuilt,
         })
     }
@@ -441,6 +458,12 @@ impl TantivyBm25Index {
         let symbol_name_field = field_of("symbol_name")?;
         let language_field = field_of("language")?;
 
+        // 行号字段是可选增强：老索引（升级前建的）没有它，只读打开必须照常可用，
+        // 读回 0（未知）而不是让整条检索链路因缺少字段而失败。写索引永远走
+        // `open_or_create`（会整目录重建），因此 `None` 只可能出现在这条只读路径上。
+        let line_start_field = schema.get_field("line_start").ok();
+        let line_end_field = schema.get_field("line_end").ok();
+
         // QueryParser 构建查询时要按 schema 里记录的分词器名查找分析器，必须先注册。
         let code_analyzer =
             tantivy::tokenizer::TextAnalyzer::builder(CodeTokenizer::default()).build();
@@ -456,6 +479,8 @@ impl TantivyBm25Index {
             content_field,
             symbol_name_field,
             language_field,
+            line_start_field,
+            line_end_field,
             rebuilt: false,
         })
     }
@@ -525,6 +550,21 @@ impl TantivyBm25Index {
             .flatten()
             .unwrap_or_default()
     }
+
+    /// Helper: extract a stored `u64` field from a TantivyDocument.
+    ///
+    /// `field == None`（老索引缺该字段）或字段不可 STORED/类型不符时返回 `0` ——
+    /// 在上层语义里 `0` 就是「行号未知」，由调用方决定如何降级，绝不 panic。
+    fn get_stored_u64(doc: &TantivyDocument, field: Option<Field>, schema: &Schema) -> u64 {
+        field
+            .filter(|f| schema.get_field_entry(*f).is_stored())
+            .and_then(|f| doc.get_first(f))
+            .and_then(|val| match val {
+                tantivy::schema::OwnedValue::U64(v) => Some(*v),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
 }
 
 #[async_trait]
@@ -540,6 +580,8 @@ impl TextSearchProvider for TantivyBm25Index {
         let content_f = self.content_field;
         let symbol_f = self.symbol_name_field;
         let lang_f = self.language_field;
+        let line_start_f = self.line_start_field;
+        let line_end_f = self.line_end_field;
 
         tokio::task::spawn_blocking(move || {
             let mut w = writer.blocking_lock();
@@ -554,6 +596,15 @@ impl TextSearchProvider for TantivyBm25Index {
                 doc.add_text(content_f, &chunk.content);
                 doc.add_text(symbol_f, &chunk.symbol_name);
                 doc.add_text(lang_f, &chunk.language);
+                // 真实行号落库（`CodeChunk` 来自 chunker 的 `full_range`，1-based 闭区间）。
+                // 写实例永远由 `open_or_create` 构造，两个 `Option` 恒为 `Some`；
+                // 这里仍按 Option 处理，避免与只读实例的形状分叉。
+                if let Some(field) = line_start_f {
+                    doc.add_u64(field, chunk.line_start as u64);
+                }
+                if let Some(field) = line_end_f {
+                    doc.add_u64(field, chunk.line_end as u64);
+                }
                 writer
                     .add_document(doc)
                     .map_err(|e| anyhow!("Failed to add document: {}", e))?;
@@ -606,12 +657,19 @@ impl TextSearchProvider for TantivyBm25Index {
                 .doc::<TantivyDocument>(doc_address)
                 .map_err(|e| anyhow!("Tantivy doc fetch error: {}", e))?;
 
-            // snippet_id 格式 `{file_path}#{line_start}#{symbol_name}`（CodeChunk::generate_id），
-            // 是唯一携带真实行号的载体 —— Tantivy schema 未存 line_start 字段。
+            // 行号：优先取 schema 里 STORED 的 line_start/line_end（新索引的真实值）；
+            // 老索引（字段不存在）退化为从 `snippet_id` 反解 line_start、line_end 记 0。
+            // snippet_id 格式 `{file_path}#{line_start}#{symbol_name}`（CodeChunk::generate_id）。
             let snippet_id = Self::get_stored_string(&doc, self.snippet_id_field, &self.schema);
-            let line_start = parse_snippet_id(&snippet_id)
-                .map(|(_, line, _)| line)
-                .unwrap_or(0);
+            let stored_start = Self::get_stored_u64(&doc, self.line_start_field, &self.schema) as usize;
+            let line_start = if stored_start != 0 {
+                stored_start
+            } else {
+                parse_snippet_id(&snippet_id)
+                    .map(|(_, line, _)| line)
+                    .unwrap_or(0)
+            };
+            let line_end = Self::get_stored_u64(&doc, self.line_end_field, &self.schema) as usize;
 
             results.push(TextSearchResult {
                 snippet_id,
@@ -620,6 +678,7 @@ impl TextSearchProvider for TantivyBm25Index {
                 symbol_name: Self::get_stored_string(&doc, self.symbol_name_field, &self.schema),
                 language: Self::get_stored_string(&doc, self.language_field, &self.schema),
                 line_start,
+                line_end,
             });
         }
 
@@ -871,7 +930,11 @@ mod tests {
         assert_eq!(results.len(), 1, "BM25 应命中刚索引的代码块");
         assert_eq!(
             results[0].line_start, 42,
-            "行号应从 snippet_id 反解得到，而不是 0"
+            "行号应从 STORED 的 line_start 字段（或 snippet_id 兜底）恢复，而不是 0"
+        );
+        assert_eq!(
+            results[0].line_end, 50,
+            "结束行必须从 STORED 的 line_end 字段原样读回（否则回填只能按 60 行窗口猜）"
         );
         assert_eq!(results[0].file_path, "/tmp/a.rs");
         assert_eq!(results[0].symbol_name, "foo");

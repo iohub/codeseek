@@ -189,10 +189,10 @@ impl From<&SearchResult> for FusionMeta {
 
 /// Line number of a sparse (BM25) hit.
 ///
-/// The Tantivy schema has no `line_start` field, so the real line is only available
-/// inside `snippet_id` (`{file_path}#{line_start}#{symbol_name}`, built by
-/// [`CodeChunk::generate_id`]). Prefer the already-populated `line_start` when a
-/// provider supplies it, otherwise reverse-parse it from the id; 0 means unknown.
+/// 新索引把真实起始行存进 STORED 字段 `line_start`，provider 会直接填充它；只有老索引
+/// （schema 里还没有该字段）才需要从 `snippet_id`（`{file_path}#{line_start}#{symbol_name}`，
+/// 由 [`CodeChunk::generate_id`] 生成）里反解。因此这里的规则是：provider 给了非 0 值就用它，
+/// 否则右起解析 id；两者都拿不到时返回 0（= 未知）。
 fn sparse_line_start(sr: &TextSearchResult) -> usize {
     if sr.line_start != 0 {
         return sr.line_start;
@@ -202,20 +202,33 @@ fn sparse_line_start(sr: &TextSearchResult) -> usize {
         .unwrap_or(0)
 }
 
-/// BM25 通道回填正文时，从 `line_start` 起最多读取的行数。
+/// BM25 通道回填正文时，从 `line_start` 起最多读取的行数 —— **仅用于结束行未知的场景**。
 ///
-/// BM25 索引不存 `line_end`（Tantivy schema 里没有该字段），无法得知符号真实结束行，
-/// 因此取一个足够宽的窗口而不是试图精确截断：多读几行上下文比截断到半句更利于
-/// cross-encoder 打分，也比留下空文档强。
+/// 索引现在会存真实 `line_end`，命中后按 `[line_start, line_end]` 精确切块；窗口只在
+/// 老索引（缺 `line_end` 字段）或该 chunk 本来就没有结束行时兜底。多读几行上下文比截断
+/// 到半句更利于 cross-encoder 打分，也比留下空文档强 —— 但窗口推算出的结束行**不可信**，
+/// 因此不能反过来当成真实跨度喂给父子包含判定（那会把 4 行短函数放大成 60 行容器）。
 const BM25_BACKFILL_MAX_LINES: usize = 60;
 
 /// 从整份文件内容中按 1-based 闭区间 `[line_start, line_end]` 切出代码片段。
 ///
-/// `line_end == 0`（BM25 通道不存结束行）时退化为 `line_start .. line_start + fallback_lines`
-/// 的窗口。返回 `(片段, 实际结束行)`；行号不可用（`line_start == 0`）、越界、或片段全是
+/// - `line_end >= line_start && line_end > 0`（索引里有**真实**结束行）：严格读到
+///   `line_end`，读取行数恒为 `line_end - line_start + 1`，绝不越过 chunk 自身的结束行；
+/// - 否则（`line_end == 0`，老索引/缺字段）：退化为
+///   `line_start .. line_start + fallback_lines - 1` 的固定窗口，同样 clamp 到文件末尾。
+///
+/// 返回 `(片段, 实际结束行)`；行号不可用（`line_start == 0`）、越界、或片段全是
 /// 空白时返回 `None` —— 调用方据此保持候选原样，绝不把半截或空白噪声写进证据。
 ///
 /// 结果保留原始缩进（不做 trim），因为缩进本身也是代码正文的一部分。
+///
+/// # 为什么「有真实 line_end 就绝不加窗口」
+///
+/// 旧实现只在 `line_end >= line_start` 时用真实结束行，但 BM25 通道的 `line_end` 曾是
+/// 恒定 0（索引不存该字段），于是**所有** BM25 命中都走固定 60 行窗口，回填后写回的
+/// `real_end = line_start + 59` 被当成真实结束行。下游 `demote_enclosing_candidates`
+/// 据此判定父子包含：一个真实 4 行的函数看起来有 60 行跨距，会被误判成「容器」而乘
+/// 0.5 降权，正确结果被挤出 rank1（实测 rust `tagtr_succeed` 相似度 1.000 → 0.036）。
 fn slice_code_lines(
     content: &str,
     line_start: usize,
@@ -232,11 +245,12 @@ fn slice_code_lines(
         return None;
     }
 
-    let end = if line_end >= line_start {
-        // dense 通道给了真实结束行：沿用它，越界则 clamp 到文件末尾
+    let end = if line_end > 0 && line_end >= line_start {
+        // 索引里有真实结束行：沿用它，读取行数上限 = line_end - line_start + 1。
+        // 越界只可能来自「索引比工作区旧」（文件被截短），clamp 到文件末尾而不 panic。
         line_end.min(total)
     } else {
-        // BM25 通道没有结束行：向后取固定窗口
+        // 结束行未知（老索引 / 缺字段）：向后取固定窗口，不越过文件尾
         let window = fallback_lines.max(1);
         line_start.saturating_add(window - 1).min(total)
     };
@@ -257,10 +271,12 @@ impl From<&TextSearchResult> for FusionMeta {
             // BM25 通道不存储正文（content 非 STORED），保持为空串；
             // 正文由 [`HybridSearchService::hydrate_code_blocks`] 在调用侧从源文件回填
             code_block: String::new(),
-            // 行号从 snippet_id 反解得到（Tantivy 未存 line_start 字段）
+            // 行号：优先取 provider 已填充的值（新索引从 STORED 的 line_start 字段读回），
+            // 否则从 snippet_id 反解（老索引没有该字段）
             line_start: sparse_line_start(sr),
-            // BM25 通道不存储结束行
-            line_end: 0,
+            // 结束行同理来自索引；老索引缺字段时为 0（未知），
+            // 由回填侧退化成固定窗口并写回推算值
+            line_end: sr.line_end,
         }
     }
 }
@@ -405,7 +421,8 @@ fn demote_enclosing_candidates(results: &mut [FusedCandidate]) -> usize {
         return 0;
     }
 
-    // 行号可用：BM25 通道的 `line_end` 回填失败时仍为 0，这种候选不参与几何判定
+    // 行号可用：`line_start == 0` 或 `line_end == 0`（结束行未知，老索引/回填失败）
+    // 的候选不参与几何判定 —— 用推算出的跨度当真实值正是曾经的误降权来源。
     let usable = |c: &FusedCandidate| c.line_start > 0 && c.line_end >= c.line_start;
 
     let mut factors = vec![1.0f64; results.len()];
@@ -1089,7 +1106,9 @@ impl HybridSearchService {
                     Some((snippet, real_end)) => {
                         let c = &mut candidates[idx];
                         c.code_block = snippet;
-                        // BM25 通道原本没有结束行（0），回填后写入真实结束行
+                        // 索引已给真实 line_end 时，`slice_code_lines` 严格按它截断，
+                        // real_end == line_end，这里不写回；只有结束行未知（0 = 老索引/
+                        // 缺字段）才用窗口推算的末行补上，语义仍是「尽力而为」。
                         if c.line_end == 0 {
                             c.line_end = real_end;
                         }
@@ -1136,14 +1155,14 @@ impl HybridSearchService {
 
     /// 降级：仅 sparse (BM25) 通道可用时，把 BM25 命中原样转成候选。
     ///
-    /// BM25 不存储正文（schema 里 content 非 STORED），故 `code_block` 为空、
-    /// `line_end` 为 0；行号优先取 provider 已填充的 `line_start`，否则从
-    /// `snippet_id` 反解（见 [`sparse_line_start`]）。顺序沿用 BM25 相关性排序，
-    /// `final_score` 直接取 BM25 分数。
+    /// BM25 不存储正文（schema 里 content 非 STORED），故 `code_block` 为空；行号优先取
+    /// provider 已填充的 `line_start` / `line_end`（新索引从 STORED 字段读回真实值），
+    /// 老索引缺 `line_start` 字段时从 `snippet_id` 反解（见 [`sparse_line_start`]）。
+    /// 顺序沿用 BM25 相关性排序，`final_score` 直接取 BM25 分数。
     ///
     /// 空 `code_block` 与 `line_end == 0` 只是**构造时**的状态：正文由调用侧的
-    /// [`HybridSearchService::hydrate_code_blocks`] 从源文件回填，并顺带补上真实的
-    /// `line_end`。因此本函数保持纯函数、不依赖 `self`，便于单测。
+    /// [`HybridSearchService::hydrate_code_blocks`] 从源文件回填；`line_end` 为零表示
+    /// 结束行未知，回填时退化为固定窗口。因此本函数保持纯函数、不依赖 `self`，便于单测。
     fn sparse_only_candidates(sparse: Vec<TextSearchResult>, limit: usize) -> Vec<FusedCandidate> {
         sparse
             .into_iter()
@@ -1157,7 +1176,9 @@ impl HybridSearchService {
                     symbol_name: sr.symbol_name,
                     language: sr.language,
                     line_start,
-                    line_end: 0,
+                    // 真实结束行直接来自索引（老索引缺字段时为 0 = 未知）；
+                    // 它是后续父子包含判定的唯一可信来源，绝不能用固定窗口填充
+                    line_end: sr.line_end,
                     code_block: String::new(),
                     source: CandidateSource::SparseOnly,
                 }
@@ -1461,6 +1482,8 @@ mod tests {
             symbol_name: symbol.to_string(),
             language: "rust".to_string(),
             line_start,
+            // 默认模拟「老索引 / 结束行未知」；需要真实结束行的用例自行赋值
+            line_end: 0,
         }
     }
 
@@ -1723,6 +1746,96 @@ mod tests {
         let (snippet, _) = slice_code_lines(content, 2, 0, 1).expect("单行窗口应可切分");
 
         assert_eq!(snippet, "    let x = 1;", "缩进属于正文，不能被 trim 掉");
+    }
+
+    /// 病根回归：索引里有**真实** `line_end` 时，回填必须恰好切到该行。
+    ///
+    /// 修复前 BM25 命中的 `line_end` 恒为 0（Tantivy schema 没存该字段），全部走 60 行
+    /// 窗口，于是 4 行的短函数被当成 60 行跨距的「容器」，在 `demote_enclosing_candidates`
+    /// 里被 ×0.5 降权并挤出 rank1。
+    #[test]
+    fn slice_respects_chunk_line_end() {
+        // 120 行，每行内容形如 `L{i}`（1-based）
+        let content: String = (1..=120)
+            .map(|i| format!("L{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let (snippet, end) = slice_code_lines(&content, 10, 13, BM25_BACKFILL_MAX_LINES)
+            .expect("真实行区间应可切分");
+
+        let lines: Vec<&str> = snippet.lines().collect();
+        assert_eq!(
+            lines.len(),
+            4,
+            "必须恰好 4 行（line_end - line_start + 1），不得膨胀成 60 行窗口，实际：{:?}",
+            lines
+        );
+        assert_eq!(lines.first().copied(), Some("L10"), "首行必须是 line_start 那一行");
+        assert_eq!(lines.last().copied(), Some("L13"), "末行必须是 line_end 那一行");
+        assert_eq!(end, 13, "返回的结束行必须等于 chunk 自身的 line_end");
+    }
+
+    /// `line_end == 0`（老索引 / 缺字段）仍走固定窗口兜底，且绝不越过文件末尾。
+    #[test]
+    fn slice_falls_back_to_bounded_window_when_line_end_unknown() {
+        let content: String = (1..=20)
+            .map(|i| format!("L{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // 窗口 60 行 ≫ 文件 20 行：必须 clamp 到文件末尾（15..=20 共 6 行）
+        let (snippet, end) = slice_code_lines(&content, 15, 0, BM25_BACKFILL_MAX_LINES)
+            .expect("结束行未知时应走窗口兜底");
+        let lines: Vec<&str> = snippet.lines().collect();
+        assert_eq!(
+            lines.len(),
+            6,
+            "窗口应被裁剪到文件尾（15..=20 共 6 行），实际：{:?}",
+            lines
+        );
+        assert_eq!(end, 20, "结束行不得越过文件总行数（20）");
+        assert!(
+            lines.len() <= 20,
+            "读取行数上限是文件总行数，实际：{}",
+            lines.len()
+        );
+
+        // 小窗口且文件内行数充足时，仍按窗口行数读取
+        let (snippet, end) = slice_code_lines(&content, 2, 0, 3).expect("3 行窗口应可切分");
+        assert_eq!(snippet.lines().count(), 3, "窗口 3 行应读出 3 行");
+        assert_eq!(end, 4, "窗口末行 = line_start + fallback_lines - 1");
+    }
+
+    /// 真实结束行必须一路传到候选（sparse → hydrate），中途不被固定窗口末行覆盖。
+    #[tokio::test]
+    async fn hydrate_respects_index_line_end() {
+        let source: String = (1..=120)
+            .map(|i| format!("L{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (_dir, path) = write_temp_source("wide.rs", &source);
+
+        let id = CodeChunk::generate_id(&path, 10, "wide_fn");
+        let mut sr = make_sparse(&id, &path, "wide_fn", 10);
+        sr.line_end = 13; // 新索引：STORED 字段回读出的真实结束行
+
+        let mut candidates = HybridSearchService::sparse_only_candidates(vec![sr], 5);
+        assert_eq!(
+            candidates[0].line_end, 13,
+            "sparse → 候选必须保留索引里的真实结束行（否则下游父子判定拿不到跨度）"
+        );
+
+        HybridSearchService::hydrate_code_blocks(&mut candidates).await;
+
+        let c = &candidates[0];
+        assert_eq!(c.line_end, 13, "回填不得用窗口末行覆盖真实结束行");
+        assert_eq!(
+            c.code_block.lines().count(),
+            4,
+            "正文必须恰好 4 行，实际：{:?}",
+            c.code_block
+        );
     }
 
     // ---- hydrate_code_blocks ---------------------------------------------

@@ -88,6 +88,14 @@ pub struct TextSearchResult {
     pub language: String,
     /// 起始行（从原始索引恢复，如果不可用则为 0）
     pub line_start: usize,
+    /// 结束行（1-based 闭区间，从索引的 `line_end` 字段恢复）。
+    ///
+    /// `0` 表示**未知**：老索引（schema 里还没有 `line_end` 字段）或该 chunk 写入时
+    /// 就没有结束行。调用方必须把它当作「不可用」而不是「结束行是第 0 行」——
+    /// 排序期的父子包含判定（`demote_enclosing_candidates`）依赖这一点：曾经把
+    /// 「未知」按固定 60 行窗口推算，导致 4 行的短函数被误判成 60 行的容器而被降权。
+    #[serde(default)]
+    pub line_end: usize,
 }
 
 /// 序列化辅助：保留3位小数的 f64
