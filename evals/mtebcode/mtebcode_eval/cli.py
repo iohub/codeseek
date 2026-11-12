@@ -53,6 +53,12 @@ def _parse_tasks(raw: str) -> list[str]:
             f"任务 {unverified} 在注册表里被标记 unverified（config/split 未实测确认），"
             "请先补齐 mtebcode_eval/data.py 的 TASKS"
         )
+    excluded = [value for value in values if data.TASKS[value].excluded_reason]
+    if excluded:
+        detail = "; ".join(f"{value}: {data.TASKS[value].excluded_reason}" for value in excluded)
+        raise argparse.ArgumentTypeError(
+            f"任务 {excluded} 已被实测剔除（excluded_reason），不能选中：{detail}"
+        )
     return values
 
 
@@ -124,7 +130,10 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         rate_limit=args.rate_limit,
         cache_only=args.cache_only,
         quiet=args.quiet,
+        parquet_cache=args.parquet_cache,
     )
+    if args.parquet_cache:
+        print(f"[prepare] 本地 parquet 数据源：{args.parquet_cache}（命中即不发网络请求）")
     if client.proxy:
         print(f"[prepare] 代理：{client.proxy}")
     elif not args.quiet:
@@ -192,6 +201,11 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             "skip_queries_without_positive": True,
         },
         "client_stats": client.stats.to_dict(),
+        "data_sources": {
+            "parquet_cache": args.parquet_cache,
+            "parquet_pages": client.stats.parquet_pages,
+            "rest_requests": client.stats.requests,
+        },
         "failures": failures,
     }
     meta_path = data.write_workdir_meta(workdir, meta)
@@ -395,6 +409,14 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--limit-queries", type=int, default=30, help="每个任务抽多少条 query（默认 30，0=全部）")
     prepare.add_argument("--seed", type=int, default=42, help="抽样随机种子（默认 42，保证可复现）")
     prepare.add_argument("--proxy", default=None, help="下载代理，如 http://127.0.0.1:7897（默认读 https_proxy）")
+    prepare.add_argument(
+        "--parquet-cache",
+        default=None,
+        help=(
+            "本地 HF parquet 缓存根目录（如 ~/.cache/huggingface/hub）：某 (config, split) 命中本地 "
+            "parquet 时直接读本地、不发网络请求。用于绕开 datasets-server /rows 的 429。"
+        ),
+    )
     prepare.add_argument("--cache-only", action="store_true", help="只用已缓存的页，缓存缺失即报错（离线复现）")
     prepare.add_argument("--rate-limit", type=float, default=0.15, help="每页请求之间的间隔秒数（默认 0.15）")
     prepare.add_argument("--retries", type=int, default=4, help="单页请求失败重试次数（默认 4）")

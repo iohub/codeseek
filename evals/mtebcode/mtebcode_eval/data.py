@@ -66,6 +66,7 @@ __all__ = [
     "DatasetError",
     "TASKS",
     "corpus_dir",
+    "diff_postimage",
     "load_tasks",
     "prepare_task",
     "read_workdir_meta",
@@ -157,6 +158,14 @@ class TaskSpec:
 
     :param unverified: ``True`` 表示该条目的 config/split 未实测确认，``--tasks`` 选到它时
         报明确错误而不是崩溃（注册表保留条目，便于后续补测）。
+    :param excluded_reason: 非空表示该任务**已实测剔除**（query 过长 / corpus 不可索引等），
+        ``prepare`` 选到它时直接报错并回显原因，避免哪天又悄悄跑出来污染批次对比。
+    :param query_quota: 每任务独立的 query 配额，覆盖全局 ``--limit-queries``。
+        用于「某任务题数与其他任务不同」的补足规则（例如 CosQA 40 + 3×20）。
+    :param diff_postimage: ``True`` 表示 corpus 原文是 unified diff，物化时先规整成
+        **后像代码**（丢弃 ``@@``/``---``/``+++`` 头与 ``-`` 删除行，去掉 ``+``/空格 的
+        1 字符前缀）。实测：30 篇 diff 直接落成 ``.py`` 只被 codeseek 索引出 9 文件/11 符号，
+        规整后 17 文件/80 符号 —— 不规整则 .py 语料几乎无法被 tree-sitter 解析。
     """
 
     name: str
@@ -167,6 +176,9 @@ class TaskSpec:
     language: str = "text"
     note: str = ""
     unverified: bool = False
+    excluded_reason: str = ""
+    query_quota: int | None = None
+    diff_postimage: bool = False
 
     @property
     def slug(self) -> str:
@@ -209,6 +221,10 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 doc_ext=".py",
                 code_like=True,
                 language="python",
+                # 第 2 批（全短 query）的补足规则：可用语言只有 3 种 → CosQA 加到 40，
+                # 其余 3×20，合计 100 题。全局 --limit-queries 无法表达「每任务不同」，
+                # 因此配额下沉到注册表。
+                query_quota=40,
                 note="NL -> Python code; qrels test has 500 rows (matches MTEB's 500 queries).",
             ),
         ),
@@ -221,6 +237,10 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 doc_ext=".py",
                 code_like=True,
                 language="python",
+                excluded_reason=(
+                    "query too long (median 624 chars); corpus text is the docstring "
+                    "(only 12.7% code-like) -> codeseek indexed 1 file / 3 symbols"
+                ),
                 note="code <-> code (python sub-config); python-qrels/test has 14,918 rows.",
             ),
         ),
@@ -233,6 +253,7 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 doc_ext=".sql",
                 code_like=False,  # 不往 .sql 里塞注释（spec：不要污染 .sql/.txt）
                 language="sql",
+                excluded_reason="corpus not indexable (.sql is outside codeseek's extension whitelist)",
                 note="NL -> SQL; queries carry a `context` schema appended to the query text; qrels test 5,851 rows.",
             ),
         ),
@@ -243,6 +264,7 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 hf_dataset="CoIR-Retrieval/codefeedback-st",
                 layout=_DEFAULT_LAYOUT,
                 language="text",
+                excluded_reason="query too long (median 540 chars)",
                 note="single-turn code feedback; corpus 156,526 rows.",
             ),
         ),
@@ -253,6 +275,7 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 hf_dataset="CoIR-Retrieval/codefeedback-mt",
                 layout=_DEFAULT_LAYOUT,
                 language="text",
+                excluded_reason="query too long (median 3,571 chars)",
                 note="multi-turn code feedback; corpus 66,383 rows.",
             ),
         ),
@@ -265,6 +288,7 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 doc_ext=".py",
                 code_like=True,
                 language="python",
+                excluded_reason="query too long (median 1,316 chars); 98.9% of queries exceed 200 chars",
                 note=(
                     "competitive-programming solutions; corpus 8,765 rows. "
                     "doc_ext is .py (not .txt): codeseek's indexer only picks up "
@@ -279,6 +303,7 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 hf_dataset="CoIR-Retrieval/stackoverflow-qa",
                 layout=_DEFAULT_LAYOUT,
                 language="text",
+                excluded_reason="query too long (median 883 chars); 34.2% of query text is natural language",
                 note="question -> answer post; corpus 19,931 rows.",
             ),
         ),
@@ -291,6 +316,7 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 doc_ext=".cpp",
                 code_like=True,
                 language="cpp",
+                excluded_reason="query too long (median 547 chars)",
                 note=(
                     "contest-level code translation pairs; corpus 1,008 rows. "
                     "corpus text is C++ source, so it is materialized as .cpp "
@@ -307,6 +333,7 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 doc_ext=".py",
                 code_like=True,
                 language="python",
+                excluded_reason="query too long (median 1,211 chars)",
                 note=(
                     "deep-learning framework API translation pairs; corpus 816 rows. "
                     "corpus text is Python source, so it is materialized as .py "
@@ -326,20 +353,58 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 note="code -> code (python sub-config) on CodeSearchNet.",
             ),
         ),
+        # ---- 第 2 批（全短 query 任务集）：CodeEditSearchRetrieval 的语言子任务 ----
+        # config/split 于本机逐条实测（/splits + /rows + HF parquet 仓库三方核对）：
+        #   * 该数据集所有 config **只有 train 一个 split**；
+        #   * go / javascript / python：corpus + queries + qrels 三个接口均 HTTP 200（各 1,000 行）；
+        #   * java：只有 java-corpus / java-queries，**仓库里根本没有 java-qrels**（/rows 404），
+        #     因此 java 不可用（注意 java 本身在 codeseek 白名单里，缺的是 qrels 那一半）；
+        #   * ruby / typescript：三个 config 的 /rows 全部 500（parquet 读不出来）；.rb 另不在白名单。
+        # qrels split 优先级仍是 test → valid → train，实际只会落到 train。
         (
-            "CodeEditSearchRetrieval",
+            "CodeEditSearchRetrieval-python",
             TaskSpec(
-                name="CodeEditSearchRetrieval",
+                name="CodeEditSearchRetrieval-python",
                 hf_dataset="mteb/CodeEditSearchRetrieval",
-                # 该数据集三个 config 的 split 全部叫 train；实测 java 只有
-                # java-corpus / java-queries，**没有 java-qrels**，因此固定用 python 子 config。
-                layout=_lang_layout(
-                    "python", corpus_split="train", queries_split="train", qrels_splits=("train",)
-                ),
+                layout=_lang_layout("python", corpus_split="train", queries_split="train"),
                 doc_ext=".py",
                 code_like=True,
                 language="python",
-                note="code-edit -> description (python sub-config, 1,000 docs, hash _ids -> scan fallback).",
+                query_quota=20,
+                # corpus 原文 100% 是 unified diff（实测 1000/1000），必须规整成后像代码
+                diff_postimage=True,
+                note=(
+                    "code-edit -> description (commit message). corpus text is a unified diff; "
+                    "queries are 21-1811 chars (median 45). hash _ids -> scan fallback (10 pages)."
+                ),
+            ),
+        ),
+        (
+            "CodeEditSearchRetrieval-go",
+            TaskSpec(
+                name="CodeEditSearchRetrieval-go",
+                hf_dataset="mteb/CodeEditSearchRetrieval",
+                layout=_lang_layout("go", corpus_split="train", queries_split="train"),
+                doc_ext=".go",
+                code_like=True,
+                language="go",
+                query_quota=20,
+                diff_postimage=True,
+                note="same dataset, go sub-config; queries 19-1529 chars (median 45).",
+            ),
+        ),
+        (
+            "CodeEditSearchRetrieval-javascript",
+            TaskSpec(
+                name="CodeEditSearchRetrieval-javascript",
+                hf_dataset="mteb/CodeEditSearchRetrieval",
+                layout=_lang_layout("javascript", corpus_split="train", queries_split="train"),
+                doc_ext=".js",
+                code_like=True,
+                language="javascript",
+                query_quota=20,
+                diff_postimage=True,
+                note="same dataset, javascript sub-config; queries 18-601 chars (median 43).",
             ),
         ),
     )
@@ -399,9 +464,109 @@ class ClientStats:
     retries: int = 0
     failures: int = 0
     bytes_downloaded: int = 0
+    parquet_pages: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+class ParquetRows:
+    """本地 HF parquet 缓存读取器：datasets-server 429/500 时的**离线等价数据源**。
+
+    目录布局就是 ``huggingface_hub`` 的默认缓存::
+
+        <cache>/datasets--<org>--<name>/snapshots/<rev>/<config>/<split>-00000-of-00001.parquet
+
+    只实现 ``prepare`` 需要的两个能力 —— ``splits()`` 与 ``rows()`` —— 且返回值与 REST
+    的形状**逐字段一致**（``{"rows": [{"row": {...}}, ...], "num_rows_total": N}``），
+    因此上层 :func:`prepare_task` 完全不需要分支。
+
+    为什么要它：实测本机对 ``datasets-server`` 的 ``/rows`` 会持续返回 **429 Too Many
+    Requests**（重试 6 次仍失败），而同一份数据以 parquet 形式就在本地缓存里。逐 (config, split)
+    回退，能把「抓数据」这一步变成确定性的、可离线复现的步骤；用了哪些来源会写进
+    ``meta.json.client_stats.parquet_pages`` 与 ``meta.json.data_sources``。
+    """
+
+    def __init__(self, root: Path | str, quiet: bool = False) -> None:
+        self.root = Path(root).expanduser()
+        self.quiet = quiet
+        self._datasets: dict[str, Path | None] = {}
+        self._tables: dict[str, Any] = {}
+
+    # -- 内部 --------------------------------------------------------------
+    def _snapshot(self, dataset: str) -> Path | None:
+        if dataset in self._datasets:
+            return self._datasets[dataset]
+        base = self.root / ("datasets--" + dataset.replace("/", "--"))
+        found: Path | None = None
+        snapshots_dir = base / "snapshots"
+        if snapshots_dir.is_dir():
+            for snapshot in sorted(snapshots_dir.iterdir(), reverse=True):
+                if snapshot.is_dir() and any(snapshot.glob("*/*.parquet")):
+                    found = snapshot
+                    break
+        self._datasets[dataset] = found
+        return found
+
+    def _matches(self, dataset: str, config: str, split: str) -> list[Path]:
+        snapshot = self._snapshot(dataset)
+        if snapshot is None:
+            return []
+        directory = snapshot / config
+        if not directory.is_dir():
+            return []
+        return sorted(directory.glob(f"{split}-*.parquet"))
+
+    def has(self, dataset: str, config: str, split: str) -> bool:
+        """该 (dataset, config, split) 是否有本地 parquet 可读。"""
+        return bool(self._matches(dataset, config, split))
+
+    def _table(self, dataset: str, config: str, split: str) -> Any:
+        key = f"{dataset}::{config}::{split}"
+        if key in self._tables:
+            return self._tables[key]
+        matches = self._matches(dataset, config, split)
+        if not matches:
+            raise DatasetError(f"本地 parquet 缺失：{dataset} {config}/{split}（{self.root}）")
+        try:
+            import pyarrow.parquet as pq  # 局部导入：只有启用本地源时才需要 pyarrow
+        except ImportError as exc:  # pragma: no cover - 环境缺依赖时的明确报错
+            raise DatasetError(
+                "启用了本地 parquet 数据源但未安装 pyarrow；`pip install pyarrow` 后重试"
+            ) from exc
+        table = pq.read_table(str(matches[0]))
+        self._tables[key] = table
+        return table
+
+    # -- 与 REST 同形的接口 -------------------------------------------------
+    def splits(self, dataset: str) -> list[dict[str, str]]:
+        """枚举本地 parquet 覆盖的 ``(config, split)``。"""
+        snapshot = self._snapshot(dataset)
+        if snapshot is None:
+            return []
+        out: list[dict[str, str]] = []
+        for parquet in sorted(snapshot.glob("*/*.parquet")):
+            split = parquet.name.split("-")[0]
+            out.append({"config": parquet.parent.name, "split": split})
+        return out
+
+    def num_rows(self, dataset: str, config: str, split: str) -> int:
+        return int(self._table(dataset, config, split).num_rows)
+
+    def rows(
+        self, dataset: str, config: str, split: str, offset: int, length: int = PAGE_SIZE
+    ) -> dict[str, Any]:
+        table = self._table(dataset, config, split)
+        total = int(table.num_rows)
+        start = max(0, int(offset))
+        stop = min(total, start + max(0, int(length)))
+        rows = table.slice(start, max(0, stop - start)).to_pylist()
+        return {
+            "rows": [{"row": dict(item)} for item in rows],
+            "num_rows_total": total,
+            "features": [{"name": key} for key in (table.column_names or [])],
+            "source": "local-parquet",
+        }
 
 
 class DatasetClient:
@@ -409,7 +574,9 @@ class DatasetClient:
 
     * **缓存**：``<workdir>/cache/<dataset>/<config>/<split>/<offset>.json``，重跑直接复用；
     * **重试**：默认 4 次，间隔 1s / 2s / 4s；HTTP 400 视为参数错误，不重试；
-    * **速率**：每次**真实**网络请求后 sleep ``rate_limit`` 秒（缓存命中不 sleep）。
+    * **速率**：每次**真实**网络请求后 sleep ``rate_limit`` 秒（缓存命中不 sleep）；
+    * **本地 parquet 回退**：给出 ``parquet_cache`` 时，若某 ``(config, split)`` 在本地 HF
+      缓存里有 parquet，就直接读本地，**不发网络请求**（应对 ``/rows`` 的 429）。
     """
 
     def __init__(
@@ -421,6 +588,7 @@ class DatasetClient:
         timeout: float = 120.0,
         quiet: bool = False,
         cache_only: bool = False,
+        parquet_cache: Path | str | None = None,
     ) -> None:
         self.workdir = Path(workdir)
         self.cache_root = self.workdir / CACHE_DIR
@@ -432,6 +600,7 @@ class DatasetClient:
         self.cache_only = bool(cache_only)
         self.stats = ClientStats()
         self._opener = _proxy_opener(self.proxy)
+        self.parquet = ParquetRows(parquet_cache, quiet=quiet) if parquet_cache else None
 
     # -- 内部：缓存路径 ----------------------------------------------------
     def _cache_base(self, dataset: str) -> Path:
@@ -521,21 +690,42 @@ class DatasetClient:
 
     # -- 公开接口 ----------------------------------------------------------
     def splits(self, dataset: str) -> list[dict[str, str]]:
-        """``GET /splits``：返回 ``[{"config":..., "split":...}, ...]``。"""
+        """``GET /splits``：返回 ``[{"config":..., "split":...}, ...]``。
+
+        有本地 parquet 时把它的 ``(config, split)`` **并入**结果：既保留 REST 的完整视图
+        （parquet 未下载的 config 仍在），又保证 ``/splits`` 被 429 时仍有可用信息。
+        """
         path = self._meta_cache_path(dataset, "splits")
 
         def _fetch() -> dict[str, Any]:
             return self._fetch_json("/splits", {"dataset": dataset})
 
-        payload = self._cached_json(path, _fetch, f"{dataset} /splits")
-        splits = payload.get("splits")
-        if not isinstance(splits, list):
-            raise DatasetError(f"{dataset}: /splits 返回结构异常：{str(payload)[:300]}")
-        return [
-            {"config": str(item.get("config", "")), "split": str(item.get("split", ""))}
-            for item in splits
-            if isinstance(item, dict)
-        ]
+        remote: list[dict[str, str]] = []
+        try:
+            payload = self._cached_json(path, _fetch, f"{dataset} /splits")
+            splits = payload.get("splits")
+            if not isinstance(splits, list):
+                raise DatasetError(f"{dataset}: /splits 返回结构异常：{str(payload)[:300]}")
+            remote = [
+                {"config": str(item.get("config", "")), "split": str(item.get("split", ""))}
+                for item in splits
+                if isinstance(item, dict)
+            ]
+        except DatasetError:
+            if self.parquet is None or not self.parquet.splits(dataset):
+                raise
+            if not self.quiet:
+                _log(f"[data] /splits 不可用，改用本地 parquet 的 config/split 视图：{dataset}")
+
+        seen = {(item["config"], item["split"]) for item in remote}
+        merged = list(remote)
+        if self.parquet is not None:
+            for item in self.parquet.splits(dataset):
+                key = (item["config"], item["split"])
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(item)
+        return merged
 
     def size(self, dataset: str) -> dict[str, Any]:
         """``GET /size``：数据集规模统计（写进 ``meta.json``）。"""
@@ -547,10 +737,17 @@ class DatasetClient:
         return self._cached_json(path, _fetch, f"{dataset} /size")
 
     def rows(self, dataset: str, config: str, split: str, offset: int, length: int = PAGE_SIZE) -> dict[str, Any]:
-        """``GET /rows``：取一页（``length <= 100``，严格校验）。"""
+        """``GET /rows``：取一页（``length <= 100``，严格校验）。
+
+        本地 parquet 命中该 ``(config, split)`` 时直接读本地，不发网络请求。
+        """
         if not 1 <= int(length) <= PAGE_SIZE:
             raise ValueError(f"length 必须在 1..{PAGE_SIZE} 之间（datasets-server 硬上限），收到 {length}")
         offset = max(0, int(offset))
+        if self.parquet is not None and self.parquet.has(dataset, config, split):
+            payload = self.parquet.rows(dataset, config, split, offset, length)
+            self.stats.parquet_pages += 1
+            return payload
         path = self._rows_cache_path(dataset, config, split, offset)
 
         def _fetch() -> dict[str, Any]:
@@ -964,13 +1161,51 @@ def safe_doc_filename(doc_id: str, ext: str) -> str:
     return f"{stem}_{digest}{ext}"
 
 
+def diff_postimage(text: str) -> str:
+    """unified diff → **后像代码**（``mteb/CodeEditSearchRetrieval`` 的 corpus 全是 diff）。
+
+    规则（只做「去补丁记号」，不改动任何代码字符）：
+
+    * 丢弃 ``@@ ... @@`` hunk 头、``---``/``+++`` 文件头、``\\ No newline`` 标记；
+    * ``+`` 行 → 去掉首个 ``+``（新增代码，保留）；
+    * ``（空格）`` 行 → 去掉首个空格（上下文行，保留）；
+    * ``-`` 行 → 丢弃（被删除的旧代码，不属于后像）。
+
+    为什么必须做：实测同一批 30 篇 python corpus，直接落成 ``.py`` 时 codeseek 只索引出
+    **9 文件 / 11 符号**，规整后 **17 文件 / 80 符号** —— diff 记号会让 tree-sitter 大面积解析失败。
+    该转换只在 ``TaskSpec.diff_postimage=True`` 时启用，并写进 ``meta.json`` 的
+    ``materialization`` 字段，保证可审计。
+    """
+    kept: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("@@"):
+            continue
+        if line.startswith("---") or line.startswith("+++"):
+            continue
+        if line.startswith("\\"):
+            # "\ No newline at end of file"
+            continue
+        if line.startswith("+"):
+            kept.append(line[1:])
+        elif line.startswith(" "):
+            kept.append(line[1:])
+        elif line.startswith("-"):
+            continue
+        else:
+            kept.append(line)
+    return "\n".join(kept) + ("\n" if kept else "")
+
+
 def _doc_text(row: dict[str, Any], spec: TaskSpec) -> str:
     """文档正文：``text``；``title`` 非空且是代码文件时首行加注释。
 
-    ``.sql`` / ``.txt`` **不加**注释（spec 要求不污染这两类文件）。
+    ``.sql`` / ``.txt`` **不加**注释（spec 要求不污染这两类文件）；``diff_postimage`` 的任务
+    先做 diff → 后像代码规整。
     """
     text = row.get("text")
     body = text if isinstance(text, str) else ("" if text is None else str(text))
+    if spec.diff_postimage:
+        body = diff_postimage(body)
     title = row.get("title")
     title_text = title.strip() if isinstance(title, str) else ""
     if title_text and spec.code_like and spec.doc_ext in COMMENT_PREFIX:
@@ -1165,6 +1400,11 @@ def prepare_task(spec: TaskSpec, client: DatasetClient, options: PrepareOptions)
     :return: :class:`PreparedTask`（``tasks`` 供写 ``tasks.jsonl``，``meta`` 供写 ``meta.json``）。
     """
     warnings: list[str] = []
+    if spec.excluded_reason:
+        raise DatasetError(
+            f"{spec.name}: 注册表里该任务已被**实测剔除**（excluded_reason={spec.excluded_reason!r}）。"
+            "剔除是方法学决定，不允许临时选中，否则批次之间的分数不可比对。"
+        )
     if spec.unverified:
         raise DatasetError(
             f"{spec.name}: 注册表里该任务的 config/split 未经验证（unverified=True），"
@@ -1183,7 +1423,9 @@ def prepare_task(spec: TaskSpec, client: DatasetClient, options: PrepareOptions)
             f"{spec.name}: {spec.hf_dataset} 的 qrels（{layout.qrels_config}/{qrels_split}）没有 score>0 的记录"
         )
 
-    query_ids = sample_query_ids(list(qrels_all), options.limit_queries, options.seed, spec.name)
+    # 每任务配额优先（注册表 self-describing），否则用全局 --limit-queries
+    effective_limit = spec.query_quota if spec.query_quota is not None else options.limit_queries
+    query_ids = sample_query_ids(list(qrels_all), effective_limit, options.seed, spec.name)
     if not query_ids:
         raise DatasetError(f"{spec.name}: 抽样后没有可用 query")
 
@@ -1285,6 +1527,26 @@ def prepare_task(spec: TaskSpec, client: DatasetClient, options: PrepareOptions)
     if not git_ok:
         warnings.append(f"git init 失败（codeseek init 会因 `No project found` 失败）：{git_detail}")
 
+    # query 字符长度分布（写进 meta.json）：第 2 批的整个方法学是「短 query」，
+    # 因此把实测长度钉在产物里，报告不必再去猜。
+    query_lengths = sorted(len(task.query_text) for task in tasks)
+
+    def _length_pct(percentile: float) -> int:
+        if not query_lengths:
+            return 0
+        index = min(len(query_lengths) - 1, int(round(percentile * (len(query_lengths) - 1))))
+        return query_lengths[index]
+
+    query_length_stats = {
+        "n": len(query_lengths),
+        "min": query_lengths[0] if query_lengths else 0,
+        "median": _length_pct(0.5),
+        "p90": _length_pct(0.9),
+        "max": query_lengths[-1] if query_lengths else 0,
+        "mean": round(sum(query_lengths) / len(query_lengths), 1) if query_lengths else 0.0,
+        "gt_200": sum(1 for value in query_lengths if value > 200),
+    }
+
     if not options.quiet:
         _log(
             f"[prepare] {spec.name}: qrels={layout.qrels_config}/{qrels_split} "
@@ -1308,6 +1570,14 @@ def prepare_task(spec: TaskSpec, client: DatasetClient, options: PrepareOptions)
             "qrels_split": qrels_split,
             "doc_ext": spec.doc_ext,
             "language": spec.language,
+            # 物化口径必须显式记录：diff_postimage 会改变写盘内容（语料可索引性的必要条件）
+            "materialization": {
+                "doc_ext": spec.doc_ext,
+                "diff_postimage": bool(spec.diff_postimage),
+                "title_comment": bool(spec.code_like and spec.doc_ext in COMMENT_PREFIX),
+            },
+            "query_quota": effective_limit,
+            "query_length_chars": query_length_stats,
             "num_corpus_rows": corpus_rows_total,
             "num_queries_rows": queries_rows_total,
             "num_qrels_rows": qrels_read,

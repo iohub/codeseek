@@ -299,10 +299,90 @@ def _check_data_helpers(checker: _Checker) -> None:
         ",".join(data.DEFAULT_TASKS),
     )
     checker.check(
-        "注册表 11 个任务且都有 doc_ext/code_like",
-        len(data.TASKS) == 11 and all(spec.doc_ext.startswith(".") for spec in data.TASKS.values()),
+        "注册表 13 个任务且都有 doc_ext/code_like",
+        len(data.TASKS) == 13 and all(spec.doc_ext.startswith(".") for spec in data.TASKS.values()),
         f"{len(data.TASKS)} tasks",
     )
+
+    # ---- 第 2 批：diff → 后像代码规整（CodeEditSearchRetrieval 的 corpus 全是 unified diff）----
+    raw_diff = (
+        "--- \n"
+        "+++ \n"
+        "@@ -3,3 +3,5 @@\n"
+        " \n"
+        " from constructors import array\n"
+        "-old_helper = 1\n"
+        "+def test(verbosity=1):\n"
+        "+    return 1\n"
+        "\\ No newline at end of file\n"
+    )
+    checker.check(
+        "diff_postimage：丢弃 @@ / - / --- / +++ / \\ 标记，保留 + 与上下文行",
+        data.diff_postimage(raw_diff)
+        == "\nfrom constructors import array\ndef test(verbosity=1):\n    return 1\n",
+        repr(data.diff_postimage(raw_diff)),
+    )
+    indent_diff = "@@ -1,2 +1,2 @@\n def f():\n-    pass\n+    return 1\n"
+    checker.check(
+        "diff_postimage 保留相对缩进（只剥 1 个补丁前缀字符）",
+        data.diff_postimage(indent_diff) == "def f():\n    return 1\n",
+        repr(data.diff_postimage(indent_diff)),
+    )
+
+    codeedit_specs = [name for name in data.TASKS if name.startswith("CodeEditSearchRetrieval-")]
+    checker.check(
+        "3 个 CodeEditSearchRetrieval 语言子任务都开启 diff_postimage 且配额 20",
+        sorted(codeedit_specs)
+        == [
+            "CodeEditSearchRetrieval-go",
+            "CodeEditSearchRetrieval-javascript",
+            "CodeEditSearchRetrieval-python",
+        ]
+        and all(data.TASKS[name].diff_postimage and data.TASKS[name].query_quota == 20 for name in codeedit_specs),
+        ",".join(codeedit_specs),
+    )
+    checker.check(
+        "3 个语言子任务的 doc_ext 都在 codeseek 白名单内",
+        {data.TASKS[name].doc_ext for name in codeedit_specs} == {".py", ".go", ".js"},
+        str(sorted({data.TASKS[name].doc_ext for name in codeedit_specs})),
+    )
+    checker.check(
+        "3 个语言子任务的 corpus 目录互不相同（独立 codeseek init）",
+        len({data.corpus_dir("/tmp/x", data.TASKS[name]) for name in codeedit_specs}) == 3,
+    )
+    checker.check(
+        "每任务配额合计 = 100（CosQA 40 + 3×20）",
+        data.TASKS["CosQA"].query_quota == 40
+        and sum(int(data.TASKS[name].query_quota or 0) for name in codeedit_specs) == 60,
+    )
+    excluded_without_reason = [
+        name
+        for name in (
+            "AppsRetrieval",
+            "CodeTransOceanContest",
+            "CodeTransOceanDL",
+            "CodeFeedbackST",
+            "CodeFeedbackMT",
+            "StackOverflowQA",
+            "CodeSearchNetRetrieval",
+            "SyntheticText2SQL",
+        )
+        if not data.TASKS[name].excluded_reason
+    ]
+    checker.check(
+        "8 个已剔除任务都带 excluded_reason",
+        not excluded_without_reason,
+        ",".join(excluded_without_reason),
+    )
+    prepared_rows = [
+        {"_id": "h1", "text": "@@ -1 +1 @@\n-x = 1\n+x = 2\n", "title": ""},
+    ]
+    with tempfile.TemporaryDirectory(prefix="mtebcode-selftest-") as tmp:
+        data.materialize_docs(data.TASKS["CodeEditSearchRetrieval-python"], prepared_rows, Path(tmp) / "ce", force=True)
+        written = (Path(tmp) / "ce" / next(iter(json.loads((Path(tmp) / "ce" / data.DOCMAP_NAME).read_text(encoding="utf-8"))))).read_text(
+            encoding="utf-8"
+        )
+        checker.check("物化时按 diff_postimage 落盘（不含 @@ 与 - 行）", written == "x = 2\n", repr(written))
     checker.check(
         "采样指纹稳定（同输入同输出）",
         data.sampling_fingerprint(

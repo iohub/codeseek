@@ -108,11 +108,25 @@ python -m mtebcode_eval run --workdir /tmp/mtebcode-smoke \
 Exit codes: `0` success; `2` precondition missing (`tasks.jsonl` absent, binary not found,
 `--require-embedding` unmet, unknown task name, data source unreachable).
 
+**When `datasets-server` rate-limits you** (`/rows` returns HTTP 429 even after 6 retries — measured),
+pass `--parquet-cache` so that any `(config, split)` already present in your local HF cache is read
+straight from parquet, with no network request:
+
+```bash
+python -m mtebcode_eval prepare --workdir /tmp/mtebcode-short \
+    --tasks CosQA,CodeEditSearchRetrieval-python,CodeEditSearchRetrieval-go,CodeEditSearchRetrieval-javascript \
+    --corpus-size 300 --seed 42 --proxy http://127.0.0.1:7897 \
+    --parquet-cache ~/.cache/huggingface/hub
+```
+
+(Per-task query counts live in the registry as `TaskSpec.query_quota`, so `--limit-queries` is only the
+fallback for tasks that do not set it: batch 2 is 40/20/20/20 = 100 with `--limit-queries 20`.)
+
 ### CLI flags
 
 | command | flags |
 | --- | --- |
-| `prepare` | `--workdir`(=`/tmp/mtebcode-eval`) `--tasks`(=`CosQA,CodeSearchNetRetrieval,SyntheticText2SQL`) `--corpus-size`(300) `--limit-queries`(30) `--seed`(42) `--proxy` `--cache-only` `--rate-limit`(0.15) `--retries`(4) `--force` `--quiet` |
+| `prepare` | `--workdir`(=`/tmp/mtebcode-eval`) `--tasks`(=`CosQA,CodeSearchNetRetrieval,SyntheticText2SQL`) `--corpus-size`(300) `--limit-queries`(30) `--seed`(42) `--proxy` `--parquet-cache` `--cache-only` `--rate-limit`(0.15) `--retries`(4) `--force` `--quiet` |
 | `run` | `--workdir` `--codeseek-bin` `--repo-root` `--limit`(20) `--k`(10) `--limit-queries`(0=all, **per task**) `--concurrency`(4) `--timeout`(180) `--init-timeout`(1800) `--force` `--auto-build` `--require-embedding` `--quiet` |
 | `score` | `--workdir` `--limit`(20) `--k`(10) `--limit-queries`(0=all, per task) `--codeseek-bin` `--repo-root` |
 | `selftest` | none (fully offline) |
@@ -162,22 +176,69 @@ Robustness that is actually needed in practice (all implemented):
 | CodeTransOceanContest | `CoIR-Retrieval/codetrans-contest` | `corpus`/`corpus` | `queries`/`queries` | `default`/`test` |
 | CodeTransOceanDL | `CoIR-Retrieval/codetrans-dl` | `corpus`/`corpus` | `queries`/`queries` | `default`/`test` |
 | CodeSearchNetCCRetrieval | `CoIR-Retrieval/CodeSearchNet-ccr` | `python-corpus`/`corpus` | `python-queries`/`queries` | `python-qrels`/`test` |
-| CodeEditSearchRetrieval | `mteb/CodeEditSearchRetrieval` | `python-corpus`/`train` | `python-queries`/`train` | `python-qrels`/`train` |
+| **CodeEditSearchRetrieval-python** | `mteb/CodeEditSearchRetrieval` | `python-corpus`/`train` | `python-queries`/`train` | `python-qrels`/**`train`** (1,000 rows) |
+| **CodeEditSearchRetrieval-go** | `mteb/CodeEditSearchRetrieval` | `go-corpus`/`train` | `go-queries`/`train` | `go-qrels`/**`train`** (1,000 rows) |
+| **CodeEditSearchRetrieval-javascript** | `mteb/CodeEditSearchRetrieval` | `javascript-corpus`/`train` | `javascript-queries`/`train` | `javascript-qrels`/**`train`** (1,000 rows) |
 
 Details worth knowing:
 
 * **`CodeSearchNet` / `CodeSearchNet-ccr` are multi-language** (`go/java/javascript/php/python/ruby`
   sub-configs). The registry pins the **python** sub-config; change `_lang_layout("python")` to
   evaluate another language.
-* **`mteb/CodeEditSearchRetrieval`** has *only* `train` splits and **no `java-qrels` config** (verified:
-  only `java-corpus` and `java-queries` exist), therefore the registry uses the `python` sub-config.
-  Its `_id`s are 40-char hashes, so it also exercises the scan fallback.
+* **`mteb/CodeEditSearchRetrieval`** is registered as **three per-language subtasks** (not one task).
+  Measured config availability (`/splits` + `/rows` + the repo's own parquet files, all cross-checked):
+
+  | sub-config | corpus | queries | qrels | usable? |
+  | --- | --- | --- | --- | --- |
+  | `python` | ✅ 1,000 rows | ✅ 1,000 rows | ✅ 1,000 rows | **yes** |
+  | `go` | ✅ | ✅ | ✅ | **yes** |
+  | `javascript` | ✅ | ✅ | ✅ | **yes** |
+  | `java` | HTTP 500 | HTTP 500 | **config does not exist** (404; no `java-qrels` parquet either) | no |
+  | `ruby` | HTTP 500 | HTTP 500 | HTTP 500 | no (`.rb` is also outside the indexer whitelist) |
+  | `typescript` | HTTP 500 | HTTP 500 | HTTP 500 (parquet unreadable server-side) | no |
+
+  Its corpus `text` is **100% a unified diff** (`1000/1000` rows start with `---`/`@@`), so both its
+  `_id`s (40-char hashes → scan fallback) and its materialization (→ `diff_postimage`, see §6) are
+  special. `query_length_chars` per task is written into `meta.json`, so the short-query premise stays
+  auditable.
 * **qrels split rule**: `test` → `valid` → `train`, first available wins; the split actually used is
   recorded per task in `meta.json.tasks[].qrels_split` and in every `report.json.meta.dataset_splits`.
   Correctness cross-check: `cosqa` test has exactly **500** qrels rows and `synthetic-text2sql` test
   has exactly **5,851** — both match the query counts MTEB reports for those tasks. For
   `CodeSearchNet` the python test qrels has **14,918 rows**, which is more than a query count because a
   single query can have several graded documents.
+
+### 5.1 Task filtering: the batch-2 "short query only" set
+
+codeseek's retrieval **fails on long queries**: measured directly, an AppsRetrieval query of 1,316
+characters returns `[]` while its first line truncated to 152 characters returns 3 hits. Batch 1
+(`results/2026-11-12-report.md`) therefore reported AppsRetrieval 0.2252 and CodeTransOceanDL 0.2482 —
+those numbers measure the length cut-off, not retrieval quality. Batch 2 selects **only short-query
+tasks**, using the measured character length of the query distribution:
+
+| MTEB(Code) task | query length min / median / p90 / max (chars) | decision |
+| --- | --- | --- |
+| **CosQA** | 18 / **34** / 42 / 62 (sampled 40; 35 over the full 500) | ✅ kept |
+| **CodeEditSearchRetrieval-python** | 21 / **45** / 128 / 1,811 (full set) | ✅ kept |
+| **CodeEditSearchRetrieval-go** | 19 / **45** / 139 / 1,529 | ✅ kept |
+| **CodeEditSearchRetrieval-javascript** | 18 / **43** / 87 / 601 | ✅ kept |
+| SyntheticText2SQL | 25 / 79 / 130 / 419 | ❌ corpus is `.sql`, outside the indexer whitelist |
+| CodeSearchNetRetrieval | — / 624 / — / — | ❌ query too long **and** corpus is the docstring |
+| CodeFeedbackST | — / 540 / — / — | ❌ query too long |
+| CodeTransOceanContest | — / 547 / — / — | ❌ query too long |
+| StackOverflowQA | — / 883 / — / — | ❌ query too long (34.2% of query text is prose) |
+| CodeTransOceanDL | — / 1,211 / — / — | ❌ query too long |
+| AppsRetrieval | 50 / 1,316 / 2,491 / 13,955 | ❌ query too long (98.9% > 200 chars) |
+| CodeFeedbackMT | — / 3,571 / — / — | ❌ query too long |
+
+Excluded entries stay in the registry with an `excluded_reason` field; selecting one raises a clear
+error (`--tasks AppsRetrieval` → *"已被实测剔除…"*) instead of quietly polluting a batch.
+
+Query budget: the intended set was 4 languages × 20 + CosQA 20 = 100, but only **3** of the 4 requested
+languages have a complete corpus/queries/qrels triple, so the fallback rule applies:
+**CosQA 40 + 3 × 20 = 100**. That is expressed per task via `TaskSpec.query_quota` (a global
+`--limit-queries` cannot say "40 here, 20 there").
+
 
 ## 6. Subset & materialization protocol (the core design)
 
@@ -208,6 +269,13 @@ check, so the suite uses a **pooled corpus**, the same philosophy as repoqa's "1
    * content = `text`; when a non-empty `title` exists **and** the file is code (`.py/.java/.js/.ts/.go/.rs/.cpp`),
      a first-line comment is prepended (`#` for Python, `//` otherwise). `.sql` / `.txt` are **never**
      annotated, so SQL text is not polluted;
+   * **diff corpora** (`TaskSpec.diff_postimage=True`, currently the three `CodeEditSearchRetrieval-*`
+     tasks): the text is a unified diff, so it is first converted to the **post-image** code — `@@`,
+     `---`, `+++` and `\ No newline` lines are dropped, `-` lines are dropped, and exactly one leading
+     `+` / `（space）` prefix character is stripped from the kept lines (this preserves relative
+     indentation). Only patch markers are removed; no code character is altered. Measured effect on 30
+     documents: raw diff → 9 indexed files / 11 symbols, post-image → 17 files / 80 symbols. The flag is
+     recorded in `meta.json.tasks[].materialization` and asserted in `selftest`;
    * `docmap.json` = `{relative POSIX path: doc_id}` — scoring looks up ids here and **never guesses
      from the path**;
    * `git init` in the corpus dir (`codeseek init` hard prerequisite).
@@ -335,6 +403,15 @@ comparable with MTEB and do not reflect codeseek's semantic retrieval ability.
 * **Single-run variance from the service side.** `coseseek search` talks to the embedding API; identical
   queries can occasionally return empty results (`unknown_empty`). Those are kept in the report as
   `0.0` scores, never silently dropped.
+* **`index.hybrid.cutoff` trims hard.** With `abs_floor 0.2` / `rel_ratio 0.55` / `min_keep 1`, a query
+  often keeps **one** candidate: batch 2 measured `mean_returned` = 1.00 on CosQA (26 of 40 queries got
+  exactly one hit), so nDCG@10 ≈ recall@10 ≈ MRR@10 collapses into a rank-1 hit rate. If you need to
+  separate ranking from recall, raise `rrf_top_k` / lower the cut-off in `~/.codeseek/config.json` — the
+  numbers here are what the shipped defaults produce.
+* **Diff-hunk corpora are only post-images.** `CodeEditSearchRetrieval` documents are hunks (median
+  11–14 lines, 259–300 of 300 under 30 lines), not whole files: a commit-message query describes the
+  *change*, the document contains only the changed region. Batch 2 shows the consequence honestly
+  (0.20–0.45 nDCG@10 with 35–55% empty results); it is a property of the task, not a bug in the harness.
 
 ## 10. Directory layout
 
@@ -355,7 +432,7 @@ evals/mtebcode/
     ├── scorer.py              # results → doc_id ranking → metrics → Mean(Task) aggregation
     ├── runner.py              # serial init + concurrent search + resumable raw + report
     ├── report.py              # report.json / report.md
-    └── selftest.py            # offline self-check (61 assertions, prints SELFTEST OK)
+    └── selftest.py            # offline self-check (69 assertions, prints SELFTEST OK)
 ```
 
 `--workdir` layout produced at run time:
@@ -378,13 +455,15 @@ evals/mtebcode/
 
 | check | result |
 | --- | --- |
-| `python -m mtebcode_eval selftest` | **`SELFTEST OK`** — 61 assertions, exit 0 (metrics, tolerant parsing, doc_id resolution, materialization, layout detection, end-to-end report, CLI wiring, error paths) |
+| `python -m mtebcode_eval selftest` | **`SELFTEST OK`** — 69 assertions, exit 0 (metrics, tolerant parsing, doc_id resolution, materialization incl. `diff_postimage`, layout detection, end-to-end report, CLI wiring, excluded-task rejection, error paths) |
 | `python -m py_compile mtebcode_eval/*.py` | clean |
 | `--help` for the CLI and all four subcommands | clean |
 | real `prepare` smoke (`CosQA`, 5 queries, 60 docs, proxy `127.0.0.1:7897`) | 60 files materialized, `docmap.json` 60 entries, `tasks.jsonl` 5 lines, `meta.json` written, `git init` done; 20 API pages cached; the positional fast path needed 3 corpus pages instead of scanning 20,604 rows |
 | real `run` smoke (same workdir, `--limit 10 --limit-queries 5`) | `coseseek init` 17.1 s, 5 queries: 4 `hybrid` + 1 `unknown_empty`, mean **nDCG@10 = 0.8000** (this is a smoke number, not a benchmark result) |
 | `score` re-scoring | reproduces the same numbers with `command=score`, `k` configurable |
 | `prepare --cache-only` | replays entirely from `cache/` with no network |
+| real 100-query run, batch `2026-11-12b` (`CosQA` 40 + `CodeEditSearchRetrieval-{python,go,javascript}` 20 each, 4 × 300 docs) | `prepare` 100/100 tasks, `run` **Mean(Task) nDCG@10 = 0.4266**, 64 `hybrid` / 36 `unknown_empty` / 0 `name_fallback`, wall 306.6 s (init Σ 236.9 s, search mean 2.75 s), archived as `results/2026-11-12b-report.{json,md}` |
+| local parquet source (`--parquet-cache`) | 141 pages served from parquet + 1 REST request; byte-identical row shape to `/rows` (same `_id`/`text`/`title` and `query-id`/`corpus-id`/`score` fields), so `prepare` needs no code branch |
 
 ---
 
