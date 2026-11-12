@@ -15,7 +15,7 @@
       "hybrid": 100
     },
     "embedding_configured": true,
-    "embedding_note": "embedding 已配置（model=Qwen/Qwen3-Embedding-4B，api_token 长度 51）",
+    "embedding_note": "embedding configured (model=Qwen/Qwen3-Embedding-4B, api_token length 51)",
     "init_failures": [],
     "dataset": {
       "path": "/tmp/repoqa-eval/repoqa-2024-06-23.json",

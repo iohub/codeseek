@@ -1,10 +1,13 @@
-# RepoQA 评测套件的唯一硬依赖。
-# BLEU 需要 nltk 的 sentence_bleu + SmoothingFunction().method4 才能与官方口径逐位一致；
-# 若未安装 nltk，repoqa_eval.bleu 会自动退化为内置的 method4 复刻实现（自检可离线通过）。
+# The only hard dependency of the RepoQA evaluation suite.
+# BLEU needs nltk's sentence_bleu + SmoothingFunction().method4 to match the official
+# reference implementation digit for digit; if nltk is not installed, repoqa_eval.bleu
+# automatically falls back to a built-in method4 reimplementation (selftest still passes offline).
 nltk>=3.8,<4
 
-# ── 可选依赖（不安装也能完整跑通，仅影响判分前的"取第一个函数定义"步骤）──────────────
-# tree-sitter / tree-sitter-language-pack：官方 sanitize_output 用它从代码块中
-# 抽取第一个函数定义。缺失时本套件直接使用代码块全文，并会在 selftest 中提示。
+# --- Optional dependencies (everything runs without them; they only affect the
+# "extract the first function definition" step performed before scoring) ---
+# tree-sitter / tree-sitter-language-pack: the official sanitize_output uses them to
+# extract the first function definition from a code block. When absent, this suite uses
+# the whole code block instead and mentions it in selftest.
 # tree-sitter>=0.21
 # tree-sitter-language-pack>=0.1

@@ -175,12 +175,15 @@ def check_embedding_configured(
     """
     path = config_path(config_path_override)
     if not path.is_file():
-        return False, f"配置文件不存在：{path}（无 embedding.api_token，search 会退化为函数名子串匹配）"
+        return False, (
+            f"config file not found: {path} "
+            "(no embedding.api_token; search degrades to function-name substring matching)"
+        )
 
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        return False, f"配置文件无法解析：{path}（{type(exc).__name__}: {exc}）"
+        return False, f"cannot parse config file: {path} ({type(exc).__name__}: {exc})"
 
     embedding: Any = None
     if isinstance(payload, dict):
@@ -190,14 +193,17 @@ def check_embedding_configured(
             embedding = payload["codebase"].get("embedding")
 
     if not isinstance(embedding, dict):
-        return False, f"{path} 中没有 embedding 段（无 embedding.api_token）"
+        return False, f"{path} has no embedding section (no embedding.api_token)"
 
     token = embedding.get("api_token")
     if not isinstance(token, str) or not token.strip():
-        return False, f"{path} 的 embedding.api_token 为空（search 会退化为函数名子串匹配）"
+        return False, (
+            f"{path} has an empty embedding.api_token "
+            "(search degrades to function-name substring matching)"
+        )
 
-    model = embedding.get("model") or "<未设置 model>"
-    return True, f"embedding 已配置（model={model}，api_token 长度 {len(token.strip())}）"
+    model = embedding.get("model") or "<model not set>"
+    return True, f"embedding configured (model={model}, api_token length {len(token.strip())})"
 
 
 def init_repo(

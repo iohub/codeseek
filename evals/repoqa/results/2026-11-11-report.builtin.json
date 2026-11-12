@@ -15,7 +15,7 @@
       "hybrid": 100
     },
     "embedding_configured": true,
-    "embedding_note": "embedding 已配置（model=Qwen/Qwen3-Embedding-4B，api_token 长度 51）",
+    "embedding_note": "embedding configured (model=Qwen/Qwen3-Embedding-4B, api_token length 51)",
     "init_failures": [],
     "dataset": {
       "path": "/tmp/repoqa-eval/repoqa-2024-06-23.json",
@@ -3237,6 +3237,6 @@
     }
   ],
   "warnings": [
-    "BLEU 使用**内置复刻实现**（未安装 nltk）。与官方 `repoqa.compute_score` 的差异仅在 nltk 版本级细节上，建议 `pip install nltk` 后用同一批 raw 结果执行 `score` 复核。"
+    "BLEU used the **built-in reimplementation** (nltk not installed). Differences from the official `repoqa.compute_score` are limited to nltk version-level details; run `pip install nltk` and then `score` the same raw results to double-check."
   ]
 }

@@ -612,11 +612,11 @@ def _cmd_selftest(_args: argparse.Namespace) -> int:
             all(
                 heading in markdown
                 for heading in (
-                    "## 1. 结论摘要",
-                    "## 2. 检索模式统计",
-                    "## 3. 按语言 × repo 细分",
-                    "## 4. 失败案例 Top 10",
-                    "## 5. 复现命令",
+                    "## 1. Summary",
+                    "## 2. Retrieval Mode Statistics",
+                    "## 3. Breakdown by Language × Repo",
+                    "## 4. Top 10 Failures (sorted by best_similarity, descending)",
+                    "## 5. Reproduction Commands",
                 )
             ),
         )
