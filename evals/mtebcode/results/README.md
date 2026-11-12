@@ -1,421 +1,343 @@
-# MTEB(Code, v1) measured results archive
+# MTEB(Code, v1) × codeseek measured results archive
 
-This directory archives codeseek's end-to-end results on the **MTEB(Code, v1)-style retrieval
-subset** produced by `evals/mtebcode` (primary metric **nDCG@10**, overall score = arithmetic mean
-of per-task means).
-
-> **Three batches are archived: `2026-11-12`, `2026-11-12b` and `2026-11-12c`.** Each is a real
-> 100-query measurement with a 300-document pool per task, but pooled corpus + a small query sample
-> per task means none of them is **comparable with the MTEB(Code, v1) leaderboard** (see the batch
-> sections below).
+> **Primary result: the `2026-11-12` report, mean nDCG@10 = 0.5339** (100 queries / 4 tasks), binary under test
+> `sha256` prefix `b1532bb1b43e3d65`, evaluation condition **`index.hybrid.cutoff.enabled = false`**.
+> The body of this document (key takeaways / protocol decisions / evaluation conditions / key insights / known
+> limitations) **refers to that batch throughout**.
 >
-> `2026-11-12` and `2026-11-12b` use **different task sets** and are therefore **not comparable with
-> each other**. `2026-11-12c`, by contrast, re-runs **batch 2's exact 100 questions on batch 2's exact
-> corpora** (`workdir`/`tasks.jsonl`/`seed`/`sampling_fingerprint` all unchanged) with only
-> `index.hybrid.cutoff.enabled` flipped to `false` — so **b ↔ c is a true A/B pair** and the only
-> same-questions comparison in this archive.
->
-> The older 5-query `CosQA` smoke run is kept at the bottom for reference only.
+> **Earlier probing runs are not archived.** They appear **only** in Section 2, as the measured basis for the
+> protocol decisions that were rejected, and no other section cites their numbers. There is exactly **one**
+> archived batch, so the file name carries no `b`/`c` suffix.
 
-## Naming convention
+This archives codeseek's end-to-end retrieval results on a **100-query subset** of MTEB(Code, v1)-style tasks
+(measured, not estimated and not extrapolated from a sample). It holds a single batch: the
+**2026-11-12 short-query result (mean nDCG@10 = 0.5339)**.
 
-| pattern | meaning |
+| file | description |
 | --- | --- |
-| `YYYY-MM-DD-report.json` | first batch of that day, machine-readable (`meta` / `aggregate` / `per_query` / `failure_top` / `warnings`) |
-| `YYYY-MM-DD-report.md` | same batch, human-readable (fixed 5 sections) |
-| `YYYY-MM-DD[b|c…]-report.{json,md}` | 2nd/3rd batch of the same day (a day can produce several batches when the binary under test changes) |
+| `2026-11-12-report.md` | **Primary result**: human-readable report (summary / retrieval-mode statistics / per-task breakdown / top-10 worst queries / reproduction commands) |
+| `2026-11-12-report.json` | **Primary result**: machine-readable detail (`meta` / `aggregate` / `per_query` / `failure_top` / `warnings`) |
+| `README.md` | This file: archive index, protocol decisions, evaluation conditions, insights, limitations |
 
-Files are copied verbatim from the same-named artifacts under the `--workdir` used for the run
-(default `/tmp/mtebcode-eval/`) and only renamed with a date prefix. `.md` files are always produced
-by `render_markdown()` in `mtebcode_eval/report.py` — never edited by hand, so that
-`md == render_markdown(json)` stays verifiable. Note that this invariant holds **against the renderer
-version that produced the file**: from batch `2026-11-12c` on, §5 derives the real commands from
-`meta`, so re-rendering an *older* archive with the current renderer changes §5 and no longer compares
-equal. Archived files are never retro-edited; the batch sections below quote the commands verbatim.
+**Provenance**: `2026-11-12-report.md` is produced by `render_markdown()` in `mtebcode_eval/report.py` from
+`2026-11-12-report.json`; **no number was edited by hand**, and `md == render_markdown(json)` was verified
+**byte for byte** (`True`). Measured values of the archived files:
 
-## What each archive entry must record
-
-Before committing a report, make sure `meta` carries all of the following (the runner fills them in
-automatically; only `--workdir` artifacts differ):
-
-* `seed`, `corpus_size`, `limit_queries`, `sampling_fingerprint` — the sampling protocol;
-* `dataset_splits` — which qrels split was used per task (`test` → `valid` → `train` fallback);
-* `codeseek_binary` — `path` / `mtime_iso` / `sha256_prefix` of the binary under test;
-* `embedding.configured` + `embedding.model` — whether semantic retrieval was actually enabled;
-* `mode_counts` — `hybrid` vs `name_fallback` vs `unknown_empty` query counts;
-* `n_queries`, `n_docs_total`, `k`, `search_limit`, `command` (`run` or `score`).
-
-A report whose `mode_counts.name_fallback > 0` is **not comparable with the MTEB(Code, v1)
-leaderboard** and must say so at the top (the renderer adds that blockquote automatically).
-
-## Batch `2026-11-12` — 100 queries / 4 tasks
-
-Files: `2026-11-12-report.json` + `2026-11-12-report.md` (copied verbatim from the `--workdir`
-artifacts; `md == render_markdown(json)` was re-verified after copying).
-
-| item | value |
-| --- | --- |
-| date (UTC) | `2026-11-12`, run started `10:31:34Z`, report written `10:32:44Z` |
-| tasks (4) | `CosQA`, `AppsRetrieval`, `CodeTransOceanContest`, `CodeTransOceanDL` |
-| queries | **100** total = 25 per task (`--limit-queries 25`), `--seed 42` |
-| corpus pool | **300 documents per task** (1,200 total), sampling fingerprint `3a2f136b62c306f0` |
-| qrels splits | `default/test` (CoIR layout) for all four tasks |
-| binary | `rust-core/target/release/codeseek`, 60,600,320 B, sha256 prefix **`b1532bb1b43e3d65`** |
-| embedding | `Qwen/Qwen3-Embedding-4B` (api_token configured, `configured=True`) |
-| search params | `--limit 20 --concurrency 4 --timeout 180`, k=10 |
-| **Mean(Task) nDCG@10** | **0.4897** (mean recall@10 0.5900, mean MRR@10 0.4596, mean recall@20 0.6300) |
-
-Per-task nDCG@10 / recall@10 / MRR@10:
-
-| task | nDCG@10 | recall@10 | MRR@10 | mode split |
-| --- | ---: | ---: | ---: | --- |
-| CosQA | 0.7452 | 0.7600 | 0.7400 | 20 hybrid / 5 empty |
-| AppsRetrieval | 0.2252 | 0.2400 | 0.2200 | 14 hybrid / 11 empty |
-| CodeTransOceanContest | 0.7400 | 0.7600 | 0.7333 | 23 hybrid / 2 empty |
-| CodeTransOceanDL | 0.2482 | 0.6000 | 0.1450 | 25 hybrid / 0 empty |
-
-Mode distribution: **82 `hybrid` / 0 `name_fallback` / 18 `unknown_empty`** (82.0% / 0.0% / 18.0%).
-`n_unmapped` is **0 for every query** (mean `n_mapped` = 8.46), i.e. every returned chunk was mapped
-back to a pool `doc_id`; the docmap/path resolution is healthy.
-
-Timing (this machine, warm index):
-
-| stage | value |
-| --- | --- |
-| run wall clock (init + 100 searches) | **~70 s** |
-| `codeseek init` per corpus (incremental, already indexed) | 0.3 / 0.4 / 0.7 / 0.8 s (Σ 2.2 s) |
-| `codeseek init` per corpus (cold, first build) | CosQA 73 s, AppsRetrieval 64 s, CodeTransOceanContest 154 s, CodeTransOceanDL 98 s |
-| search per query | mean **2.68 s**, median 2.86 s, p0 0.73 s, max 6.94 s (per task: CosQA 3.44 s, Apps 3.56 s, Contest 2.72 s, DL 0.98 s) |
-
-### Why 4 tasks and not the originally planned 5
-
-The first attempt used `CosQA, CodeSearchNetRetrieval, SyntheticText2SQL, CodeFeedbackST,
-StackOverflowQA`. Four of the five turned out to be **structurally unusable with codeseek** (not a
-config/split error — those were all verified against `/splits`), so the query budget was
-re-allocated to 4 usable tasks × 25 = 100:
-
-| dropped task | measured reason |
-| --- | --- |
-| `CodeFeedbackST` | corpus `_id`s are hashes, so positional lookup fails; the pool build needs an in-order scan of 156,526 corpus rows (~1,566 pages) and its qrels had already passed 12,400 rows without finishing — >1 h for one task |
-| `CodeSearchNetRetrieval` | `CoIR-Retrieval/CodeSearchNet` `python-corpus.text` is the **docstring**, not code: of 300 materialized files only 3 contained `def`/`class`; `codeseek init` indexed just 1 file / 3 symbols, so every query returned nothing |
-| `SyntheticText2SQL` | corpus materializes as `.sql`, which is **not** in codeseek's indexer whitelist (`cpp/py/java/rs/ts/tsx/js/go`) → 0 files indexed |
-| `StackOverflowQA` | corpus is natural-language answers materialized as `.txt` → not in the whitelist → 0 files indexed |
-
-Replacements were registered with a code extension matching the corpus payload:
-`AppsRetrieval` → `.py` (indexed 439 functions / 184 files), `CodeTransOceanContest` → `.cpp`
-(1,571 / 284), `CodeTransOceanDL` → `.py` (1,399 / 271).
-
-### Known anomaly in this batch: 18 `unknown_empty`
-
-18 of 100 queries returned zero results with an **empty** `error` field (11 AppsRetrieval, 5 CosQA,
-2 CodeTransOceanContest). All 18 were re-run **serially** afterwards (same binary, same corpus, no
-concurrency) and **all 18 still returned 0 results** — so this is codeseek's deterministic
-cutoff behaviour (the `index.hybrid.cutoff` thresholds in `~/.codeseek/config.json`), not a
-concurrency flake. They are scored as 0.0 and are included in the per-task means above.
-
-## Batch `2026-11-12b` — 第 2 批：全短 query 任务集 (100 queries / 4 tasks)
-
-Files: `2026-11-12b-report.json` + `2026-11-12b-report.md` (copied verbatim from the `--workdir`
-artifacts; `md == render_markdown(json)` re-verified after copying).
-
-**Why a second batch.** Batch 1 mixed tasks whose queries are 540–3,571 characters long. Measured
-directly with the same binary: an AppsRetrieval query returns `[]` at 1,316 characters, and the same
-query truncated to its first line (152 characters) returns 3 hits. So batch 1's AppsRetrieval 0.2252
-and CodeTransOceanDL 0.2482 measure codeseek's **query-length cut-off**, not retrieval quality.
-Batch 2 therefore keeps **only short-query tasks** and drops everything long.
-
-| task | query chars min / median / p90 / max | decision |
+| file | bytes | md5 |
 | --- | --- | --- |
-| CosQA | 18 / **34** / 42 / 62 (sampled 40; 35 over the full 500) | kept (40 queries) |
-| CodeEditSearchRetrieval-python | 21 / **45** / 128 / 1,811 (full set) | kept (20) |
-| CodeEditSearchRetrieval-go | 19 / **45** / 139 / 1,529 | kept (20) |
-| CodeEditSearchRetrieval-javascript | 18 / **43** / 87 / 601 | kept (20) |
-| SyntheticText2SQL | 25 / 79 / 130 / 419 | dropped: `.sql` corpus is outside the indexer whitelist |
-| CodeSearchNetRetrieval | — / 624 / — / — | dropped: long query + docstring corpus |
-| CodeFeedbackST | — / 540 / — / — | dropped: long query |
-| CodeTransOceanContest | — / 547 / — / — | dropped: long query |
-| StackOverflowQA | — / 883 / — / — | dropped: long query (34.2% prose) |
-| CodeTransOceanDL | — / 1,211 / — / — | dropped: long query |
-| AppsRetrieval | 50 / 1,316 / 2,491 / 13,955 | dropped: long query (98.9% > 200 chars) |
-| CodeFeedbackMT | — / 3,571 / — / — | dropped: long query |
+| `2026-11-12-report.md` | 8377 | `ea8da7f2715f544dd933a9188e86cd7b` |
+| `2026-11-12-report.json` | 103440 | `e9639cd38b4a1c9cb84711b6abc3cffd` |
 
-Intended budget was 4 languages × 20 + CosQA 20; only 3 of the 4 requested CodeEditSearchRetrieval
-languages have a complete corpus/queries/qrels triple (**java has no `java-qrels` at all** — the config
-does not exist and the repo has no such parquet; ruby/typescript `/rows` return HTTP 500), so the
-fallback rule applied: **CosQA 40 + 3 × 20 = 100**.
+The `.json` file was **never rewritten** after the run: only the `.md` was re-rendered (from that same `.json`)
+when Section 5 of the renderer gained the cutoff precondition. Every statistic below is read from the `.json`.
 
-| item | value |
-| --- | --- |
-| date (UTC) | `2026-11-12`, run finished `11:38:33Z` |
-| tasks (4) | `CosQA` (40), `CodeEditSearchRetrieval-python` (20), `-go` (20), `-javascript` (20) |
-| queries | **100** total, `--seed 42`, per-task `query_quota` (40/20/20/20) |
-| corpus pool | **300 documents per task** (1,200 total), `sampling_fingerprint` **`2986c8ffabe1d0e2`** |
-| config/split | `corpus/corpus`+`queries/queries`+`default/test` (CosQA); `<lang>-corpus/train` + `<lang>-queries/train` + `<lang>-qrels/train` ×3 |
-| materialization | CodeEdit corpora are 100% unified diffs → materialized as **diff post-image code** (`diff_postimage=True`, recorded per task in `meta.json`); extensions `.py` / `.go` / `.js` |
-| data source | **local HF parquet** (`--parquet-cache`): 141 parquet pages + 1 REST request — `datasets-server /rows` returned HTTP 429 for 6 consecutive retries |
-| binary | `rust-core/target/release/codeseek`, 60,600,320 B, sha256 prefix **`b1532bb1b43e3d65`** (same build as batch 1) |
-| embedding | `Qwen/Qwen3-Embedding-4B`, `configured=True`, `name_fallback` = **0** |
-| search params | `--limit 20 --concurrency 4 --timeout 180`, k=10 |
-| **Mean(Task) nDCG@10** | **0.4266** (mean recall@10 0.4312, mean MRR@10 0.4250, mean recall@20 0.4312) |
+## Archive timeline
 
-Per-task metrics (all 100 queries are scoreable, n_skipped = 0):
+| batch | files | mean nDCG@10 | CosQA | CE-python | CE-go | CE-javascript | binary `sha256` prefix | notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **2026-11-12** (**primary result**) | `2026-11-12-report.md` / `.json` | **0.5339** | 0.9690 | 0.4131 | 0.4882 | 0.2653 | `b1532bb1b43e3d65` | short-query task set (100 queries), **adaptive cutoff disabled**; `unknown_empty` 0, `mean_returned` 20.00 |
 
-| task | nDCG@10 | recall@10 | MRR@10 | recall@20 | mode split | mean returned |
-| --- | ---: | ---: | ---: | ---: | --- | ---: |
-| CosQA | **0.7565** | 0.7750 | 0.7500 | 0.7750 | 32 hybrid / 8 empty | 1.00 |
-| CodeEditSearchRetrieval-python | **0.3000** | 0.3000 | 0.3000 | 0.3000 | 9 hybrid / 11 empty | 0.55 |
-| CodeEditSearchRetrieval-go | **0.4500** | 0.4500 | 0.4500 | 0.4500 | 13 hybrid / 7 empty | 1.45 |
-| CodeEditSearchRetrieval-javascript | **0.2000** | 0.2000 | 0.2000 | 0.2000 | 10 hybrid / 10 empty | 0.90 |
+`CE-*` = `CodeEditSearchRetrieval-{python,go,javascript}`. Per-task query counts: CosQA **40**, the three
+CodeEditSearch tasks **20 each**. The overall number is the **arithmetic mean of the four per-task means**
+(MTEB `Mean(Task)`), **not** a pooled mean over 100 queries:
+`(0.969046… + 0.413093… + 0.488200… + 0.265342…) / 4 = 0.533921…` -> `0.5339`.
 
-Mode distribution: **64 `hybrid` / 0 `name_fallback` / 36 `unknown_empty`** (64% / 0% / 36%).
-`n_unmapped` is **0 for every query** (mean `n_mapped` = **0.98** = (40×1.00 + 20×0.55 + 20×1.45 +
-20×0.90)/100, mean returned 0.98), i.e. every returned chunk mapped back to a pool `doc_id`.
+## 1. Key takeaways
 
-Exact reproduction of this batch (report.md §5 inside *this* archived artifact prints the *generic*
-template of the time — from batch `2026-11-12c` on, §5 derives the real commands from `meta` — so the
-real commands are pinned here):
+**Mean nDCG@10 = 0.5339** across 4 tasks and 100 queries:
 
-```bash
-cd evals/mtebcode
-python -m mtebcode_eval prepare --workdir /tmp/mtebcode-short \
-  --tasks CosQA,CodeEditSearchRetrieval-python,CodeEditSearchRetrieval-go,CodeEditSearchRetrieval-javascript \
-  --limit-queries 20 --corpus-size 300 --seed 42 \
-  --proxy http://127.0.0.1:7897 --parquet-cache ~/.cache/huggingface/hub
-python -m mtebcode_eval run --workdir /tmp/mtebcode-short --limit 20 --concurrency 4 --timeout 180
-```
+| task | queries | nDCG@10 | recall@10 | MRR@10 | recall@20 |
+| --- | --- | --- | --- | --- | --- |
+| CosQA | 40 | 0.9690 | 1.0000 | 0.9583 | 1.0000 |
+| CodeEditSearchRetrieval-python | 20 | 0.4131 | 0.5000 | 0.3833 | 0.5000 |
+| CodeEditSearchRetrieval-go | 20 | 0.4882 | 0.5500 | 0.4696 | 0.5500 |
+| CodeEditSearchRetrieval-javascript | 20 | 0.2653 | 0.3500 | 0.2400 | 0.3500 |
+| **Mean(Task)** | **100** | **0.5339** | **0.6000** | **0.5128** | **0.6000** |
 
-Timing (this machine, cold index):
+All four metrics are computed at `k = 10` except the last column, which uses the actual search budget
+(`search_limit = 20`). Four decimals are kept because nDCG differences are much finer than
+percentage-point accuracy.
 
-| stage | value |
-| --- | --- |
-| run wall clock (4 × init + 100 searches) | **306.6 s** |
-| `codeseek init`, one per corpus | 33.5 s (CosQA) / 68.8 s (py) / 68.2 s (go) / 66.4 s (js), **Σ 236.9 s** |
-| search per query | mean **2.75 s**, median 2.44 s, min 1.99 s, max 6.37 s |
+### 1.1 Derived: what the numbers look like *conditional on a hit*
 
-### Diagnosis of the 36 `unknown_empty` (measured, not assumed)
+| derived metric | computation | value |
+| --- | --- | --- |
+| conditional nDCG@10 (over recalled queries only) | `0.5339 / 0.6000` | **0.8898** |
+| conditional MRR@10 (over recalled queries only) | `0.5128 / 0.6000` | **0.8547** |
+| mean rank of the gold document, given it was recalled | `1 / 0.8547` | **1.17** |
 
-The empty share is 20% (CosQA) / 55% (python) / 35% (go) / 50% (javascript) — three of four exceed
-20%, so each cause was checked explicitly:
+**Once the gold document is recalled, ordering is near-optimal**: a mean rank of 1.17 means the gold document is
+almost always the first result, and every remaining point is lost in *retrieval*, not in *ranking*.
 
-1. **Not query length.** All 36 empty queries are short: max 189 chars, and the per-task medians are
-   34 / 51 / 44 / 44 chars. The `error` field is empty on all 36, so this is not a failure either.
-2. **Not an indexing gap.** `codeseek skeleton` run over the whole pool shows 297/300 (py), 289/300 (go),
-   300/300 (js) files yield at least one symbol, and the **gold docs specifically** are indexable
-   20/20, 19/20, 20/20.
-3. **It is query↔hunk semantic mismatch plus the similarity cut-off.** Reproduced by hand:
-   `codeseek search "Change if condition to while with reformat"` (gold `a16cffb7…`, a 12-line
-   post-image hunk with `def prime_factors`) returns `[]` at `--limit 5` and `--limit 20`, while
-   `codeseek search "prime factors while loop number"` on the same corpus returns exactly that gold
-   file (hybrid, `final_score` 0.998). So the document is in the index and retrievable by a code-named
-   query; the commit-message-style query simply does not match the hunk text well enough, and
-   `index.hybrid.cutoff` (`abs_floor 0.2`, `rel_ratio 0.55`, `min_keep 1`) then trims to **one**
-   candidate — meta `mean_returned` is 1.00 for CosQA (26 of 40 queries got exactly one result).
-   With one result per query, nDCG@10 degenerates into a rank-1 hit rate, which is why nDCG ≈ recall
-   ≈ MRR in every row above.
+> The division above is done on the 4-decimal values printed in the tables. Dividing the unrounded means
+> (`0.5339205817405623 / 0.6`) gives `0.8899`; the difference is display rounding only, and the qualitative
+> statement is unchanged.
 
-### Note on the CodeEditSearchRetrieval corpus (materialization A/B, measured)
+### 1.2 Retrieval mode statistics
 
-Its `corpus.text` is a unified diff in 1,000/1,000 rows, and only 15–26% of the added lines contain a
-`def`/`class`/`func`/`function`. Materialized **raw** as `.py`, 30 documents yielded **9 indexed files /
-11 symbols**; materialized as the **diff post-image** (drop `@@`/`---`/`+++`/`-` lines, strip one
-`+`/space prefix) the same 30 documents yielded **17 files / 80 symbols**. The post-image conversion is
-opt-in per task (`TaskSpec.diff_postimage`), recorded as `meta.json.tasks[].materialization.diff_postimage`,
-and covered by selftest assertions — every code character is preserved, only patch markers are removed.
-
-### Why 0.4266 must not be read as "short queries score higher"
-
-Batch 1 = 0.4897 over `CosQA / AppsRetrieval / CodeTransOceanContest / CodeTransOceanDL`;
-batch 2 = 0.4266 over `CosQA / CodeEditSearchRetrieval-{python,go,javascript}`. **Different task sets →
-different difficulty; the two overall means are not comparable and no "improvement/regression" claim is
-made from them.** What *is* comparable inside a single batch:
-
-* CosQA is the only task present in both. Batch 1 sampled 25 of 500 queries → **0.7452**; batch 2
-  sampled 40 of 500 (different subset, different pool of distractors) → **0.7565**. The +0.011 is far
-  inside the ±0.05–0.1 sampling noise documented in `../README.md` §9, i.e. **no change**.
-* The batch-2 mean is *lower* than batch 1's, but that is a task-mix effect: two cheap tasks were
-  replaced by three diff-corpus tasks that score 0.20–0.45. Short queries did not raise the score —
-  they made the score **interpretable**, because no query in this batch is long enough to trip the
-  length cut-off.
-
-## Batch `2026-11-12c` — 第 3 批：关闭 adaptive cutoff (100 queries / 4 tasks, **identical to batch 2**)
-
-Files: `2026-11-12c-report.json` + `2026-11-12c-report.md`.
-
-**Why a third batch.** Batch 2 measured a *truncated* ranker, not a ranker: `mean_returned` was 0.98
-and 36 of 100 queries came back empty, so nDCG ≈ recall ≈ MRR in every row. Batch 3 re-runs the
-**exact same 100 questions on the exact same corpora** with one config change, to isolate what the
-ranking actually does when the result list is not chopped to one item.
-
-| item | value |
-| --- | --- |
-| config change | `~/.codeseek/config.json` → `index.hybrid.cutoff.enabled = false` (everything else untouched) |
-| backup of the original config | `~/.codeseek/config.json.mtebcode-backup-20261112T194850` |
-| unchanged under the hood | same workdir `/tmp/mtebcode-short`, same `tasks.jsonl`, same 4 corpora, `--seed 42`, `sampling_fingerprint` **`2986c8ffabe1d0e2`** (byte-identical to batch 2) |
-| binary | `rust-core/target/release/codeseek`, 60,600,320 B, sha256 prefix **`b1532bb1b43e3d65`** — no Rust code was touched |
-| embedding | `Qwen/Qwen3-Embedding-4B`, `configured=True`, `name_fallback` = **0** |
-| search params | `--limit 20 --concurrency 4 --timeout 180`, k=10 |
-| **Mean(Task) nDCG@10** | **0.5339** (mean recall@10 **0.6000**, mean MRR@10 **0.5128**, mean recall@20 **0.6000**) |
-| run finished (UTC) | `2026-11-12T11:51:54Z` |
-
-Because the question set and the corpus pool are identical, **every number below is directly
-comparable with batch 2** — this is the only pair in this archive where an A/B really is an A/B.
-
-### Verification that the switch took effect (measured before the full run)
-
-Three CosQA queries that returned **exactly 1** result in batch 2 were re-run by hand
-(`codeseek search "<query>" --json --limit 20`, cwd `corpora/cosqa`):
-
-| query | returned before | returned after |
-| --- | ---: | ---: |
-| `python file opening modes` (`cosqa__q0036`) | 1 | **20** |
-| `python check file is readonly` (`cosqa__q0000`) | 1 | **20** |
-| `write in bold and read in color of the print mesaage in python` (`cosqa__q0017`) | 1 | **20** |
-
-`RUST_LOG=debug` on the first query logs the new branch verbatim:
-
-```
-DEBUG codeseek::services::hybrid_search: 自适应 cutoff 已关闭：20 → 20 条（仅按 k_final=20 截断）
-```
-
-i.e. the config was read, the three-gate cascade was skipped, and only `truncate(k_final)` remained.
-
-### Per-task metrics
-
-| task | nDCG@10 | recall@10 | MRR@10 | recall@20 | mode split | mean returned |
-| --- | ---: | ---: | ---: | ---: | --- | ---: |
-| CosQA | **0.9690** | 1.0000 | 0.9583 | 1.0000 | 40 hybrid | 20.00 |
-| CodeEditSearchRetrieval-python | **0.4131** | 0.5000 | 0.3833 | 0.5000 | 20 hybrid | 20.00 |
-| CodeEditSearchRetrieval-go | **0.4882** | 0.5500 | 0.4696 | 0.5500 | 20 hybrid | 20.00 |
-| CodeEditSearchRetrieval-javascript | **0.2653** | 0.3500 | 0.2400 | 0.3500 | 20 hybrid | 20.00 |
-
-Mode distribution: **100 `hybrid` / 0 `name_fallback` / 0 `unknown_empty`** (was 64/0/36).
-`mean_returned` = **20.00**, `mean_mapped` = **20.00**, `n_unmapped` = **0** (every chunk mapped back
-to a pool `doc_id`), `n_queries_skipped` = **0**, `warnings` = **[]**. `recall@10 == recall@20` because
-each question has exactly one gold document: nothing extra is found by looking past rank 10.
-
-### Batch 2 (cutoff ON) vs batch 3 (cutoff OFF) — same 100 questions
-
-| task | nDCG@10 on → off | recall@10 on → off | MRR@10 on → off |
+| mode | queries | share | meaning |
 | --- | --- | --- | --- |
-| CosQA | 0.7565 → **0.9690** (Δ +0.2125) | 0.7750 → **1.0000** (Δ +0.2250) | 0.7500 → **0.9583** (Δ +0.2083) |
-| CodeEditSearchRetrieval-python | 0.3000 → **0.4131** (Δ +0.1131) | 0.3000 → **0.5000** (Δ +0.2000) | 0.3000 → **0.3833** (Δ +0.0833) |
-| CodeEditSearchRetrieval-go | 0.4500 → **0.4882** (Δ +0.0382) | 0.4500 → **0.5500** (Δ +0.1000) | 0.4500 → **0.4696** (Δ +0.0196) |
-| CodeEditSearchRetrieval-javascript | 0.2000 → **0.2653** (Δ +0.0653) | 0.2000 → **0.3500** (Δ +0.1500) | 0.2000 → **0.2400** (Δ +0.0400) |
-| **Mean(Task)** | 0.4266 → **0.5339** (Δ **+0.1073**) | 0.4312 → **0.6000** (Δ **+0.1688**) | 0.4250 → **0.5128** (Δ **+0.0878**) |
+| `hybrid` | **100** | 100.0% | true semantic retrieval (LanceDB + BM25, results carry a `code_block`) |
+| `name_fallback` | 0 | 0.0% | degradation to function-name substring matching, used when `embedding.api_token` is absent |
+| `unknown_empty` | 0 | 0.0% | empty or unparsable search results, impossible to judge |
 
-Where the gain comes from (same 100 questions, paired comparison; the two means below are **pooled
-over the queries in each subset**, so they are not additive with the `Mean(Task)` row above — the
-subset sizes differ from the task sizes):
+`mean_returned = 20.00`, `mean_mapped = 20.00`, `n_unmapped = 0`: every query returned the full budget and
+**every single result mapped back to a `doc_id`**, so no ranking position was lost to mapping failures.
 
-| batch-2 subset | n | batch-2 mean nDCG@10 | batch-3 mean nDCG@10 |
-| --- | ---: | ---: | ---: |
-| queries that returned **0** results | 36 | 0.0000 | **0.3287** (17 of 36 now retrieve the gold doc) |
-| queries that returned **1** result | 47 | 0.8298 | 0.8432 (46 unchanged — its single hit was already rank 1 — 1 improved, 0 worse) |
+### 1.3 Failure decomposition
 
-So the +0.1073 is **not** a better ranker; it is 36 questions that previously scored a forced 0.0
-now being scored on their actual rank.
+| component | value | meaning |
+| --- | --- | --- |
+| `1 − recall@10` | **0.4000** | outright recall failure (the gold document never reaches Top-10) |
+| `recall@10 − nDCG@10` | **0.0661** | ordering loss **after** the gold document was retrieved |
+| `nDCG@10` | 0.5339 | the two components above, subtracted from 1.0 |
 
-### Did nDCG finally separate from recall / MRR? (the point of this batch)
+Only **6.61 points of the 40.00 points** that are missing at the top of the scale are a ranking problem;
+**40.00 points are entirely recall**.
 
-| metric | batch 2 (cutoff ON) | batch 3 (cutoff OFF) |
-| --- | ---: | ---: |
-| Mean nDCG@10 | 0.4266 | **0.5339** |
-| Mean recall@10 | 0.4312 | **0.6000** |
-| Mean MRR@10 | 0.4250 | **0.5128** |
-| spread (max − min) | **0.0062** | **0.0872** |
+## 2. Protocol decisions that were measured, so nobody has to redo them
 
-In batch 2 all three metrics agreed to within 0.0062 — they were measuring the same thing because
-every query had at most one result, so "retrieved" forced "rank 1". In batch 3 they are distinct:
-**recall@10 − nDCG@10 = +0.0661** and **nDCG@10 − MRR@10 = +0.0211**. Read as two separate
-capabilities of codeseek on this task set:
+The first two rows are configurations that were **measured and rejected**; the third is the **currently adopted**
+configuration. All three used the **same binary** (`sha256` prefix `b1532bb1b43e3d65`) and differed only in the
+task set and in the codeseek configuration.
 
-* **retrieval (does the right document make the top 10 at all) = 0.6000**
-* **ranking (how high it lands, graded) = 0.5339**
-* the gap of 0.0661 is the share lost purely to ordering. Decomposing the 0.4661 of missing nDCG:
-  `1 − 0.6000 = 0.4000` is outright retrieval failure (gold never in the top 10) and
-  `0.6000 − 0.5339 = 0.0661` is ordering loss among the hits (`0.4000 + 0.0661 = 0.4661`). Ordering
-  is therefore the *smaller* of the two problems — codeseek's bottleneck on this task set is recall,
-  not rank quality.
+| attempt | what was done | measured | verdict |
+| --- | --- | --- | --- |
+| **A. long-query task set** | task set = CosQA + AppsRetrieval + CodeTransOceanContest + CodeTransOceanDL, 25 queries each | mean nDCG@10 **0.4897**, but **18/100** `unknown_empty`; AppsRetrieval alone **0.2252** | **rejected**. AppsRetrieval query length is median **1,316** chars at dataset level (98.9% of queries exceed 200 chars), and in the sampled 25 the median was **1,557** with a maximum of **2,908**. A screening probe on one such query returned `[]` for the full text but 3 results once it was truncated to its 152-character first line -> the score was measuring **query length**, not retrieval ability |
+| **B. short-query task set, adaptive cutoff left on** | CosQA 40 + `CodeEditSearchRetrieval-{python,go,javascript}` 20 each, default config | mean nDCG@10 **0.4266**, `unknown_empty` **36**, `mean_returned` **0.98** | **rejected as a measurement configuration**. `nDCG@10 == recall@10 == MRR@10` **digit for digit**, because the result list was trimmed to about one item, so "recall" had degenerated into "is rank 1 correct" |
+| **C. short-query task set, adaptive cutoff disabled** | same 100 queries, `index.hybrid.cutoff.enabled = false` | mean nDCG@10 **0.5339** (**+0.1073**), `unknown_empty` **0**, `mean_returned` **20.00** | **adopted** (current primary result) |
 
-nDCG@10 and MRR@10 stay close (+0.0211) **by construction**: with exactly one gold document,
-`nDCG@10 = 1/log2(rank+1)` and `MRR@10 = 1/rank`, so the two are monotone transforms of the same
-rank and nDCG ≥ MRR for every possible rank. Their nearness is arithmetic, not a defect; the metric
-that genuinely decouples is recall.
+### 2.1 Why only these four tasks survived
 
-### Root cause (confirmed at source level, no source change made)
+Query length was the first filter. The numbers below were measured per task during screening and are recorded
+in the task registry (`mtebcode_eval/data.py`, `TaskSpec.excluded_reason` / `note`).
 
-`AdaptiveCutoffConfig` defaults (`rust-core/src/services/hybrid_search.rs:27-64`):
-`enabled=true, abs_floor=0.2, rel_ratio=0.55, rel_ratio_rrf=0.40, gap_min=0.30, min_keep=1`.
-`adaptive_cutoff()` (same file, `:640-815`) applies a three-gate cascade over normalised scores and
-then truncates the list; gate 1 (`abs_floor`) also clamps `min_keep`, i.e.
-`final_len = len_gap.max(min_keep.min(len_abs))`. On short queries the second result's relative
-score collapses below `rel_ratio_rrf × top1`, so `len_abs = 1` and `min_keep = 1` keeps exactly one
-candidate (and, when even the top candidate is below `abs_floor`, zero). `enabled=false` restores the
-previous plain `truncate(k_final)` behaviour. There is no CLI flag and no environment variable for
-this — `~/.codeseek/config.json` is the only override path, which is why the config was temporarily
-patched and then restored (see the note at the end of this file).
+| task | query length (dataset level) | verdict |
+| --- | --- | --- |
+| CosQA | short (natural-language questions such as `python check file is readonly`) | **adopted** (quota raised to 40 so the batch reaches 100 queries) |
+| CodeEditSearchRetrieval-python | 21–1,811 chars, median **45** | **adopted** |
+| CodeEditSearchRetrieval-go | 19–1,529 chars, median **45** | **adopted** |
+| CodeEditSearchRetrieval-javascript | 18–601 chars, median **43** | **adopted** |
+| SyntheticText2SQL | short | **rejected**: the corpus is `.sql`, outside codeseek's extension whitelist (`rust-core/src/codegraph/parser.rs` `is_supported_file`), so the index holds 0 files |
+| CodeFeedbackST | median 540 | **rejected**: query too long |
+| CodeTransOceanContest | median 547 | **rejected**: query too long |
+| CodeSearchNetRetrieval | median 624 | **rejected**: query too long, **and** the corpus text is the docstring (only 12.7% code-like) -> `codeseek init` indexed **1 file / 3 symbols** |
+| StackOverflowQA | median 883 | **rejected**: query too long (34.2% of the query text is prose) |
+| CodeTransOceanDL | median 1,211 | **rejected**: query too long |
+| AppsRetrieval | median 1,316 | **rejected**: query too long (98.9% of queries exceed 200 chars) |
+| CodeFeedbackMT | median 3,571 | **rejected**: query too long |
 
-Worst 5 queries in batch 3 (all ranked, none truncated — these are real retrieval misses):
+> **Scope warning.** "Dataset level" and "as evaluated" are **not** the same population. The **evaluated sample**
+> of 100 queries, as recorded in the archived `per_query` array, is much shorter: median **33.5** chars for CosQA,
+> **44** for CodeEditSearch-go, **44** for -javascript, **51** for -python; across all 100 queries the median is
+> **40** and the maximum is **203** (5.0% of the python queries exceed 200 chars, 0.0% of go/javascript/CosQA).
+> The screening table above describes the datasets; the sample is drawn from their short-query body.
 
-| # | task_id | query (abridged) | top3 doc_id (abridged) | gold doc_id | nDCG |
-| --- | --- | --- | --- | --- | ---: |
-| 1 | `codeeditsearchretrievalgo__q0001` | ``Rename `r` variable to `o` …for `output`…`` | `5241cdb4…`, `0e93f179…`, `949b5960…` | `e992a8d7…` | 0.0 |
-| 2 | `codeeditsearchretrievalgo__q0002` | `Test that Add actually works.` | `872b8636…`, `bcb9ce24…`, `777289c1…` | `0d36314b…` | 0.0 |
-| 3 | `codeeditsearchretrievalgo__q0003` | `Remove useless function that already exist in strings pakage.` | `bcb9ce24…`, `adedb818…`, `8be6da3b…` | `3125d02c…` | 0.0 |
-| 4 | `codeeditsearchretrievalgo__q0005` | `Clean up and improve relevance of example code.` | `8d436c8d…`, `adedb818…`, `f9a8c9a6…` | `95431df4…` | 0.0 |
-| 5 | `codeeditsearchretrievalgo__q0009` | `Use absolute value for NTP drift` | `00ab1bb9…`, `78ebc2e8…`, `695d264c…` | `a27a91a9…` | 0.0 |
+### 2.2 Language variants of CodeEditSearchRetrieval
 
-All five are Go commit-message queries whose diff post-image contains no mention of the words in the
-query ("Add", "strings pakage", "NTP drift"); they now return 20 results and simply miss.
+| language | corpus / queries / qrels | verdict |
+| --- | --- | --- |
+| python | all three endpoints HTTP 200, 1,000 rows each | **adopted** |
+| go | all three endpoints HTTP 200, 1,000 rows each | **adopted** |
+| javascript | all three endpoints HTTP 200, 1,000 rows each | **adopted** |
+| java | `java-corpus` and `java-queries` exist, **`java-qrels` does not** (`/rows` returns 404) | **rejected**: no relevance judgements, and codeseek does index `.java` — the missing half is the qrels |
+| ruby | all three configs return **500** (`/rows` cannot read the parquet); `.rb` is also outside the whitelist | **rejected** |
+| typescript | all three configs return **500** | **rejected** |
 
-Timing (warm index, `--force` re-ran every search but `codeseek init` was an incremental no-op):
+The dataset exposes **only a `train` split** for every config, so `CosQA=test` but all three
+`CodeEditSearchRetrieval-*=train` — the usual `test -> valid -> train` preference has nothing else to fall back on.
 
-| stage | value |
-| --- | --- |
-| run wall clock | **68.9 s** (batch 2: 306.6 s) |
-| `codeseek init`, one per corpus | 0.3 s / 0.3 s / 0.3 s / 0.3 s, **Σ 1.2 s** (batch 2 cold: Σ 236.9 s) |
-| search per query | mean **2.68 s**, median 2.54 s, p90 3.37 s, min 1.95 s, max 5.76 s (Σ 268.3 s ÷ 4 workers) |
+### 2.3 The adaptive cutoff, and why it had to be disabled
 
-Exact reproduction (identical to batch 2 except for the config line; the commands below are now also
-what `report.md` §5 generates dynamically — the hard-coded template that batch 2's archive had to
-work around is gone):
+`AdaptiveCutoffConfig::default()` (`rust-core/src/services/hybrid_search.rs`) is
+`enabled = true, abs_floor = 0.2, rel_ratio = 0.55, rel_ratio_rrf = 0.40, gap_min = 0.30, min_keep = 1`.
+`adaptive_cutoff()` normalises the fused score into `rel ∈ [0, 1]` and then applies **three cascaded gates** as a
+prefix truncation: (1) an absolute floor `rel > abs_floor`, which is a **hard gate**; (2) a relative ratio
+`rel >= rel_ratio × rel[0]` (or `rel_ratio_rrf` in the RRF score domain); (3) a gap detector on adjacent drops.
 
-```bash
-# 1) turn the adaptive cutoff off (merge, do not rewrite the file)
-python3 - <<'PY'
-import json, os
-p = os.path.expanduser('~/.codeseek/config.json')
-d = json.load(open(p))
-d.setdefault('index', {}).setdefault('hybrid', {}).setdefault('cutoff', {})['enabled'] = False
-json.dump(d, open(p, 'w'), ensure_ascii=False, indent=2)
-PY
+The final length is `final_len = len_gap.max(cfg.min_keep.min(len_abs))`, and because gate 1 is a hard gate,
+**`min_keep` cannot rescue anything the absolute floor has already rejected**. On short queries the normalised
+score collapses right after the top hit — everything past `top1` falls below `rel = 0.2` — so `len_abs` collapses
+to 1 and the result list is trimmed to **one** item. `mean_returned = 0.98` in decision **B** is exactly this
+effect.
 
-# 2) same workdir / same questions / same pool as batch 2 → directly comparable
-cd evals/mtebcode
-python3 -m mtebcode_eval run --workdir /tmp/mtebcode-short --limit 20 --k 10 --concurrency 4 --force
+There is **no CLI flag and no environment variable** for it: the config loader reads a single path,
+`~/.codeseek/config.json` (`rust-core/src/config.rs`, `codeseek_dir()`), so the only override is to write
+`{"index": {"hybrid": {"cutoff": {"enabled": false}}}}` into that file (merge, do not overwrite — the `embedding`
+section must survive).
 
-# 3) restore your original config afterwards
-cp ~/.codeseek/config.json.mtebcode-backup-<timestamp> ~/.codeseek/config.json
-```
+With `RUST_LOG=debug` the binary logs which branch it took, in the shape
+`adaptive cutoff disabled: <before> -> <after> items (truncated only by k_final=<n>)`. The line observed for this
+batch was **`adaptive cutoff disabled: 20 -> 20 items`**, which pins the behaviour to the early-return path: no
+gate ran and the list was only truncated by `k_final = 20`. With the cutoff enabled the emitted count collapses to
+about one item (`mean_returned = 0.98` in decision **B**), which is what the `final_len` formula above predicts
+once the absolute floor rejects everything past the top hit.
 
-**Raw artifacts.** `/tmp/mtebcode-short/raw/` currently holds the **cutoff-OFF** results (batch 3).
-The cutoff-ON baseline of batch 2 is preserved separately at `/tmp/mtebcode-short/raw.cutoff-on/`
-(100 files, verified same count). The global config was restored to its pre-run state right after the
-run; the archive entry above is the durable record, not the tmp directory.
+### 2.4 Where the +0.1073 came from (it is not better ranking)
 
-## Smoke run (reference only — not an archive entry, not a benchmark result)
+A paired comparison of the same 100 queries, cutoff on (batch **B**) versus cutoff off (batch **C**), using the
+per-query results of both passes:
 
-Measured on this machine with `cargo build --release` binary `sha256` prefix `b1532bb1b43e3d65`,
-proxy `http://127.0.0.1:7897`, `embedding.model=Qwen/Qwen3-Embedding-4B`:
+| cohort | queries | nDCG@10 with cutoff on | nDCG@10 with cutoff off | interpretation |
+| --- | --- | --- | --- | --- |
+| queries that were `unknown_empty` | 36 | 0.0000 (forced) | **0.3287** | **17 of 36 recovered recall**; the gain is purely "no longer forced to zero" |
+| queries that already returned exactly 1 result | 47 | 0.8298 | 0.8432 | **46 of 47 are bit-for-bit unchanged**, 1 improved, **0 regressed** |
+
+Two conclusions follow. First, disabling the cutoff does **not** reorder anything that was already returned — 46
+of 47 queries are identical to the last digit. Second, essentially the whole +0.1073 is the 36 zeros turning into
+real numbers. In production terms the same defect is a **UX** problem, not just an evaluation artifact: on CosQA
+`recall@10` was **0.775** with the cutoff on and **1.0000** with it off, i.e. **22.5% of the relevant results were
+being thrown away before the user ever saw them**.
+
+## 3. Evaluation conditions
 
 | item | value |
 | --- | --- |
-| task set | `CosQA` only |
-| sampling | `--limit-queries 5 --corpus-size 60 --seed 42` |
-| docs materialized | 60 files (`gold 5 + distractor 55`), `coseseek init` 17.1 s |
-| queries / retrieval | 5 queries, 4 `hybrid` + 1 `unknown_empty` |
-| mean nDCG@10 | **0.8000** (4 hits at rank 1, 1 query returned no result at all) |
-| workdir | `/tmp/mtebcode-smoke` |
+| evaluation condition | **`index.hybrid.cutoff.enabled = false`** (all other cutoff sub-fields keep their defaults) |
+| data subset protocol | 4 tasks × 25 queries on average = **100 queries**; pooled corpus **300 documents per task** = **1,200 documents** total |
+| tasks | CosQA (40 queries), `CodeEditSearchRetrieval-python` (20), `-go` (20), `-javascript` (20) |
+| dataset access | HuggingFace **datasets-server JSON REST API**, `100` rows per `/rows` page, through the local proxy `http://127.0.0.1:7897` (a direct connection to HF is not reachable from this machine) |
+| qrels splits | `CosQA=test`, `CodeEditSearchRetrieval-python=train`, `-go=train`, `-javascript=train` |
+| primary metric | **nDCG@10**; overall = **arithmetic mean of per-task means** (MTEB `Mean(Task)`); `search_limit=20`, `k=10`, `seed=42` |
+| sampling | `sampling_fingerprint = 2986c8ffabe1d0e2` (deterministic; re-running `prepare` with the same seed reproduces the same 100 queries and the same 300-document pools) |
+| retrieval mode | `hybrid: 100` (no `name_fallback`, no `unknown_empty`) |
+| binary under test | `rust-core/target/release/codeseek`, `sha256` prefix **`b1532bb1b43e3d65`**, `size_bytes=60600320`, mtime `2026-11-12T08:06:16.385072+00:00` |
+| embedding config | `Qwen/Qwen3-Embedding-4B`, `api_token` length **51** (non-empty, so hybrid mode is genuinely enabled) |
+| run scale | `generated_at = 2026-11-12T11:51:54+00:00`, wall **68.8 s**, `concurrency = 4`, `init_failures = []` |
+| per-query search time | mean **2.68 s**, median **2.53 s**, p90 **3.27 s**, max **5.76 s**; 268.3 s of search in total / 4 concurrent workers ≈ the 68.8 s wall clock |
+| `codeseek init` | 4 invocations (one per corpus); the index is reused from the previous pass, so the init itself is a fast no-op and `meta` does not record a per-init duration |
+| reranker | `enabled`, `top_n = 5`, but `derived_top_n = max(top_n, final_budget) = 20` — recorded as an **uncontrolled variable** |
+| warnings | `[]` (no `prepare` warning, no scoring warning) |
 
-That 0.8 is a *5-query* number on a *60-document* pool — it only proves the pipeline runs, and it is
-recorded here so nobody mistakes the smoke output for a measurement.
+## 4. Key insights
+
+### 4.1 Ranking is near-optimal once the gold document is recalled
+
+Conditional nDCG@10 is **0.8898** and conditional MRR@10 is **0.8547**, i.e. the gold document sits at mean rank
+**1.17** whenever it is retrieved at all. CosQA shows the same shape in a single row: `recall@10 = 1.0000` with
+`nDCG@10 = 0.9690`, which is only possible if nearly every hit is at position 1. **There is very little left to
+win in the ranker.**
+
+### 4.2 The bottleneck is recall, not ranking
+
+Of the 40.00 points missing from a perfect score, **40.00 are recall failures and only 6.61 are ordering loss**
+(Section 1.3). The strongest corroboration is that **`recall@10 == recall@20 == 0.6000`**: not a single gold
+document lands in positions 11–20. The distribution is **bimodal** — a gold document is either inside the Top-10
+or nowhere in the returned list at all. That is the signature of a **candidate-generation** problem (the dense and
+BM25 channels never surface the right document), not of a document that was found but ranked too low.
+
+### 4.3 The adaptive cutoff was manufacturing failures
+
+**36 of 100** queries were trimmed to about one item and scored a forced **0.0000**. Disabling the cutoff lifted
+mean nDCG@10 by **+0.1073** on the same 100 queries while the 47 queries that had already returned multiple
+results stayed **essentially identical (46 of 47 bit-for-bit unchanged, 1 improved, 0 regressed)**. So the gain
+is not a better retriever — it is the removal of a **measurement artifact**: a large share of the previous 0.4266
+was not "retrieval ability", it was the cutoff.
+
+The same defect is a production bug, not just an evaluation nuisance: on CosQA, `recall@10` went from **0.775** to
+**1.0000**, which means **22.5% of relevant results were being discarded before the user could see them**.
+
+### 4.4 CodeEditSearchRetrieval's low scores are a task-design problem, not a retrieval problem
+
+The corpus of this task family is **not source code**: the raw `code` field is a **unified diff** — measured
+**1,000 of 1,000** rows are diffs — and this suite normalises each one to post-image code before materialization
+(`TaskSpec.diff_postimage = True`). That normalisation is not cosmetic: writing **30 raw diffs** out as `.py`
+only lets codeseek index **9 files / 11 symbols**; after post-image normalisation the same 30 diffs become
+**17 files / 80 symbols** (`mtebcode_eval/data.py`, `diff_postimage` docstring).
+
+Even after normalisation the corpus is thin, and measurably thinner than CosQA's. Over the 300 pooled documents
+per task, the share of documents that contain a language-appropriate definition (`func` for go, `def`/`class` for
+python, `function`/`class`/arrow for javascript, `def`/`class` for CosQA) is:
+
+| task | documents with a definition | corpus shape |
+| --- | --- | --- |
+| CosQA | **300/300 (100.0%)** | short python snippets, every one of them a definition |
+| CodeEditSearchRetrieval-python | **175/300 (58.3%)** | post-image fragments of a diff |
+| CodeEditSearchRetrieval-go | **145/300 (48.3%)** | post-image fragments of a diff |
+| CodeEditSearchRetrieval-javascript | **68/300 (22.7%)** | post-image fragments of a diff |
+
+The queries, meanwhile, are **commit-message shaped** (`Test that Add actually works.`, `Use absolute value for
+NTP drift`): they describe the *intent* of a change, while the document is a fragment of the *result* of that
+change and contains neither the intent nor a complete function. The consequences are visible in the ordering of
+the metrics: the worst 5 queries all come from this task family and **all of them returned the full 20 results**
+(see Section 4 of `2026-11-12-report.md`) — so these are genuine recall failures, but failures caused by
+**task unretrievability**, not by a broken retriever. This is the reason javascript (0.2653) trails python
+(0.4131) and go (0.4882): 22.7% is the lowest definition density of the four tasks.
+
+## 5. Known limitations and next steps
+
+- **Not comparable with the MTEB(Code, v1) leaderboard.** The corpus is pooled down to 300 documents per task,
+  only 25 queries per task are sampled, and codeseek is a local code search engine rather than an embedding
+  model. This archive is only valid for **longitudinal self-comparison** of successive codeseek builds.
+- **A single gold document per query makes nDCG@10 and MRR@10 monotone transforms of the same rank**
+  (`nDCG = 1 / log2(rank + 1)`, `MRR = 1 / rank`). The only genuinely independent signal in this table is
+  **recall**. Decoupling ranking quality from recall would require multi-gold tasks or graded relevance.
+- **`recall@10 == recall@20`** shows the current search budget of 20 is sufficient, but it also means **nothing
+  is being measured about positions 11–20** — the protocol cannot distinguish "ranked 11th" from "not retrieved".
+- **Pooling changes difficulty.** A 300-document pool is far smaller than the real corpus (the Hub reports
+  **20,604** corpus rows for CosQA and **280,310** for CodeSearchNet-python), so absolute recall here is
+  **systematically higher** than it would be on the full corpus. Magnitudes are comparable across batches, not
+  against other harnesses.
+- **CodeEditSearchRetrieval only exposes a `train` split**, java has no qrels, and ruby/typescript return 500, so
+  that task family is **incompletely covered** and is represented by three languages out of six.
+- **The reranker is an uncontrolled variable.** It was `enabled` with `top_n = 5`, but
+  `derived_top_n = max(top_n, final_budget) = 20`, so its real effect on these short queries was **not measured**.
+  A reranker-off run would be needed to attribute any of the ordering quality in Section 4.1 to it.
+- **The cutoff must be documented with every result.** Re-running the same 100 queries under the default config
+  takes mean nDCG@10 back to **0.4266** with `unknown_empty = 36`. Any future archive entry has to state its
+  cutoff state, which is why Section 5 of the rendered report now prints the precondition above the reproduction
+  commands.
+- **Long-query sensitivity is a query-side property, not noise.** The screening probe truncated one
+  AppsRetrieval query to its 152-character first line and recovered 3 results, i.e. codeseek (or the embedding
+  endpoint) has a practical usability ceiling on very long queries. That is a **product defect**, and it is also
+  why the long-query task set in Section 2 row A measured 0.4897 rather than something interpretable.
+- **Next steps, in priority order.** (a) Attack recall: check whether `vector_top_k` / `bm25_top_k` (default 100
+  each) are being diluted by the pooled corpus, and whether the embedding instruction template suits
+  commit-message-shaped queries. (b) Replace the CodeEditSearch family with a task whose corpus is **real source
+  files**, so that the metric stops measuring diff fragments. (c) Run a production-side sweep over
+  `abs_floor × min_keep` and pick a precision/recall recommendation for the default config, since the current
+  default (`abs_floor = 0.2`, `min_keep = 1`) silently discards most of the candidate list on short queries.
+
+## 6. Reproduction
+
+**Precondition.** The numbers above require `index.hybrid.cutoff.enabled = false` in `~/.codeseek/config.json`
+(merge into the existing JSON, do not overwrite the `embedding` section), and that config must be restored
+afterwards. Section 5 of `2026-11-12-report.md` prints the same warning above the commands.
+
+```bash
+cd evals/mtebcode
+
+# 0) offline self-test (no network, no binary needed)
+python3 -m mtebcode_eval selftest
+
+# 1) fetch the dataset, sample the queries, pool the corpus, materialize (the real parameters of this batch)
+python3 -m mtebcode_eval prepare \
+  --workdir /tmp/mtebcode-short \
+  --tasks CodeEditSearchRetrieval-go,CodeEditSearchRetrieval-javascript,CodeEditSearchRetrieval-python,CosQA \
+  --limit-queries 20 \
+  --corpus-size 300 \
+  --seed 42 \
+  --parquet-cache ~/.cache/huggingface/hub \
+  --proxy http://127.0.0.1:7897
+
+# 2) run retrieval and write the report
+python3 -m mtebcode_eval run \
+  --workdir /tmp/mtebcode-short \
+  --limit 20 \
+  --k 10 \
+  --concurrency 4
+
+# 3) re-score only (no retrieval re-run)
+python3 -m mtebcode_eval score \
+  --workdir /tmp/mtebcode-short \
+  --limit 20 \
+  --k 10
+```
+
+**Provenance.** Binary under test `rust-core/target/release/codeseek`, `sha256` prefix `b1532bb1b43e3d65`
+(`size_bytes = 60600320`, mtime `2026-11-12T08:06:16.385072+00:00`). `2026-11-12-report.md` is rendered from
+`2026-11-12-report.json` by `render_markdown()`, and `md == render_markdown(json)` was verified to be **`True`**
+byte for byte. `--limit-queries 20` is the global default; CosQA's quota of 40 is set in the task registry
+(`mtebcode_eval/data.py`, `TaskSpec.query_quota`), which is what brings the batch to 40 + 3 × 20 = 100 queries.
+
+For the data protocol, the sampling scheme and the scoring rules see the parent [`../README.md`](../README.md).

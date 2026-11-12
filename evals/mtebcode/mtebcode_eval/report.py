@@ -234,6 +234,47 @@ def _task_names(meta: Mapping[str, Any], by_task: Mapping[str, Any]) -> list[str
     return names
 
 
+CUTOFF_PRECONDITION_JSON = '{"index": {"hybrid": {"cutoff": {"enabled": false}}}}'
+
+
+def _cutoff_precondition_lines(meta: Mapping[str, Any]) -> list[str]:
+    """State the adaptive-cutoff precondition *before* the reproduction block.
+
+    Every archived short-query batch of this suite was produced with
+    ``index.hybrid.cutoff.enabled = false``. With the default (``true``) the
+    three-gate adaptive cutoff trims a short query down to roughly one result,
+    which collapses ``nDCG@10`` / ``recall@10`` / ``MRR@10`` onto the same value
+    and turns most queries into ``unknown_empty``: the score then measures the
+    cutoff instead of retrieval quality. The paragraph is therefore part of the
+    measurement condition rather than a convenience note, and it is emitted even
+    when ``meta`` does not record the setting.
+    """
+    lines: list[str] = [
+        "**Precondition -- the adaptive cutoff must be disabled.** The retrieval results below were produced with "
+        "`index.hybrid.cutoff.enabled = false`. With the default (`true`) the three-gate adaptive cutoff trims a "
+        "short query down to roughly **one** result, which collapses `nDCG@10`, `recall@10` and `MRR@10` onto the "
+        "same number and turns most queries into `unknown_empty` -- the score then measures the cutoff, not "
+        "retrieval.",
+        "",
+        "1. Merge the snippet below into `~/.codeseek/config.json` -- **merge, never overwrite**, so that the "
+        "`embedding` section holding `api_token` survives:",
+        "",
+        "```json",
+        CUTOFF_PRECONDITION_JSON,
+        "```",
+        "",
+        "2. Run the commands below, then **restore the previous configuration**. `~/.codeseek/config.json` is the "
+        "only place the cutoff can be changed: there is no CLI flag and no environment variable for it.",
+        "",
+        "Measured impact on the same 100-query short-query batch: `Mean nDCG@10` **0.4266 -> 0.5339**, "
+        "`unknown_empty` **36 -> 0**, `mean_returned` **0.98 -> 20.00**.",
+    ]
+    if meta.get("cutoff_enabled") is False:
+        lines.append("")
+        lines.append("`meta.cutoff_enabled = false` records that this run used that condition.")
+    return lines
+
+
 def _reproduction_commands(
     meta: Mapping[str, Any],
     aggregate: Mapping[str, Any],
@@ -275,11 +316,17 @@ def _reproduction_commands(
     else:
         seed_arg = str(int(seed))
 
-    lines: list[str] = ["```bash", "# 在仓库根目录执行；所有产物都落在 --workdir 里", "cd evals/mtebcode", ""]
-    lines.append("# 0) 离线自检：nDCG 数值 / 容错解析 / doc_id 反查 / 端到端报告（不联网、不需要二进制）")
+    lines: list[str] = _cutoff_precondition_lines(meta)
+    lines.append("")
+    lines.append("```bash")
+    lines.append("# Run from the repository root; every artifact lands under --workdir")
+    lines.append("cd evals/mtebcode")
+    lines.append("")
+    lines.append("# 0) Offline self-test: nDCG arithmetic / tolerant parsing / doc_id mapping / rendering")
+    lines.append("#    (no network, no codeseek binary)")
     lines.append("python3 -m mtebcode_eval selftest")
     lines.append("")
-    lines.append("# 1) 抓取数据集 + 抽样 query + 池化 corpus + 物化（本批次真实参数）")
+    lines.append("# 1) Fetch the dataset + sample queries + pool the corpus + materialize (real parameters of this batch)")
     lines.append("python3 -m mtebcode_eval prepare \\")
     lines.append(f"  --workdir {workdir} \\")
     lines.append(f"  --tasks {tasks_arg} \\")
@@ -288,21 +335,19 @@ def _reproduction_commands(
     lines.append(f"  --seed {seed_arg} \\")
     lines.append("  --parquet-cache ~/.cache/huggingface/hub \\")
     lines.append("  --proxy http://127.0.0.1:7897")
-    lines.append(
-        "#   ↑ --proxy 请替换成你自己的本地代理；国内直连 datasets-server 通常会被 429 限流。"
-    )
-    lines.append("#   ↑ --parquet-cache 让本地 HF 缓存命中的 (config, split) 直接读盘、不发网络请求；"
-    )
-    lines.append("#     确实无缓存时可省略该参数（或改用 --cache-only 做纯离线复现）。")
+    lines.append("#   --proxy points at a local proxy; replace it with your own. A direct connection to")
+    lines.append("#   datasets-server is usually rate-limited (HTTP 429).")
+    lines.append("#   --parquet-cache reads a (config, split) straight from the local HF cache without a")
+    lines.append("#   network request; drop it (or use --cache-only) for a fully offline reproduction.")
     lines.append("")
-    lines.append("# 2) 执行检索并出报告（--force 忽略已有 raw 结果；本批次 search_limit / k 如下）")
+    lines.append("# 2) Run retrieval and write the report (--force ignores existing raw results; search_limit / k below)")
     lines.append("python3 -m mtebcode_eval run \\")
     lines.append(f"  --workdir {workdir} \\")
     lines.append(f"  --limit {search_limit} \\")
     lines.append(f"  --k {k} \\")
     lines.append(f"  --concurrency {concurrency}")
     lines.append("")
-    lines.append("# 3) 只重算指标（不重跑检索；换 k 只需改这里，便于做 k 敏感性分析）")
+    lines.append("# 3) Re-score only (no retrieval re-run; change k here for a k-sensitivity check)")
     lines.append("python3 -m mtebcode_eval score \\")
     lines.append(f"  --workdir {workdir} \\")
     lines.append(f"  --limit {search_limit} \\")
