@@ -5,8 +5,13 @@
 //! and the sparse BM25 index.
 //!
 //! 除了「把符号变成 chunk」，本模块还承担**唯一一份**的范围选择逻辑
-//! （[`select_effective_ranges`]）：父子包含剪枝在这里判定一次，索引构建层
+//! （[`select_effective_ranges`]）：索引口径（哪些符号进索引）在这里判定一次，索引构建层
 //! （`services::embedding_service::process_file_content`）必须复用它，禁止另写副本。
+//!
+//! **内容降级（容器收缩成签名骨架）已停用** —— 开关见 [`SHRINK_CONTAINER_CONTENT`]：
+//! 所有候选的 `content` 与 `line_start` / `line_end` 一律取自 `full_range`，
+//! 父子包含关系改由**排序期**做无损降权
+//! （`services::hybrid_search::demote_enclosing_candidates`）。
 
 use crate::storage::traits_bm25::CodeChunk;
 use crate::codegraph::treesitter::ast_instance_structs::AstSymbolInstanceArc;
@@ -26,16 +31,40 @@ fn is_indexable_symbol_type(symbol_type: SymbolType) -> bool {
     )
 }
 
-/// 一个索引候选符号经「父子包含剪枝」后的有效范围。
+/// 是否把容器 chunk 的内容收缩到 `declaration_range`（「内容降级」开关）。
+///
+/// **恒为 `false` —— 实测证明内容降级是负优化，不要重新打开。**
+///
+/// 降级版把父容器 chunk 的 content 从 `full_range` 换成 `declaration_range`
+/// （只剩签名骨架），RepoQA 总体由 82.0% 掉到 78.0%：cpp 45%→55%、java 85%→90% 确有提升，
+/// 但 **typescript 100%→70%、rust 90%→85%** 严重回退。
+///
+/// 回退题的 rank1 实测全部是 1~5 行短块（例：express `Route` 的 rank1 `line_span=[43,43]`）：
+/// 容器降级后变成「超短文档 + 符号名完美词面命中」，在 BM25 的长度归一化下反而抢到 rank1，
+/// 正文却只剩签名 ⇒ BLEU 趋近 0。
+///
+/// 结论：**不能用删内容的方式解决排序问题**。内容必须保持 `full_range`；父子包含关系改为
+/// 在**排序期**无损降权（`services::hybrid_search::demote_enclosing_candidates`）——
+/// 降权可解释、可回滚，且不损失任何正文。
+const SHRINK_CONTAINER_CONTENT: bool = false;
+
+/// 一个索引候选符号经「父子包含判定」后的有效范围。
 #[derive(Debug, Clone)]
 pub struct EffectiveRange {
     /// parser 给出的原始完整范围（本层永不修改）
     pub full_range: Range,
-    /// 实际用于取内容与行号的范围：容器为 `declaration_range`，其余等于 `full_range`
+    /// 实际用于取内容与行号的范围。
+    ///
+    /// 当前 [`SHRINK_CONTAINER_CONTENT`] 为 `false`，因此**恒等于 `full_range`**；
+    /// 该字段保留是为了不破坏调用方契约，并给「日后若有新的无损用法」留一个唯一入口。
     pub effective_range: Range,
-    /// 该符号的 `full_range` 是否严格包含同文件其它候选的 `full_range`
+    /// 该符号的 `full_range` 是否严格包含同文件其它候选的 `full_range`。
+    ///
+    /// 仅供观测/日后排序期优化参考：**当前不影响内容范围**（容器不再收缩）。
     pub is_container: bool,
-    /// 容器但 `declaration_range` 不可收缩（为空/越界/不比 full 小）而保留 `full_range`
+    /// 容器但 `declaration_range` 不可收缩（为空/越界/不比 full 小）而保留 `full_range`。
+    ///
+    /// 降级停用后恒为 `false`（不再尝试收缩，也就没有「收缩被拒」这回事）。
     pub shrink_rejected: bool,
 }
 
@@ -54,8 +83,9 @@ impl EffectiveRange {
 /// 按 `range` 取整行文本及其 1-indexed 行区间。
 ///
 /// 语义与 `SymbolInformation::get_content` 一致（按行切片、保留行首缩进），
-/// 区别只在于范围由调用方指定 —— 于是容器可以用 `declaration_range` 取内容，
-/// 不会再出现「content 是签名、行号却还是整块」的错位。
+/// 区别只在于范围由调用方显式指定 —— 于是 content 与行号永远切自**同一个**范围，
+/// 不会出现「content 是签名、行号却还是整块」的错位（当前 [`SHRINK_CONTAINER_CONTENT`]
+/// 关闭，容器也走 `full_range`）。
 ///
 /// 返回的 `line_end` 与 `content` 严格自洽：`content.lines().count() == line_end - line_start + 1`。
 fn content_and_lines(file_content: &str, range: &Range) -> Option<(String, usize, usize)> {
@@ -78,18 +108,16 @@ fn content_and_lines(file_content: &str, range: &Range) -> Option<(String, usize
     Some((lines[start_row..end_row].join("\n"), start_row + 1, end_row))
 }
 
-/// 选出每个候选符号的有效内容范围（父子包含剪枝的**唯一实现**）。
-///
-/// 不变式：同一 `file_path` 内，任何 chunk 的内容范围都不是另一个 chunk 内容范围的严格超集。
+/// 选出每个候选符号的有效内容范围（索引口径 + 范围判定的**唯一实现**）。
 ///
 /// 规则：
 /// 1. 候选集 = `StructDeclaration | FunctionDeclaration`（见 [`is_indexable_symbol_type`]）；
 /// 2. 若候选 A 的 `full_range` **严格包含**另一候选 B 的 `full_range`
-///    （`B.start >= A.start && B.end <= A.end`，且至少一端严格不等），A 判为容器；
-/// 3. 容器的有效范围 = `declaration_range`，前提是它**正确且严格更小**
-///    （非空、完全落在 `full_range` 内、行点单调、字节数更少），否则保留 `full_range`
-///    —— 绝不允许「因为裁不动就丢掉 chunk」；
-/// 4. 非容器的有效范围 = `full_range`（成员符号的内容与行区间完全不变）。
+///    （`B.start >= A.start && B.end <= A.end`，且至少一端严格不等），A 记为容器
+///    —— 该标记仅作元数据，**不再触发任何内容收缩**；
+/// 3. **所有候选的有效范围 = `full_range`**：内容与行号必须与降级前逐字节一致，
+///    父子包含关系交给排序期无损降权（理由见 [`SHRINK_CONTAINER_CONTENT`]）；
+/// 4. [`SHRINK_CONTAINER_CONTENT`] 是唯一保留的收缩开关，恒为 `false`。
 ///
 /// 判定基于**同一文件的全部候选**（不是只看相邻项）。返回值下标与 `symbols` 一一对应：
 /// `None` = 非候选（类型不在索引口径内），`Some(_)` = 该符号应采用的有效范围。
@@ -125,7 +153,10 @@ pub fn select_effective_ranges(symbols: &[AstSymbolInstanceArc]) -> Vec<Option<E
                 other_position != position && strictly_contains(&candidate.full, &other.full)
             });
 
-        let (effective_range, shrink_rejected) = if is_container {
+        // ── 内容范围：降级已停用（见 `SHRINK_CONTAINER_CONTENT`）──
+        // 一律取 `full_range`：容器与成员都保留完整正文，content 与行号与 82% 基线逐字节一致。
+        // `is_container` 仍然照旧判定，但只作为元数据（观测 / 排序期参考），不影响取内容。
+        let (effective_range, shrink_rejected) = if is_container && SHRINK_CONTAINER_CONTENT {
             match shrink_to_declaration(&candidate.full, &candidate.declaration) {
                 Some(range) => (range, false),
                 None => (candidate.full.clone(), true),
@@ -178,8 +209,8 @@ fn shrink_to_declaration(full: &Range, declaration: &Range) -> Option<Range> {
 /// Extract code chunks from parsed AST symbols.
 ///
 /// Each indexable AST symbol (FunctionDeclaration, StructDeclaration) becomes one
-/// `CodeChunk`. 容器符号（`full_range` 严格包含其它候选）只取声明骨架，
-/// 避免「一个 struct/class 把成员函数全吞进去」的巨型 chunk。
+/// `CodeChunk`. 所有 chunk（含把成员符号整块吞进去的容器符号）的 content 与行号
+/// 都取自 `full_range` —— 内容降级已停用，理由见 [`SHRINK_CONTAINER_CONTENT`]。
 ///
 /// # Arguments
 /// * `file_path` - The path to the source file

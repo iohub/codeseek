@@ -615,9 +615,10 @@ impl EmbeddingService {
 
         // Parse with TreeSitter
         let symbols = ts_parser.parse_file(&file_path.to_path_buf())?;
-        // ── 父子包含剪枝（范围判定只有一份：`chunker::select_effective_ranges`）──
-        // 容器符号（把成员符号整块吞进去的 struct/class 等）在索引里收缩为
-        // `declaration_range` 的签名骨架；成员符号的 `full_range` 保持不动。
+        // ── 索引口径与范围判定（只有一份：`chunker::select_effective_ranges`）──
+        // 内容降级已停用：所有符号（含把成员整块吞进去的容器 struct/class）的 content 与
+        // 行号一律取自 `full_range`，父子包含关系改由排序期无损降权
+        // （`hybrid_search::demote_enclosing_candidates`）。
         let effective_ranges = crate::codegraph::chunker::select_effective_ranges(&symbols);
         // 一次性读取文件内容：content 与行号必须切自同一个有效范围（不再每个符号读一次盘）。
         let file_content = fs::read_to_string(file_path).ok();

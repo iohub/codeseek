@@ -375,6 +375,107 @@ fn fill_from_complete_set(
     filled
 }
 
+/// 父子包含降权的系数：容器 ×0.5；三层嵌套的中间层再 ×0.5（即最多 ×0.25）。
+const ENCLOSING_DEMOTE_FACTOR: f64 = 0.5;
+
+/// 排序期「父子包含降权」—— **内容无损，只压分数**。
+///
+/// 为什么在排序期做、而不是在切块期删内容（实测结论）：曾把父容器 chunk 的 content 从
+/// `full_range` 降级成 `declaration_range`（只剩签名骨架），RepoQA 总体 82.0%→78.0%，
+/// **typescript 100%→70%、rust 90%→85%**。回退题的 rank1 全是 1~5 行短块：容器降级成
+/// 「超短文档 + 符号名完美词面命中」，在 BM25 的长度归一化下反而抢到第一名，正文却只剩签名。
+/// 结论：不能用删内容的方式解决排序问题 —— 于是把「父子包含」搬到排序期，只降权不删内容。
+///
+/// 规则（只在**同一 `file_path`** 内比较，跨文件同名不处理）：
+/// 1. i 的 `[line_start, line_end]` **严格包含** j 的（`i.start <= j.start &&
+///    j.end <= i.end`，且至少一端严格不等）⇒ i 是容器，`final_score *= 0.5`；
+/// 2. 该容器自身又被 **≥ 2** 个其它候选严格包含（三层嵌套的中间层）⇒ 再乘一次 `0.5`，
+///    即最多 `0.25`：`factor = 0.5 * if contained_by >= 2 { 0.5 } else { 1.0 }`；
+/// 3. **只降权、绝不删除**：被包裹的成员候选取代容器名次即可，容器仍留在结果里；
+/// 4. 行号不可用（`line_start == 0`，或 `line_end < line_start`）的候选不参与判定。
+///
+/// 判定与改分分两步：先把「是否容器 / 被几个候选包含」这类纯几何事实算完（不受已改动的
+/// 分数影响），再统一乘系数 —— 因此结果与遍历顺序无关。降权后按 `final_score` 稳定降序
+/// 重排，于是后续 `adaptive_cutoff` 的前缀截断天然落在正确的名次上。
+///
+/// 返回被降权的条数（供日志观测）。
+fn demote_enclosing_candidates(results: &mut [FusedCandidate]) -> usize {
+    // 空 / 单条：没有任何「对」可判，直接返回（保持调用方顺序，不重排）
+    if results.len() < 2 {
+        return 0;
+    }
+
+    // 行号可用：BM25 通道的 `line_end` 回填失败时仍为 0，这种候选不参与几何判定
+    let usable = |c: &FusedCandidate| c.line_start > 0 && c.line_end >= c.line_start;
+
+    let mut factors = vec![1.0f64; results.len()];
+    let mut demoted = 0usize;
+
+    for i in 0..results.len() {
+        if !usable(&results[i]) {
+            continue;
+        }
+        let (i_file, i_start, i_end) = (
+            results[i].file_path.as_str(),
+            results[i].line_start,
+            results[i].line_end,
+        );
+
+        let mut contains_any = false;
+        let mut contained_by = 0usize;
+        for (j, other) in results.iter().enumerate() {
+            if i == j || other.file_path != i_file || !usable(other) {
+                continue;
+            }
+            let (j_start, j_end) = (other.line_start, other.line_end);
+            // i 严格包含 j ⇒ i 是容器
+            if i_start <= j_start && j_end <= i_end && (i_start < j_start || i_end > j_end) {
+                contains_any = true;
+            }
+            // j 严格包含 i ⇒ i 处在嵌套的里层，统计层数
+            if j_start <= i_start && i_end <= j_end && (j_start < i_start || j_end < i_end) {
+                contained_by += 1;
+            }
+        }
+
+        if contains_any {
+            factors[i] = ENCLOSING_DEMOTE_FACTOR
+                * if contained_by >= 2 {
+                    ENCLOSING_DEMOTE_FACTOR
+                } else {
+                    1.0
+                };
+            demoted += 1;
+        }
+    }
+
+    if demoted == 0 {
+        return 0;
+    }
+
+    for (candidate, factor) in results.iter_mut().zip(factors) {
+        if factor < 1.0 {
+            candidate.final_score *= factor;
+        }
+    }
+
+    // 降权后必须重排：下游 `adaptive_cutoff` 只做前缀截断，名次必须已经正确。
+    // 稳定排序 + `unwrap_or(Equal)` 让 NaN 分数的候选留在原位而不是 panic。
+    results.sort_by(|a, b| {
+        b.final_score
+            .partial_cmp(&a.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    debug!(
+        "父子包含降权：{} 条容器候选分数被下调（系数 {} / {}）",
+        demoted,
+        ENCLOSING_DEMOTE_FACTOR,
+        ENCLOSING_DEMOTE_FACTOR * ENCLOSING_DEMOTE_FACTOR
+    );
+    demoted
+}
+
 /// `final_score` 所属的分数域 —— 归一化到 `rel ∈ [0, 1]` 的唯一入口。
 ///
 /// [`HybridSearchService::search`] 有 4 条产出路径，四者的 `final_score` 量纲完全不同，
@@ -829,6 +930,9 @@ impl HybridSearchService {
                 // 分数域是向量相似度（`1/(1+distance)`，约 [0,1]）⇒ 按 DenseSim 归一化
                 // 后做自适应 cutoff，取代单纯的 truncate。
                 let mut candidates = Self::dense_only_candidates(dense, budget.k_final);
+                // 排序期父子包含降权：dense 自带 line_start/line_end，可直接判定。
+                // 只压分不删条目 —— 内容降级是负优化（见 demote_enclosing_candidates 文档）。
+                demote_enclosing_candidates(&mut candidates);
                 adaptive_cutoff(
                     &mut candidates,
                     ScoreDomain::DenseSim,
@@ -862,6 +966,10 @@ impl HybridSearchService {
                     top: candidates.first().map(|c| c.final_score).unwrap_or(0.0),
                 };
                 Self::hydrate_code_blocks(&mut candidates).await;
+                // 正文回填同时补上了真实 `line_end`，此刻才能做父子包含判定。
+                // 无 reranker 时直接决定名次；走 reranker 时该分数会被精排分覆盖，
+                // 由 apply_rerank 在重排后再施加一次（见那里的注释）。
+                demote_enclosing_candidates(&mut candidates);
 
                 if let Some(ref reranker) = self.reranker {
                     if reranker.config().enabled {
@@ -906,6 +1014,10 @@ impl HybridSearchService {
         // BM25 通道的 content 非 STORED，`SparseOnly` 候选天然没有正文：进 reranker 前
         // 必须先在磁盘上补齐，否则 cross-encoder 收到空 document、最终证据也是空的
         Self::hydrate_code_blocks(&mut fused).await;
+
+        // 排序期父子包含降权（内容无损）：伪装成「巨型容器」的 chunk 不该靠体量压过它
+        // 内部那几行真正被问到的代码。此处已 hydrate 完、且尚未做任何截断。
+        demote_enclosing_candidates(&mut fused);
 
         // Phase 2: Optional Cross-Encoder Rerank
         // 主路径的分数域恒为 RRF：`max_possible = channels / (rrf_k + 1)`。双通道时
@@ -1272,6 +1384,12 @@ impl HybridSearchService {
                         budget.k_final
                     );
                 }
+
+                // 精排分数已覆盖 `final_score`（RRF 阶段施加的降权随之失效），因此在重排
+                // 之后按同一规则再施加一次，让「容器压成员」的问题在精排路径同样被纠正。
+                // 未被打分而保留下来的尾部候选携带的是已降权过的 RRF 分数，会再乘一次系数
+                // —— 它们本就在绝对下限之下被裁掉，不影响最终结果。
+                demote_enclosing_candidates(&mut reranked);
 
                 // 先补满再裁剪：补进来的未打分候选 rel=0，会被绝对下限丢弃 —— 这正是
                 // 「宁缺毋滥」的期望行为，因此不显式过滤它们，交给统一的 cutoff 处理。
@@ -2181,5 +2299,114 @@ mod tests {
         assert!((ScoreDomain::Rerank.to_relevance(0.42) - 0.42).abs() < 1e-12);
         assert_eq!(ScoreDomain::Rerank.to_relevance(f64::NAN), 0.0);
         assert_eq!(ScoreDomain::Rerank.to_relevance(f64::INFINITY), 0.0);
+    }
+
+    // ---- 排序期父子包含降权 ------------------------------------------------
+
+    /// 真实形状：`uvw/udp.h` 里 473 行的 `udp_handle` 容器 [82,554] 包着 3 行的 `recv` [521,523]。
+    fn container_and_member(file_path: &str) -> (FusedCandidate, FusedCandidate) {
+        let mut container = make_candidate(file_path, 82, 554, "class udp_handle { /* ... */ }");
+        container.symbol_name = "udp_handle".to_string();
+        container.final_score = 0.9;
+
+        let mut member = make_candidate(file_path, 521, 523, "int recv() { return 0; }");
+        member.symbol_name = "recv".to_string();
+        member.final_score = 0.6;
+        (container, member)
+    }
+
+    #[test]
+    fn demote_enclosing_candidates_demotes_container_and_flips_order() {
+        let (container, member) = container_and_member("/tmp/udp.h");
+        let mut results = vec![container, member];
+
+        let demoted = demote_enclosing_candidates(&mut results);
+
+        assert_eq!(demoted, 1, "只有外层的 udp_handle 是容器");
+        let score_of = |name: &str| {
+            results
+                .iter()
+                .find(|c| c.symbol_name == name)
+                .map(|c| c.final_score)
+                .expect("候选应存在")
+        };
+        assert!(
+            (score_of("udp_handle") - 0.45).abs() < 1e-12,
+            "容器 0.9 → 0.45，实际 {}",
+            score_of("udp_handle")
+        );
+        assert!(
+            (score_of("recv") - 0.6).abs() < 1e-12,
+            "被包含的成员分数不得被改动"
+        );
+        // 名次翻转：3 行的 recv 排到 473 行的 udp_handle 之前
+        assert_eq!(results[0].symbol_name, "recv", "降权后成员必须排到容器之前");
+        assert_eq!(results[1].symbol_name, "udp_handle");
+    }
+
+    #[test]
+    fn demote_enclosing_candidates_stacks_penalty_for_nested_middle_layer() {
+        // 三层嵌套：outer[1,100] ⊃ mid[10,90] ⊃ inner[20,30]，
+        // 且 mid 同时被 outer 与 outer2[5,95] 包含 ⇒ 再乘一次 0.5（最多 0.25）
+        let mut outer = make_candidate("/tmp/a.cpp", 1, 100, "outer");
+        outer.symbol_name = "outer".to_string();
+        outer.final_score = 0.8;
+        let mut outer2 = make_candidate("/tmp/a.cpp", 5, 95, "outer2");
+        outer2.symbol_name = "outer2".to_string();
+        outer2.final_score = 0.7;
+        let mut mid = make_candidate("/tmp/a.cpp", 10, 90, "mid");
+        mid.symbol_name = "mid".to_string();
+        mid.final_score = 0.8;
+        let mut inner = make_candidate("/tmp/a.cpp", 20, 30, "inner");
+        inner.symbol_name = "inner".to_string();
+        inner.final_score = 0.1;
+
+        let mut results = vec![outer, outer2, mid, inner];
+        let demoted = demote_enclosing_candidates(&mut results);
+
+        assert_eq!(demoted, 3, "outer / outer2 / mid 都是容器，inner 是叶子");
+        let score_of = |name: &str| {
+            results
+                .iter()
+                .find(|c| c.symbol_name == name)
+                .map(|c| c.final_score)
+                .expect("候选应存在")
+        };
+        assert!((score_of("outer") - 0.4).abs() < 1e-12, "0.8 × 0.5");
+        assert!((score_of("outer2") - 0.35).abs() < 1e-12, "0.7 × 0.5");
+        assert!(
+            (score_of("mid") - 0.2).abs() < 1e-12,
+            "被 ≥2 个候选包含 ⇒ 0.8 × 0.25，实际 {}",
+            score_of("mid")
+        );
+        assert!((score_of("inner") - 0.1).abs() < 1e-12, "叶子不降权");
+    }
+
+    #[test]
+    fn demote_enclosing_candidates_ignores_degenerate_and_cross_file_spans() {
+        // 空 / 单条：不 panic，计数 0
+        let mut empty: Vec<FusedCandidate> = Vec::new();
+        assert_eq!(demote_enclosing_candidates(&mut empty), 0);
+        let mut single = vec![make_candidate("/tmp/a.rs", 1, 10, "x")];
+        assert_eq!(demote_enclosing_candidates(&mut single), 0);
+
+        // 行号倒置（line_end < line_start）：行号不可用 ⇒ 不参与判定
+        let mut inverted = vec![
+            make_candidate("/tmp/a.rs", 10, 3, "broken"),
+            make_candidate("/tmp/a.rs", 1, 2, "small"),
+        ];
+        assert_eq!(
+            demote_enclosing_candidates(&mut inverted),
+            0,
+            "行号不可用的候选必须跳过"
+        );
+
+        // 跨文件同跨度：不构成父子关系，分数一概不动
+        let mut cross = vec![
+            make_candidate("/tmp/a.rs", 1, 100, "a"),
+            make_candidate("/tmp/b.rs", 10, 20, "b"),
+        ];
+        assert_eq!(demote_enclosing_candidates(&mut cross), 0);
+        assert!(cross.iter().all(|c| (c.final_score - 0.5).abs() < 1e-12));
     }
 }
