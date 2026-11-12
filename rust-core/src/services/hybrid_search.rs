@@ -11,6 +11,7 @@ use crate::storage::traits_bm25::{
 };
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -189,10 +190,10 @@ impl From<&SearchResult> for FusionMeta {
 
 /// Line number of a sparse (BM25) hit.
 ///
-/// 新索引把真实起始行存进 STORED 字段 `line_start`，provider 会直接填充它；只有老索引
-/// （schema 里还没有该字段）才需要从 `snippet_id`（`{file_path}#{line_start}#{symbol_name}`，
-/// 由 [`CodeChunk::generate_id`] 生成）里反解。因此这里的规则是：provider 给了非 0 值就用它，
-/// 否则右起解析 id；两者都拿不到时返回 0（= 未知）。
+/// The Tantivy schema has no `line_start` field, so the real line is only available
+/// inside `snippet_id` (`{file_path}#{line_start}#{symbol_name}`, built by
+/// [`CodeChunk::generate_id`]). Prefer the already-populated `line_start` when a
+/// provider supplies it, otherwise reverse-parse it from the id; 0 means unknown.
 fn sparse_line_start(sr: &TextSearchResult) -> usize {
     if sr.line_start != 0 {
         return sr.line_start;
@@ -202,33 +203,20 @@ fn sparse_line_start(sr: &TextSearchResult) -> usize {
         .unwrap_or(0)
 }
 
-/// BM25 通道回填正文时，从 `line_start` 起最多读取的行数 —— **仅用于结束行未知的场景**。
+/// BM25 通道回填正文时，从 `line_start` 起最多读取的行数。
 ///
-/// 索引现在会存真实 `line_end`，命中后按 `[line_start, line_end]` 精确切块；窗口只在
-/// 老索引（缺 `line_end` 字段）或该 chunk 本来就没有结束行时兜底。多读几行上下文比截断
-/// 到半句更利于 cross-encoder 打分，也比留下空文档强 —— 但窗口推算出的结束行**不可信**，
-/// 因此不能反过来当成真实跨度喂给父子包含判定（那会把 4 行短函数放大成 60 行容器）。
+/// BM25 索引不存 `line_end`（Tantivy schema 里没有该字段），无法得知符号真实结束行，
+/// 因此取一个足够宽的窗口而不是试图精确截断：多读几行上下文比截断到半句更利于
+/// cross-encoder 打分，也比留下空文档强。
 const BM25_BACKFILL_MAX_LINES: usize = 60;
 
 /// 从整份文件内容中按 1-based 闭区间 `[line_start, line_end]` 切出代码片段。
 ///
-/// - `line_end >= line_start && line_end > 0`（索引里有**真实**结束行）：严格读到
-///   `line_end`，读取行数恒为 `line_end - line_start + 1`，绝不越过 chunk 自身的结束行；
-/// - 否则（`line_end == 0`，老索引/缺字段）：退化为
-///   `line_start .. line_start + fallback_lines - 1` 的固定窗口，同样 clamp 到文件末尾。
-///
-/// 返回 `(片段, 实际结束行)`；行号不可用（`line_start == 0`）、越界、或片段全是
+/// `line_end == 0`（BM25 通道不存结束行）时退化为 `line_start .. line_start + fallback_lines`
+/// 的窗口。返回 `(片段, 实际结束行)`；行号不可用（`line_start == 0`）、越界、或片段全是
 /// 空白时返回 `None` —— 调用方据此保持候选原样，绝不把半截或空白噪声写进证据。
 ///
 /// 结果保留原始缩进（不做 trim），因为缩进本身也是代码正文的一部分。
-///
-/// # 为什么「有真实 line_end 就绝不加窗口」
-///
-/// 旧实现只在 `line_end >= line_start` 时用真实结束行，但 BM25 通道的 `line_end` 曾是
-/// 恒定 0（索引不存该字段），于是**所有** BM25 命中都走固定 60 行窗口，回填后写回的
-/// `real_end = line_start + 59` 被当成真实结束行。下游 `demote_enclosing_candidates`
-/// 据此判定父子包含：一个真实 4 行的函数看起来有 60 行跨距，会被误判成「容器」而乘
-/// 0.5 降权，正确结果被挤出 rank1（实测 rust `tagtr_succeed` 相似度 1.000 → 0.036）。
 fn slice_code_lines(
     content: &str,
     line_start: usize,
@@ -245,12 +233,11 @@ fn slice_code_lines(
         return None;
     }
 
-    let end = if line_end > 0 && line_end >= line_start {
-        // 索引里有真实结束行：沿用它，读取行数上限 = line_end - line_start + 1。
-        // 越界只可能来自「索引比工作区旧」（文件被截短），clamp 到文件末尾而不 panic。
+    let end = if line_end >= line_start {
+        // dense 通道给了真实结束行：沿用它，越界则 clamp 到文件末尾
         line_end.min(total)
     } else {
-        // 结束行未知（老索引 / 缺字段）：向后取固定窗口，不越过文件尾
+        // BM25 通道没有结束行：向后取固定窗口
         let window = fallback_lines.max(1);
         line_start.saturating_add(window - 1).min(total)
     };
@@ -271,12 +258,10 @@ impl From<&TextSearchResult> for FusionMeta {
             // BM25 通道不存储正文（content 非 STORED），保持为空串；
             // 正文由 [`HybridSearchService::hydrate_code_blocks`] 在调用侧从源文件回填
             code_block: String::new(),
-            // 行号：优先取 provider 已填充的值（新索引从 STORED 的 line_start 字段读回），
-            // 否则从 snippet_id 反解（老索引没有该字段）
+            // 行号从 snippet_id 反解得到（Tantivy 未存 line_start 字段）
             line_start: sparse_line_start(sr),
-            // 结束行同理来自索引；老索引缺字段时为 0（未知），
-            // 由回填侧退化成固定窗口并写回推算值
-            line_end: sr.line_end,
+            // BM25 通道不存储结束行
+            line_end: 0,
         }
     }
 }
@@ -394,6 +379,46 @@ fn fill_from_complete_set(
 /// 父子包含降权的系数：容器 ×0.5；三层嵌套的中间层再 ×0.5（即最多 ×0.25）。
 const ENCLOSING_DEMOTE_FACTOR: f64 = 0.5;
 
+/// 允许参与「父子包含降权」的语言白名单 —— **只有 cpp**。
+///
+/// 实测依据（RepoQA 50 题，索引与参数完全相同，只切换这一项）：
+///
+/// | 口径 | 总体 | python | cpp | java | typescript | rust |
+/// |---|---|---|---|---|---|---|
+/// | 基线（无降权） | 82.0% | 18 | 9 | 17 | 20 | 18 |
+/// | 全语言降权 | 81.0% | 18 | **11** | 18 | **17** | **17** |
+///
+/// cpp **+2**、java +1，但 typescript **−3**、rust **−1** —— 净收益为负。分语言看原因很直白：
+/// cpp 的「巨型容器」是数百行的类体 / struct 体，容器本身几乎不可能是查询目标，压掉它总能把
+/// 真正的成员函数顶上来，这是 +2 题的**唯一**来源；而 typescript 的 needle 常常**就是 class
+/// 本身**、rust 的 `impl` / `mod` 也常是答案，降权它们纯属自伤。
+///
+/// 因此把降权**门控为 cpp 专属**：白名单之外的语言（typescript / rust / java / python …）
+/// 完全不参与判定 —— 既不当容器、也不当被包含者，分数与名次一律原样保留。
+const ENCLOSING_DEMOTE_LANGUAGES: &[&str] = &["cpp"];
+
+/// cpp 家族扩展名 —— 仅在候选的 `language` 字段不可用（空 / `unknown`）时兜底。
+const ENCLOSING_DEMOTE_CPP_EXTENSIONS: &[&str] = &["cpp", "cc", "cxx", "hpp", "hh", "hxx", "h"];
+
+/// 候选是否属于包含降权的白名单语言（cpp）。
+///
+/// 优先读候选自带的 `language` 字段：它在索引期由 `format!("{:?}", LanguageId)` 生成，
+/// 是 **Debug 形态的 PascalCase**（`"Cpp"` / `"TypeScript"` / `"Rust"`），不是 `Display`
+/// 的小写形式 —— 因此必须先小写化再比对，否则 `"cpp"` 永远匹配不上 `"Cpp"`。
+/// 只有在 `language` 缺失或为 `unknown` 时才退化为按 `file_path` 扩展名判断。
+fn is_enclosing_demote_language(candidate: &FusedCandidate) -> bool {
+    let language = candidate.language.trim().to_ascii_lowercase();
+    if !language.is_empty() && language != "unknown" {
+        return ENCLOSING_DEMOTE_LANGUAGES.contains(&language.as_str());
+    }
+
+    Path::new(&candidate.file_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .is_some_and(|ext| ENCLOSING_DEMOTE_CPP_EXTENSIONS.contains(&ext.as_str()))
+}
+
 /// 排序期「父子包含降权」—— **内容无损，只压分数**。
 ///
 /// 为什么在排序期做、而不是在切块期删内容（实测结论）：曾把父容器 chunk 的 content 从
@@ -408,7 +433,10 @@ const ENCLOSING_DEMOTE_FACTOR: f64 = 0.5;
 /// 2. 该容器自身又被 **≥ 2** 个其它候选严格包含（三层嵌套的中间层）⇒ 再乘一次 `0.5`，
 ///    即最多 `0.25`：`factor = 0.5 * if contained_by >= 2 { 0.5 } else { 1.0 }`；
 /// 3. **只降权、绝不删除**：被包裹的成员候选取代容器名次即可，容器仍留在结果里；
-/// 4. 行号不可用（`line_start == 0`，或 `line_end < line_start`）的候选不参与判定。
+/// 4. 行号不可用（`line_start == 0`，或 `line_end < line_start`）的候选不参与判定；
+/// 5. **语言门控**：只有 [`ENCLOSING_DEMOTE_LANGUAGES`]（当前仅 cpp）里的候选参与判定。
+///    白名单之外的语言完全不参与 —— 既不当容器、也不当被包含者，分数与名次原样返回。
+///    原因是实测收益只出现在 cpp 的巨型容器上（详见该常量的表格）。
 ///
 /// 判定与改分分两步：先把「是否容器 / 被几个候选包含」这类纯几何事实算完（不受已改动的
 /// 分数影响），再统一乘系数 —— 因此结果与遍历顺序无关。降权后按 `final_score` 稳定降序
@@ -421,9 +449,13 @@ fn demote_enclosing_candidates(results: &mut [FusedCandidate]) -> usize {
         return 0;
     }
 
-    // 行号可用：`line_start == 0` 或 `line_end == 0`（结束行未知，老索引/回填失败）
-    // 的候选不参与几何判定 —— 用推算出的跨度当真实值正是曾经的误降权来源。
-    let usable = |c: &FusedCandidate| c.line_start > 0 && c.line_end >= c.line_start;
+    // 参与几何判定的前置条件，缺一不可：
+    // * 语言在白名单内（cpp）—— 其余语言的降权实测是负收益；
+    // * `line_start > 0` 且 `line_end >= line_start` —— 行号可用（BM25 通道回填失败时
+    //   `line_end` 仍为 0，这种候选不参与判定）。
+    let usable = |c: &FusedCandidate| {
+        is_enclosing_demote_language(c) && c.line_start > 0 && c.line_end >= c.line_start
+    };
 
     let mut factors = vec![1.0f64; results.len()];
     let mut demoted = 0usize;
@@ -1106,9 +1138,7 @@ impl HybridSearchService {
                     Some((snippet, real_end)) => {
                         let c = &mut candidates[idx];
                         c.code_block = snippet;
-                        // 索引已给真实 line_end 时，`slice_code_lines` 严格按它截断，
-                        // real_end == line_end，这里不写回；只有结束行未知（0 = 老索引/
-                        // 缺字段）才用窗口推算的末行补上，语义仍是「尽力而为」。
+                        // BM25 通道原本没有结束行（0），回填后写入真实结束行
                         if c.line_end == 0 {
                             c.line_end = real_end;
                         }
@@ -1155,14 +1185,14 @@ impl HybridSearchService {
 
     /// 降级：仅 sparse (BM25) 通道可用时，把 BM25 命中原样转成候选。
     ///
-    /// BM25 不存储正文（schema 里 content 非 STORED），故 `code_block` 为空；行号优先取
-    /// provider 已填充的 `line_start` / `line_end`（新索引从 STORED 字段读回真实值），
-    /// 老索引缺 `line_start` 字段时从 `snippet_id` 反解（见 [`sparse_line_start`]）。
-    /// 顺序沿用 BM25 相关性排序，`final_score` 直接取 BM25 分数。
+    /// BM25 不存储正文（schema 里 content 非 STORED），故 `code_block` 为空、
+    /// `line_end` 为 0；行号优先取 provider 已填充的 `line_start`，否则从
+    /// `snippet_id` 反解（见 [`sparse_line_start`]）。顺序沿用 BM25 相关性排序，
+    /// `final_score` 直接取 BM25 分数。
     ///
     /// 空 `code_block` 与 `line_end == 0` 只是**构造时**的状态：正文由调用侧的
-    /// [`HybridSearchService::hydrate_code_blocks`] 从源文件回填；`line_end` 为零表示
-    /// 结束行未知，回填时退化为固定窗口。因此本函数保持纯函数、不依赖 `self`，便于单测。
+    /// [`HybridSearchService::hydrate_code_blocks`] 从源文件回填，并顺带补上真实的
+    /// `line_end`。因此本函数保持纯函数、不依赖 `self`，便于单测。
     fn sparse_only_candidates(sparse: Vec<TextSearchResult>, limit: usize) -> Vec<FusedCandidate> {
         sparse
             .into_iter()
@@ -1176,9 +1206,7 @@ impl HybridSearchService {
                     symbol_name: sr.symbol_name,
                     language: sr.language,
                     line_start,
-                    // 真实结束行直接来自索引（老索引缺字段时为 0 = 未知）；
-                    // 它是后续父子包含判定的唯一可信来源，绝不能用固定窗口填充
-                    line_end: sr.line_end,
+                    line_end: 0,
                     code_block: String::new(),
                     source: CandidateSource::SparseOnly,
                 }
@@ -1482,8 +1510,6 @@ mod tests {
             symbol_name: symbol.to_string(),
             language: "rust".to_string(),
             line_start,
-            // 默认模拟「老索引 / 结束行未知」；需要真实结束行的用例自行赋值
-            line_end: 0,
         }
     }
 
@@ -1746,96 +1772,6 @@ mod tests {
         let (snippet, _) = slice_code_lines(content, 2, 0, 1).expect("单行窗口应可切分");
 
         assert_eq!(snippet, "    let x = 1;", "缩进属于正文，不能被 trim 掉");
-    }
-
-    /// 病根回归：索引里有**真实** `line_end` 时，回填必须恰好切到该行。
-    ///
-    /// 修复前 BM25 命中的 `line_end` 恒为 0（Tantivy schema 没存该字段），全部走 60 行
-    /// 窗口，于是 4 行的短函数被当成 60 行跨距的「容器」，在 `demote_enclosing_candidates`
-    /// 里被 ×0.5 降权并挤出 rank1。
-    #[test]
-    fn slice_respects_chunk_line_end() {
-        // 120 行，每行内容形如 `L{i}`（1-based）
-        let content: String = (1..=120)
-            .map(|i| format!("L{}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let (snippet, end) = slice_code_lines(&content, 10, 13, BM25_BACKFILL_MAX_LINES)
-            .expect("真实行区间应可切分");
-
-        let lines: Vec<&str> = snippet.lines().collect();
-        assert_eq!(
-            lines.len(),
-            4,
-            "必须恰好 4 行（line_end - line_start + 1），不得膨胀成 60 行窗口，实际：{:?}",
-            lines
-        );
-        assert_eq!(lines.first().copied(), Some("L10"), "首行必须是 line_start 那一行");
-        assert_eq!(lines.last().copied(), Some("L13"), "末行必须是 line_end 那一行");
-        assert_eq!(end, 13, "返回的结束行必须等于 chunk 自身的 line_end");
-    }
-
-    /// `line_end == 0`（老索引 / 缺字段）仍走固定窗口兜底，且绝不越过文件末尾。
-    #[test]
-    fn slice_falls_back_to_bounded_window_when_line_end_unknown() {
-        let content: String = (1..=20)
-            .map(|i| format!("L{}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // 窗口 60 行 ≫ 文件 20 行：必须 clamp 到文件末尾（15..=20 共 6 行）
-        let (snippet, end) = slice_code_lines(&content, 15, 0, BM25_BACKFILL_MAX_LINES)
-            .expect("结束行未知时应走窗口兜底");
-        let lines: Vec<&str> = snippet.lines().collect();
-        assert_eq!(
-            lines.len(),
-            6,
-            "窗口应被裁剪到文件尾（15..=20 共 6 行），实际：{:?}",
-            lines
-        );
-        assert_eq!(end, 20, "结束行不得越过文件总行数（20）");
-        assert!(
-            lines.len() <= 20,
-            "读取行数上限是文件总行数，实际：{}",
-            lines.len()
-        );
-
-        // 小窗口且文件内行数充足时，仍按窗口行数读取
-        let (snippet, end) = slice_code_lines(&content, 2, 0, 3).expect("3 行窗口应可切分");
-        assert_eq!(snippet.lines().count(), 3, "窗口 3 行应读出 3 行");
-        assert_eq!(end, 4, "窗口末行 = line_start + fallback_lines - 1");
-    }
-
-    /// 真实结束行必须一路传到候选（sparse → hydrate），中途不被固定窗口末行覆盖。
-    #[tokio::test]
-    async fn hydrate_respects_index_line_end() {
-        let source: String = (1..=120)
-            .map(|i| format!("L{}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (_dir, path) = write_temp_source("wide.rs", &source);
-
-        let id = CodeChunk::generate_id(&path, 10, "wide_fn");
-        let mut sr = make_sparse(&id, &path, "wide_fn", 10);
-        sr.line_end = 13; // 新索引：STORED 字段回读出的真实结束行
-
-        let mut candidates = HybridSearchService::sparse_only_candidates(vec![sr], 5);
-        assert_eq!(
-            candidates[0].line_end, 13,
-            "sparse → 候选必须保留索引里的真实结束行（否则下游父子判定拿不到跨度）"
-        );
-
-        HybridSearchService::hydrate_code_blocks(&mut candidates).await;
-
-        let c = &candidates[0];
-        assert_eq!(c.line_end, 13, "回填不得用窗口末行覆盖真实结束行");
-        assert_eq!(
-            c.code_block.lines().count(),
-            4,
-            "正文必须恰好 4 行，实际：{:?}",
-            c.code_block
-        );
     }
 
     // ---- hydrate_code_blocks ---------------------------------------------
@@ -2416,13 +2352,23 @@ mod tests {
 
     // ---- 排序期父子包含降权 ------------------------------------------------
 
+    /// 把候选标成 cpp —— 包含降权只对 [`ENCLOSING_DEMOTE_LANGUAGES`] 生效，
+    /// 几何判定的用例必须先满足语言门控，否则测不到几何逻辑本身。
+    ///
+    /// 注意用 `"Cpp"`（PascalCase）而不是 `"cpp"`：索引期 `language` 来自
+    /// `format!("{:?}", LanguageId)`，真实形态就是大写开头，小写化由被测函数负责。
+    fn as_cpp(mut candidate: FusedCandidate) -> FusedCandidate {
+        candidate.language = "Cpp".to_string();
+        candidate
+    }
+
     /// 真实形状：`uvw/udp.h` 里 473 行的 `udp_handle` 容器 [82,554] 包着 3 行的 `recv` [521,523]。
     fn container_and_member(file_path: &str) -> (FusedCandidate, FusedCandidate) {
-        let mut container = make_candidate(file_path, 82, 554, "class udp_handle { /* ... */ }");
+        let mut container = as_cpp(make_candidate(file_path, 82, 554, "class udp_handle { /* ... */ }"));
         container.symbol_name = "udp_handle".to_string();
         container.final_score = 0.9;
 
-        let mut member = make_candidate(file_path, 521, 523, "int recv() { return 0; }");
+        let mut member = as_cpp(make_candidate(file_path, 521, 523, "int recv() { return 0; }"));
         member.symbol_name = "recv".to_string();
         member.final_score = 0.6;
         (container, member)
@@ -2461,16 +2407,16 @@ mod tests {
     fn demote_enclosing_candidates_stacks_penalty_for_nested_middle_layer() {
         // 三层嵌套：outer[1,100] ⊃ mid[10,90] ⊃ inner[20,30]，
         // 且 mid 同时被 outer 与 outer2[5,95] 包含 ⇒ 再乘一次 0.5（最多 0.25）
-        let mut outer = make_candidate("/tmp/a.cpp", 1, 100, "outer");
+        let mut outer = as_cpp(make_candidate("/tmp/a.cpp", 1, 100, "outer"));
         outer.symbol_name = "outer".to_string();
         outer.final_score = 0.8;
-        let mut outer2 = make_candidate("/tmp/a.cpp", 5, 95, "outer2");
+        let mut outer2 = as_cpp(make_candidate("/tmp/a.cpp", 5, 95, "outer2"));
         outer2.symbol_name = "outer2".to_string();
         outer2.final_score = 0.7;
-        let mut mid = make_candidate("/tmp/a.cpp", 10, 90, "mid");
+        let mut mid = as_cpp(make_candidate("/tmp/a.cpp", 10, 90, "mid"));
         mid.symbol_name = "mid".to_string();
         mid.final_score = 0.8;
-        let mut inner = make_candidate("/tmp/a.cpp", 20, 30, "inner");
+        let mut inner = as_cpp(make_candidate("/tmp/a.cpp", 20, 30, "inner"));
         inner.symbol_name = "inner".to_string();
         inner.final_score = 0.1;
 
@@ -2500,13 +2446,13 @@ mod tests {
         // 空 / 单条：不 panic，计数 0
         let mut empty: Vec<FusedCandidate> = Vec::new();
         assert_eq!(demote_enclosing_candidates(&mut empty), 0);
-        let mut single = vec![make_candidate("/tmp/a.rs", 1, 10, "x")];
+        let mut single = vec![as_cpp(make_candidate("/tmp/a.cpp", 1, 10, "x"))];
         assert_eq!(demote_enclosing_candidates(&mut single), 0);
 
         // 行号倒置（line_end < line_start）：行号不可用 ⇒ 不参与判定
         let mut inverted = vec![
-            make_candidate("/tmp/a.rs", 10, 3, "broken"),
-            make_candidate("/tmp/a.rs", 1, 2, "small"),
+            as_cpp(make_candidate("/tmp/a.cpp", 10, 3, "broken")),
+            as_cpp(make_candidate("/tmp/a.cpp", 1, 2, "small")),
         ];
         assert_eq!(
             demote_enclosing_candidates(&mut inverted),
@@ -2516,10 +2462,115 @@ mod tests {
 
         // 跨文件同跨度：不构成父子关系，分数一概不动
         let mut cross = vec![
-            make_candidate("/tmp/a.rs", 1, 100, "a"),
-            make_candidate("/tmp/b.rs", 10, 20, "b"),
+            as_cpp(make_candidate("/tmp/a.cpp", 1, 100, "a")),
+            as_cpp(make_candidate("/tmp/b.cpp", 10, 20, "b")),
         ];
         assert_eq!(demote_enclosing_candidates(&mut cross), 0);
         assert!(cross.iter().all(|c| (c.final_score - 0.5).abs() < 1e-12));
+    }
+
+    /// 语言门控：非 cpp 语言（typescript / rust / …）**完全不参与**包含判定 ——
+    /// 分数与顺序原样保留；同样的几何形状换到 cpp 上则容器被 ×0.5 且名次翻转。
+    ///
+    /// 依据：全语言开启降权实测 typescript −3、rust −1，收益只在 cpp（+2）。
+    #[test]
+    fn demote_skips_non_cpp_languages() {
+        // ── typescript：注意语言字段是 Debug 形态的 `"TypeScript"`（真实索引形态）──
+        let mut container = make_candidate("/tmp/app.ts", 1, 100, "export class Repo { /* ... */ }");
+        container.symbol_name = "Repo".to_string();
+        container.final_score = 0.9;
+        container.language = "TypeScript".to_string();
+
+        let mut member = make_candidate("/tmp/app.ts", 40, 45, "async getCommits() {}");
+        member.symbol_name = "getCommits".to_string();
+        member.final_score = 0.6;
+        member.language = "TypeScript".to_string();
+
+        let mut ts = vec![container, member];
+        assert_eq!(
+            demote_enclosing_candidates(&mut ts),
+            0,
+            "typescript 不在白名单内，不得降权任何候选"
+        );
+        assert!(
+            (ts[0].final_score - 0.9).abs() < 1e-12,
+            "非白名单语言的分数必须原样保留，实际 {}",
+            ts[0].final_score
+        );
+        assert!((ts[1].final_score - 0.6).abs() < 1e-12);
+        assert_eq!(ts[0].symbol_name, "Repo", "非白名单语言的顺序不得变动");
+        assert_eq!(ts[1].symbol_name, "getCommits");
+
+        // ── rust：同样形状、同样不参与（`make_candidate` 默认就是 rust）──
+        let (c, m) = container_and_member("/tmp/lib.rs");
+        let mut rs = vec![
+            FusedCandidate {
+                language: "Rust".to_string(),
+                ..c
+            },
+            FusedCandidate {
+                language: "Rust".to_string(),
+                ..m
+            },
+        ];
+        assert_eq!(
+            demote_enclosing_candidates(&mut rs),
+            0,
+            "rust 不在白名单内，不得降权任何候选"
+        );
+        assert_eq!(rs[0].symbol_name, "udp_handle", "顺序必须保持调用方给的顺序");
+        assert!((rs[0].final_score - 0.9).abs() < 1e-12);
+
+        // ── cpp：同一几何形状 ⇒ 容器 ×0.5 且名次翻转 ──
+        let (container, member) = container_and_member("/tmp/udp.h");
+        let mut cpp = vec![container, member];
+        assert_eq!(demote_enclosing_candidates(&mut cpp), 1, "cpp 仍要降权容器");
+        let score_of = |name: &str| {
+            cpp.iter()
+                .find(|c| c.symbol_name == name)
+                .map(|c| c.final_score)
+                .expect("候选应存在")
+        };
+        assert!(
+            (score_of("udp_handle") - 0.45).abs() < 1e-12,
+            "容器 0.9 → 0.45，实际 {}",
+            score_of("udp_handle")
+        );
+        assert!((score_of("recv") - 0.6).abs() < 1e-12, "被包含者分数不变");
+        assert_eq!(cpp[0].symbol_name, "recv", "降权后成员排到容器之前");
+        assert_eq!(cpp[1].symbol_name, "udp_handle");
+
+        // ── `language` 字段缺失时退化为扩展名判断：`.hpp` 视为 cpp ──
+        let mut hp_container = make_candidate("/tmp/widget.hpp", 1, 200, "class widget { /* ... */ }");
+        hp_container.symbol_name = "widget".to_string();
+        hp_container.final_score = 0.9;
+        hp_container.language = String::new();
+        let mut hp_member = make_candidate("/tmp/widget.hpp", 150, 152, "void render();");
+        hp_member.symbol_name = "render".to_string();
+        hp_member.final_score = 0.6;
+        hp_member.language = "unknown".to_string();
+
+        let mut hp = vec![hp_container, hp_member];
+        assert_eq!(
+            demote_enclosing_candidates(&mut hp),
+            1,
+            "language 缺失/unknown 时应按 .hpp 扩展名认定为 cpp"
+        );
+        assert_eq!(hp[0].symbol_name, "render");
+
+        // 反例：`.ts` 扩展名 + 缺失 language ⇒ 仍不降权
+        let mut ts_container = make_candidate("/tmp/app.ts", 1, 200, "class A { /* ... */ }");
+        ts_container.final_score = 0.9;
+        ts_container.language = String::new();
+        let mut ts_member = make_candidate("/tmp/app.ts", 150, 152, "m() {}");
+        ts_member.final_score = 0.6;
+        ts_member.language = String::new();
+        let mut ts_no_lang = vec![ts_container, ts_member];
+        assert_eq!(
+            demote_enclosing_candidates(&mut ts_no_lang),
+            0,
+            ".ts 扩展名不是 cpp，不得降权"
+        );
+        assert!((ts_no_lang[0].final_score - 0.9).abs() < 1e-12);
     }
 }
