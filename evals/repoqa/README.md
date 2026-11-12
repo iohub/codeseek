@@ -127,6 +127,14 @@ python -m repoqa_eval selftest
   因此覆盖的符号数少于真实仓库，检索难度与官方口径存在系统性差异。
 - **`codeseek init` 的 stdout 有进度条污染**：`adapter.init_repo` 不解析输出内容，只看退出码；
   `search` 的 JSON 用三段式容错解析（整体 → `[..]`/`{..}` 截取 → 逐行 NDJSON）。
+- **【P0 · 当前最大瓶颈】cpp 切块粒度 = 45.0%**：`cpp` 11 道失败中 **7 道** `best_target` 与 needle
+  **同名**（正确符号已被检索为 Top-1），仅因返回的 `code_block` 是父容器（class/struct）的**严格超集**
+  而 BLEU 低于 0.8（例 `ThrowableInformationPatternConverterPrivate`，sim=0.392）。**抢占 rank1 的是
+  容器 chunk，不是成员 chunk**，属索引侧切块问题，不是检索能力问题。修复方向与 `rust` 的 `impl_item`
+  `full_range` 收窄同构：容器符号的 chunk 不得覆盖成员符号的源码区间。
+- **失败 Top1 是边界差异、不是召回失败**：`rust__rust-bakery__nom__n07`（`be_i8_tests`）
+  `best_target` 与 needle **同名**但 `best_similarity=0.721 < 0.8`，属**切块边界差异**；
+  该题在修复前基线里是 `wrong_target`（返回 `many1_count`），现已从"未召回"改善为"边界不符"。
 
 ## 6. 目录与产物
 
@@ -136,7 +144,9 @@ evals/repoqa/
 ├── requirements.txt
 ├── results/                # 已跑通的实测结果归档（见第 8 节）
 │   ├── README.md
-│   ├── 2026-11-11-report.md           # backend=nltk
+│   ├── 2026-11-12-report.md           # 主口径 backend=nltk，82.0%
+│   ├── 2026-11-12-report.json
+│   ├── 2026-11-11-report.md           # 修复前基线 backend=nltk，74.0%
 │   ├── 2026-11-11-report.json
 │   ├── 2026-11-11-report.builtin.md   # backend=builtin（对拍基线）
 │   └── 2026-11-11-report.builtin.json
@@ -180,8 +190,8 @@ evals/repoqa/
 
 ## 8. 实测结果
 
-2026-11-11 已用本套件跑通首次端到端评测（100 题子集，5 语言 × 2 仓库 × 10 needle，`threshold=0.8`，
-`backend=nltk`，`hybrid` 检索 100%，0 空结果）：
+**当前主口径：2026-11-12 报告，总体 82.0%（82/100）**（100 题子集，5 语言 × 2 仓库 × 10 needle，
+`threshold=0.8`，`backend=nltk`，`hybrid` 检索 100%，0 空结果）：
 
 | 语言 | 通过/总数 | accuracy |
 | --- | --- | --- |
@@ -189,8 +199,15 @@ evals/repoqa/
 | cpp | 9/20 | 45.0% |
 | java | 17/20 | 85.0% |
 | typescript | 20/20 | 100.0% |
-| rust | 10/20 | 50.0% |
-| **all** | **74/100** | **74.0%** |
+| rust | 18/20 | 90.0% |
+| **all** | **82/100** | **82.0%** |
 
-- 报告与逐题明细：[`results/README.md`](results/README.md)（`results/2026-11-11-report.md` / `.json`，另有 builtin BLEU 对拍基线 `*.builtin.*`）
-- 三条关键洞察（切块同源 73/74 逐字相同、cpp 45% 主因是切块粒度 +30pt 上限、rust 50% 主因是检索选错符号）见该目录说明。
+- 报告与逐题明细：[`results/README.md`](results/README.md)（`results/2026-11-12-report.md` / `.json` 为主口径）
+- 改进来源：`rust` 解析器的 `mod_item` 分支（`rust-core/src/codegraph/treesitter/parsers/rust.rs` 的
+  `parse_block`）+ `impl_item` 的 `full_range` 收窄到 `declaration_range`，使 rust 由 50.0% → 90.0%
+  （+40.0pt），总体由 74.0% → 82.0%（+8.0pt），**8 题翻转、0 回归**。
+- 三条关键洞察（切块与 needle 同源、cpp 45.0% 主因是切块粒度=P0、rust 漏索引是主因）见该目录说明。
+
+**历史对照（修复前基线）**：2026-11-11 首次端到端评测，总体 74.0%（74/100），rust 50.0%（10/20），
+二进制 `sha256` 前缀 `5972636dc15431ee`；该批次仅作基线保留（`results/2026-11-11-report.md` / `.json`，
+另有 builtin BLEU 对拍基线 `*.builtin.*`）。
