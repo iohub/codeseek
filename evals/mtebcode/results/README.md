@@ -4,10 +4,17 @@ This directory archives codeseek's end-to-end results on the **MTEB(Code, v1)-st
 subset** produced by `evals/mtebcode` (primary metric **nDCG@10**, overall score = arithmetic mean
 of per-task means).
 
-> **Two batches are archived: `2026-11-12` and `2026-11-12b`.** Each is a real 100-query measurement
-> with a 300-document pool per task, but pooled corpus + a small query sample per task means neither is
-> **comparable with the MTEB(Code, v1) leaderboard** (see the batch sections below). Their task sets
-> differ, so **they are not comparable with each other either**.
+> **Three batches are archived: `2026-11-12`, `2026-11-12b` and `2026-11-12c`.** Each is a real
+> 100-query measurement with a 300-document pool per task, but pooled corpus + a small query sample
+> per task means none of them is **comparable with the MTEB(Code, v1) leaderboard** (see the batch
+> sections below).
+>
+> `2026-11-12` and `2026-11-12b` use **different task sets** and are therefore **not comparable with
+> each other**. `2026-11-12c`, by contrast, re-runs **batch 2's exact 100 questions on batch 2's exact
+> corpora** (`workdir`/`tasks.jsonl`/`seed`/`sampling_fingerprint` all unchanged) with only
+> `index.hybrid.cutoff.enabled` flipped to `false` — so **b ↔ c is a true A/B pair** and the only
+> same-questions comparison in this archive.
+>
 > The older 5-query `CosQA` smoke run is kept at the bottom for reference only.
 
 ## Naming convention
@@ -21,7 +28,10 @@ of per-task means).
 Files are copied verbatim from the same-named artifacts under the `--workdir` used for the run
 (default `/tmp/mtebcode-eval/`) and only renamed with a date prefix. `.md` files are always produced
 by `render_markdown()` in `mtebcode_eval/report.py` — never edited by hand, so that
-`md == render_markdown(json)` stays verifiable.
+`md == render_markdown(json)` stays verifiable. Note that this invariant holds **against the renderer
+version that produced the file**: from batch `2026-11-12c` on, §5 derives the real commands from
+`meta`, so re-rendering an *older* archive with the current renderer changes §5 and no longer compares
+equal. Archived files are never retro-edited; the batch sections below quote the commands verbatim.
 
 ## What each archive entry must record
 
@@ -161,8 +171,9 @@ Mode distribution: **64 `hybrid` / 0 `name_fallback` / 36 `unknown_empty`** (64%
 `n_unmapped` is **0 for every query** (mean `n_mapped` = **0.98** = (40×1.00 + 20×0.55 + 20×1.45 +
 20×0.90)/100, mean returned 0.98), i.e. every returned chunk mapped back to a pool `doc_id`.
 
-Exact reproduction of this batch (report.md §5 inside the archived artifact prints the *generic*
-template, so the real commands are pinned here):
+Exact reproduction of this batch (report.md §5 inside *this* archived artifact prints the *generic*
+template of the time — from batch `2026-11-12c` on, §5 derives the real commands from `meta` — so the
+real commands are pinned here):
 
 ```bash
 cd evals/mtebcode
@@ -225,6 +236,172 @@ made from them.** What *is* comparable inside a single batch:
   replaced by three diff-corpus tasks that score 0.20–0.45. Short queries did not raise the score —
   they made the score **interpretable**, because no query in this batch is long enough to trip the
   length cut-off.
+
+## Batch `2026-11-12c` — 第 3 批：关闭 adaptive cutoff (100 queries / 4 tasks, **identical to batch 2**)
+
+Files: `2026-11-12c-report.json` + `2026-11-12c-report.md`.
+
+**Why a third batch.** Batch 2 measured a *truncated* ranker, not a ranker: `mean_returned` was 0.98
+and 36 of 100 queries came back empty, so nDCG ≈ recall ≈ MRR in every row. Batch 3 re-runs the
+**exact same 100 questions on the exact same corpora** with one config change, to isolate what the
+ranking actually does when the result list is not chopped to one item.
+
+| item | value |
+| --- | --- |
+| config change | `~/.codeseek/config.json` → `index.hybrid.cutoff.enabled = false` (everything else untouched) |
+| backup of the original config | `~/.codeseek/config.json.mtebcode-backup-20261112T194850` |
+| unchanged under the hood | same workdir `/tmp/mtebcode-short`, same `tasks.jsonl`, same 4 corpora, `--seed 42`, `sampling_fingerprint` **`2986c8ffabe1d0e2`** (byte-identical to batch 2) |
+| binary | `rust-core/target/release/codeseek`, 60,600,320 B, sha256 prefix **`b1532bb1b43e3d65`** — no Rust code was touched |
+| embedding | `Qwen/Qwen3-Embedding-4B`, `configured=True`, `name_fallback` = **0** |
+| search params | `--limit 20 --concurrency 4 --timeout 180`, k=10 |
+| **Mean(Task) nDCG@10** | **0.5339** (mean recall@10 **0.6000**, mean MRR@10 **0.5128**, mean recall@20 **0.6000**) |
+| run finished (UTC) | `2026-11-12T11:51:54Z` |
+
+Because the question set and the corpus pool are identical, **every number below is directly
+comparable with batch 2** — this is the only pair in this archive where an A/B really is an A/B.
+
+### Verification that the switch took effect (measured before the full run)
+
+Three CosQA queries that returned **exactly 1** result in batch 2 were re-run by hand
+(`codeseek search "<query>" --json --limit 20`, cwd `corpora/cosqa`):
+
+| query | returned before | returned after |
+| --- | ---: | ---: |
+| `python file opening modes` (`cosqa__q0036`) | 1 | **20** |
+| `python check file is readonly` (`cosqa__q0000`) | 1 | **20** |
+| `write in bold and read in color of the print mesaage in python` (`cosqa__q0017`) | 1 | **20** |
+
+`RUST_LOG=debug` on the first query logs the new branch verbatim:
+
+```
+DEBUG codeseek::services::hybrid_search: 自适应 cutoff 已关闭：20 → 20 条（仅按 k_final=20 截断）
+```
+
+i.e. the config was read, the three-gate cascade was skipped, and only `truncate(k_final)` remained.
+
+### Per-task metrics
+
+| task | nDCG@10 | recall@10 | MRR@10 | recall@20 | mode split | mean returned |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| CosQA | **0.9690** | 1.0000 | 0.9583 | 1.0000 | 40 hybrid | 20.00 |
+| CodeEditSearchRetrieval-python | **0.4131** | 0.5000 | 0.3833 | 0.5000 | 20 hybrid | 20.00 |
+| CodeEditSearchRetrieval-go | **0.4882** | 0.5500 | 0.4696 | 0.5500 | 20 hybrid | 20.00 |
+| CodeEditSearchRetrieval-javascript | **0.2653** | 0.3500 | 0.2400 | 0.3500 | 20 hybrid | 20.00 |
+
+Mode distribution: **100 `hybrid` / 0 `name_fallback` / 0 `unknown_empty`** (was 64/0/36).
+`mean_returned` = **20.00**, `mean_mapped` = **20.00**, `n_unmapped` = **0** (every chunk mapped back
+to a pool `doc_id`), `n_queries_skipped` = **0**, `warnings` = **[]**. `recall@10 == recall@20` because
+each question has exactly one gold document: nothing extra is found by looking past rank 10.
+
+### Batch 2 (cutoff ON) vs batch 3 (cutoff OFF) — same 100 questions
+
+| task | nDCG@10 on → off | recall@10 on → off | MRR@10 on → off |
+| --- | --- | --- | --- |
+| CosQA | 0.7565 → **0.9690** (Δ +0.2125) | 0.7750 → **1.0000** (Δ +0.2250) | 0.7500 → **0.9583** (Δ +0.2083) |
+| CodeEditSearchRetrieval-python | 0.3000 → **0.4131** (Δ +0.1131) | 0.3000 → **0.5000** (Δ +0.2000) | 0.3000 → **0.3833** (Δ +0.0833) |
+| CodeEditSearchRetrieval-go | 0.4500 → **0.4882** (Δ +0.0382) | 0.4500 → **0.5500** (Δ +0.1000) | 0.4500 → **0.4696** (Δ +0.0196) |
+| CodeEditSearchRetrieval-javascript | 0.2000 → **0.2653** (Δ +0.0653) | 0.2000 → **0.3500** (Δ +0.1500) | 0.2000 → **0.2400** (Δ +0.0400) |
+| **Mean(Task)** | 0.4266 → **0.5339** (Δ **+0.1073**) | 0.4312 → **0.6000** (Δ **+0.1688**) | 0.4250 → **0.5128** (Δ **+0.0878**) |
+
+Where the gain comes from (same 100 questions, paired comparison; the two means below are **pooled
+over the queries in each subset**, so they are not additive with the `Mean(Task)` row above — the
+subset sizes differ from the task sizes):
+
+| batch-2 subset | n | batch-2 mean nDCG@10 | batch-3 mean nDCG@10 |
+| --- | ---: | ---: | ---: |
+| queries that returned **0** results | 36 | 0.0000 | **0.3287** (17 of 36 now retrieve the gold doc) |
+| queries that returned **1** result | 47 | 0.8298 | 0.8432 (46 unchanged — its single hit was already rank 1 — 1 improved, 0 worse) |
+
+So the +0.1073 is **not** a better ranker; it is 36 questions that previously scored a forced 0.0
+now being scored on their actual rank.
+
+### Did nDCG finally separate from recall / MRR? (the point of this batch)
+
+| metric | batch 2 (cutoff ON) | batch 3 (cutoff OFF) |
+| --- | ---: | ---: |
+| Mean nDCG@10 | 0.4266 | **0.5339** |
+| Mean recall@10 | 0.4312 | **0.6000** |
+| Mean MRR@10 | 0.4250 | **0.5128** |
+| spread (max − min) | **0.0062** | **0.0872** |
+
+In batch 2 all three metrics agreed to within 0.0062 — they were measuring the same thing because
+every query had at most one result, so "retrieved" forced "rank 1". In batch 3 they are distinct:
+**recall@10 − nDCG@10 = +0.0661** and **nDCG@10 − MRR@10 = +0.0211**. Read as two separate
+capabilities of codeseek on this task set:
+
+* **retrieval (does the right document make the top 10 at all) = 0.6000**
+* **ranking (how high it lands, graded) = 0.5339**
+* the gap of 0.0661 is the share lost purely to ordering. Decomposing the 0.4661 of missing nDCG:
+  `1 − 0.6000 = 0.4000` is outright retrieval failure (gold never in the top 10) and
+  `0.6000 − 0.5339 = 0.0661` is ordering loss among the hits (`0.4000 + 0.0661 = 0.4661`). Ordering
+  is therefore the *smaller* of the two problems — codeseek's bottleneck on this task set is recall,
+  not rank quality.
+
+nDCG@10 and MRR@10 stay close (+0.0211) **by construction**: with exactly one gold document,
+`nDCG@10 = 1/log2(rank+1)` and `MRR@10 = 1/rank`, so the two are monotone transforms of the same
+rank and nDCG ≥ MRR for every possible rank. Their nearness is arithmetic, not a defect; the metric
+that genuinely decouples is recall.
+
+### Root cause (confirmed at source level, no source change made)
+
+`AdaptiveCutoffConfig` defaults (`rust-core/src/services/hybrid_search.rs:27-64`):
+`enabled=true, abs_floor=0.2, rel_ratio=0.55, rel_ratio_rrf=0.40, gap_min=0.30, min_keep=1`.
+`adaptive_cutoff()` (same file, `:640-815`) applies a three-gate cascade over normalised scores and
+then truncates the list; gate 1 (`abs_floor`) also clamps `min_keep`, i.e.
+`final_len = len_gap.max(min_keep.min(len_abs))`. On short queries the second result's relative
+score collapses below `rel_ratio_rrf × top1`, so `len_abs = 1` and `min_keep = 1` keeps exactly one
+candidate (and, when even the top candidate is below `abs_floor`, zero). `enabled=false` restores the
+previous plain `truncate(k_final)` behaviour. There is no CLI flag and no environment variable for
+this — `~/.codeseek/config.json` is the only override path, which is why the config was temporarily
+patched and then restored (see the note at the end of this file).
+
+Worst 5 queries in batch 3 (all ranked, none truncated — these are real retrieval misses):
+
+| # | task_id | query (abridged) | top3 doc_id (abridged) | gold doc_id | nDCG |
+| --- | --- | --- | --- | --- | ---: |
+| 1 | `codeeditsearchretrievalgo__q0001` | ``Rename `r` variable to `o` …for `output`…`` | `5241cdb4…`, `0e93f179…`, `949b5960…` | `e992a8d7…` | 0.0 |
+| 2 | `codeeditsearchretrievalgo__q0002` | `Test that Add actually works.` | `872b8636…`, `bcb9ce24…`, `777289c1…` | `0d36314b…` | 0.0 |
+| 3 | `codeeditsearchretrievalgo__q0003` | `Remove useless function that already exist in strings pakage.` | `bcb9ce24…`, `adedb818…`, `8be6da3b…` | `3125d02c…` | 0.0 |
+| 4 | `codeeditsearchretrievalgo__q0005` | `Clean up and improve relevance of example code.` | `8d436c8d…`, `adedb818…`, `f9a8c9a6…` | `95431df4…` | 0.0 |
+| 5 | `codeeditsearchretrievalgo__q0009` | `Use absolute value for NTP drift` | `00ab1bb9…`, `78ebc2e8…`, `695d264c…` | `a27a91a9…` | 0.0 |
+
+All five are Go commit-message queries whose diff post-image contains no mention of the words in the
+query ("Add", "strings pakage", "NTP drift"); they now return 20 results and simply miss.
+
+Timing (warm index, `--force` re-ran every search but `codeseek init` was an incremental no-op):
+
+| stage | value |
+| --- | --- |
+| run wall clock | **68.9 s** (batch 2: 306.6 s) |
+| `codeseek init`, one per corpus | 0.3 s / 0.3 s / 0.3 s / 0.3 s, **Σ 1.2 s** (batch 2 cold: Σ 236.9 s) |
+| search per query | mean **2.68 s**, median 2.54 s, p90 3.37 s, min 1.95 s, max 5.76 s (Σ 268.3 s ÷ 4 workers) |
+
+Exact reproduction (identical to batch 2 except for the config line; the commands below are now also
+what `report.md` §5 generates dynamically — the hard-coded template that batch 2's archive had to
+work around is gone):
+
+```bash
+# 1) turn the adaptive cutoff off (merge, do not rewrite the file)
+python3 - <<'PY'
+import json, os
+p = os.path.expanduser('~/.codeseek/config.json')
+d = json.load(open(p))
+d.setdefault('index', {}).setdefault('hybrid', {}).setdefault('cutoff', {})['enabled'] = False
+json.dump(d, open(p, 'w'), ensure_ascii=False, indent=2)
+PY
+
+# 2) same workdir / same questions / same pool as batch 2 → directly comparable
+cd evals/mtebcode
+python3 -m mtebcode_eval run --workdir /tmp/mtebcode-short --limit 20 --k 10 --concurrency 4 --force
+
+# 3) restore your original config afterwards
+cp ~/.codeseek/config.json.mtebcode-backup-<timestamp> ~/.codeseek/config.json
+```
+
+**Raw artifacts.** `/tmp/mtebcode-short/raw/` currently holds the **cutoff-OFF** results (batch 3).
+The cutoff-ON baseline of batch 2 is preserved separately at `/tmp/mtebcode-short/raw.cutoff-on/`
+(100 files, verified same count). The global config was restored to its pre-run state right after the
+run; the archive entry above is the durable record, not the tmp directory.
 
 ## Smoke run (reference only — not an archive entry, not a benchmark result)
 

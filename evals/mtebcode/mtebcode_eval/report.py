@@ -214,6 +214,112 @@ def _warnings(
     return warnings
 
 
+def _task_names(meta: Mapping[str, Any], by_task: Mapping[str, Any]) -> list[str]:
+    """把 ``meta['tasks']`` 归一化成任务名列表。
+
+    ``prepare`` 阶段写进 workdir meta 的 ``tasks`` 是**字典列表**（每个任务一条
+    元信息），而 ``run`` / ``score`` 阶段写进报告 meta 的 ``tasks`` 是**字符串
+    列表**。两种形态都要能渲染出可复现命令，且保持去重与出现顺序。
+    """
+    raw = meta.get("tasks") or sorted(by_task)
+    names: list[str] = []
+    for item in raw:
+        if isinstance(item, Mapping):
+            name = item.get("task") or item.get("task_slug")
+        else:
+            name = item
+        text = str(name) if name else ""
+        if text and text not in names:
+            names.append(text)
+    return names
+
+
+def _reproduction_commands(
+    meta: Mapping[str, Any],
+    aggregate: Mapping[str, Any],
+) -> list[str]:
+    """由报告 ``meta`` / ``aggregate`` 拼出**本批次真实**的复现命令。
+
+    旧实现是硬编码模板（``/tmp/mtebcode-eval``、``CodeSearchNetRetrieval`` 等），
+    与真实批次不符。这里改为全部取自 meta：``tasks``、``limit_queries``、
+    ``corpus_size``、``seed``、``workdir``、``search_limit``、``k``、
+    ``concurrency``；无法从 meta 恢复的字段用显式占位符标出，绝不编造默认值。
+    """
+    by_task = aggregate.get("by_task") or {}
+    workdir = str(meta.get("workdir") or "<WORKDIR>")
+    search_limit = int(aggregate.get("search_limit") or meta.get("search_limit") or 20)
+    k = int(aggregate.get("k") or meta.get("k") or 10)
+    concurrency = int(meta.get("concurrency") or 4)
+
+    tasks = _task_names(meta, by_task)
+    tasks_arg = ",".join(tasks) if tasks else "<TASKS>"
+
+    limit_queries = meta.get("limit_queries")
+    corpus_size = meta.get("corpus_size")
+    seed = meta.get("seed")
+
+    placeholders: list[str] = []
+    if limit_queries is None:
+        limit_arg = "<PER_TASK_QUERY_LIMIT>"
+        placeholders.append("limit_queries")
+    else:
+        limit_arg = str(int(limit_queries))
+    if corpus_size is None:
+        corpus_arg = "<CORPUS_SIZE>"
+        placeholders.append("corpus_size")
+    else:
+        corpus_arg = str(int(corpus_size))
+    if seed is None:
+        seed_arg = "<SEED>"
+        placeholders.append("seed")
+    else:
+        seed_arg = str(int(seed))
+
+    lines: list[str] = ["```bash", "# 在仓库根目录执行；所有产物都落在 --workdir 里", "cd evals/mtebcode", ""]
+    lines.append("# 0) 离线自检：nDCG 数值 / 容错解析 / doc_id 反查 / 端到端报告（不联网、不需要二进制）")
+    lines.append("python3 -m mtebcode_eval selftest")
+    lines.append("")
+    lines.append("# 1) 抓取数据集 + 抽样 query + 池化 corpus + 物化（本批次真实参数）")
+    lines.append("python3 -m mtebcode_eval prepare \\")
+    lines.append(f"  --workdir {workdir} \\")
+    lines.append(f"  --tasks {tasks_arg} \\")
+    lines.append(f"  --limit-queries {limit_arg} \\")
+    lines.append(f"  --corpus-size {corpus_arg} \\")
+    lines.append(f"  --seed {seed_arg} \\")
+    lines.append("  --parquet-cache ~/.cache/huggingface/hub \\")
+    lines.append("  --proxy http://127.0.0.1:7897")
+    lines.append(
+        "#   ↑ --proxy 请替换成你自己的本地代理；国内直连 datasets-server 通常会被 429 限流。"
+    )
+    lines.append("#   ↑ --parquet-cache 让本地 HF 缓存命中的 (config, split) 直接读盘、不发网络请求；"
+    )
+    lines.append("#     确实无缓存时可省略该参数（或改用 --cache-only 做纯离线复现）。")
+    lines.append("")
+    lines.append("# 2) 执行检索并出报告（--force 忽略已有 raw 结果；本批次 search_limit / k 如下）")
+    lines.append("python3 -m mtebcode_eval run \\")
+    lines.append(f"  --workdir {workdir} \\")
+    lines.append(f"  --limit {search_limit} \\")
+    lines.append(f"  --k {k} \\")
+    lines.append(f"  --concurrency {concurrency}")
+    lines.append("")
+    lines.append("# 3) 只重算指标（不重跑检索；换 k 只需改这里，便于做 k 敏感性分析）")
+    lines.append("python3 -m mtebcode_eval score \\")
+    lines.append(f"  --workdir {workdir} \\")
+    lines.append(f"  --limit {search_limit} \\")
+    lines.append(f"  --k {k}")
+    lines.append("```")
+
+    if placeholders:
+        lines.append("")
+        lines.append(
+            "> ℹ️ Meta did not record `"
+            + "`, `".join(placeholders)
+            + "` for this run (it was produced by a `score`-only pass); those values are shown as "
+            "placeholders above instead of inventing defaults."
+        )
+    return lines
+
+
 def render_markdown(report: Mapping[str, Any]) -> str:
     """把报告 dict 渲染成英文 markdown。"""
     meta = report["meta"]
@@ -367,24 +473,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     # ---------- 5. Reproduction ----------
     lines.append("## 5. Reproduction Commands")
     lines.append("")
-    lines.append("```bash")
-    lines.append("cd evals/mtebcode")
-    lines.append("python -m mtebcode_eval selftest                     # offline, no network / binary")
-    lines.append(
-        "python -m mtebcode_eval prepare --workdir /tmp/mtebcode-eval "
-        "--tasks CosQA,CodeSearchNetRetrieval,SyntheticText2SQL "
-        f"--limit-queries {meta.get('limit_queries', 30)} --corpus-size {meta.get('corpus_size', 300)} "
-        f"--seed {meta.get('seed', 42)} --proxy http://127.0.0.1:7897"
-    )
-    lines.append(
-        "python -m mtebcode_eval run --workdir /tmp/mtebcode-eval "
-        f"--limit {search_limit} --concurrency {meta.get('concurrency', 4)}"
-    )
-    lines.append(
-        f"python -m mtebcode_eval score --workdir /tmp/mtebcode-eval --limit {search_limit} --k {k}"
-        "   # re-score the same raw results with another k"
-    )
-    lines.append("```")
+    lines.extend(_reproduction_commands(meta, aggregate))
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -398,11 +487,20 @@ def render_markdown(report: Mapping[str, Any]) -> str:
 
 
 def write_reports(workdir: Path | str, report: Mapping[str, Any]) -> tuple[Path, Path]:
-    """写出 ``report.json`` 与 ``report.md``，返回两个路径。"""
+    """写出 ``report.json`` 与 ``report.md``，返回两个路径。
+
+    顺手把 ``workdir`` 补进 ``report['meta']``（若调用方没写）：第 5 节的复现命令
+    需要真实的工作目录，而 ``run`` / ``score`` 阶段的 meta 里并不含该字段。
+    """
     root = Path(workdir)
     root.mkdir(parents=True, exist_ok=True)
     json_path = root / REPORT_JSON
     md_path = root / REPORT_MD
+
+    if isinstance(report, dict):
+        meta = report.get("meta")
+        if isinstance(meta, dict) and not meta.get("workdir"):
+            meta["workdir"] = str(root)
 
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     md_path.write_text(render_markdown(report), encoding="utf-8")
