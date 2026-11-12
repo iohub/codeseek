@@ -15,6 +15,7 @@
 - [9. 维护状态](#9-维护状态)
 - [10. 参考链接](#10-参考链接)
 - [11. 信息核实说明（含常见误传核实与修订记录）](#11-信息核实说明含常见误传核实与修订记录)
+- [12. codeseek 自身实测（本地 100 题子集，非官方榜）](#12-codeseek-自身实测本地-100-题子集非官方榜)
 
 ## 1. 基本信息
 
@@ -265,3 +266,44 @@ repoqa.compute_score --model-output-path={model-output}.jsonl
 4. **候选集不是"全仓库 tree-sitter 解析"**：`compute_score.py` 的候选集就是该 repo 的 10 条 needle 按 `start_line:end_line` 切片；tree-sitter 只用于从**模型输出**中取第一个函数，不参与构建候选池（第 4 节已改，并补充"判定比与全仓库函数竞争宽松得多"的影响说明）。
 
 > 附带结论：`repoqa-2024-06-23` 也确实是 `data.py` 中 `REPOQA_DATA_VERSION` 的默认 tag，第 10 节已补上实测可用的下载地址。
+
+## 12. codeseek 自身实测（本地 100 题子集，非官方榜）
+
+> 本节记录**本项目**（codeseek 检索器）在该基准上的实测成绩，与第 6 节的官方 LLM 榜单**不同口径、不可比较**：官方榜测的是"把 16K 仓库上下文塞给大模型、由模型输出函数"，本节测的是"用 codeseek 的 `search` 检索、取 Top-1 的 `code_block` 判分"。完整归档见 [`evals/repoqa/results/README.md`](../evals/repoqa/results/README.md)。
+
+| 项 | 取值 |
+|----|------|
+| 子集 | 100 题 = 5 语言（python / cpp / java / typescript / rust）× 2 仓库 × 10 needle，**不含 go** |
+| 数据集 | 官方 release `2024-06-23`，`sha256` 前缀 `bd3f7cab47283cde` |
+| 判分 | 官方逻辑复刻：BLEU-4 + Chen & Cherry `method4`，候选集=该 repo 的 10 条 needle，`threshold = 0.8` |
+| 检索 | `hybrid` 100%（LanceDB + BM25），`search_limit=5`，判分取 Top-1，0 空结果 |
+| 被测二进制 | `rust-core/target/release/codeseek`，`sha256` 前缀 `b1532bb1b43e3d65` |
+
+**当前主口径：总体 84.0%（84/100）**
+
+| 语言 | 通过/总数 | accuracy | 与上一轮（82.0%）相比 |
+|------|-----------|----------|----------------------|
+| python | 18/20 | 90.0% | 持平 |
+| cpp | 11/20 | **55.0%** | **+2 题（45.0% → 55.0%）** |
+| java | 17/20 | 85.0% | 持平 |
+| typescript | 20/20 | 100.0% | 持平 |
+| rust | 18/20 | 90.0% | 持平 |
+| **all** | **84/100** | **84.0%** | **+2.0pt** |
+
+两轮改进路径（均在 `rust-core/` 内，切块与排序分离）：
+
+1. **74.0% → 82.0%（rust）**：`treesitter/parsers/rust.rs` 的 `parse_block` 补 `mod_item` 分支（此前 `mod tests` 子树零产出）+ `impl_item` 的 `full_range` 收窄到 `declaration_range`，rust 50.0% → 90.0%（+8.0pt，8 题翻转、0 回归）。
+2. **82.0% → 84.0%（cpp）**：`services/hybrid_search.rs` 的 `demote_enclosing_candidates` —— **排序期**父子包含降权，语言白名单 `ENCLOSING_DEMOTE_LANGUAGES = ["cpp"]`。即**已通过排序期包含降权（仅 cpp）把 cpp 从 45.0% 提升到 55.0%，整体 82.0% → 84.0%；切块层内容降级方案已实测否决（78.0%）**（见下表）。
+
+**已实测否决的方案（避免重走，均为清索引全量重跑）**
+
+| 方案 | 做法 | 实测 | 结论 |
+|------|------|------|------|
+| 切块层内容降级 | 父容器 chunk 的 `content` 改为 `declaration_range` 签名骨架 | 78.0%（cpp 55%，但 typescript 100%→70%、rust 90%→85%） | **否决**：容器退化成"超短文档 + 符号名完美命中"，BM25 长度归一化把它顶到 rank1，正文只剩签名 → BLEU≈0 |
+| 全语言排序期包含降权 | 降权对全部语言生效 | 81.0%（cpp 55%、java 90%，但 typescript 85%、rust 85%） | **否决**：typescript 的 needle 常是 class 本身、rust 的正确块被 60 行窗口 span 误判 |
+| BM25 存真实 `line_end` | tantivy schema 增 STORED `line_start`/`line_end` 并按边界回填 | 48.0%（rust 全 `unknown_empty`、express 10 题全空） | **回退**：按 `line_end` 切片产生空正文，已 `git revert` |
+| **排序期包含降权（仅 cpp）** | 同上 + `cpp` 门控 | **84.0%（cpp 55%，其余零回归）** | **采用**（当前主口径） |
+
+关于 cpp 的现状：本轮之后 cpp 的瓶颈**已从"切块粒度"转为"召回/排序"**——剩余 9 道 cpp 失败题中仅 2 道与 needle 同名（`below_threshold`），另 7 道为 `wrong_target`（返回了别的符号）。因此"cpp 是最大短板、建议做 chunker 包含剪枝"这条旧结论**已不再成立**：包含问题已用**排序期**手段解决，切块层的"减内容"改动已被 78.0% 的实测否决，后续应从 cpp 符号覆盖（宏、模板特化、匿名 namespace 内静态函数）与同名符号排序入手。
+
+> 口径提醒：本节分数与第 6 节官方榜（gpt-4o / claude-3-opus 等 90.6）**不可直接对比**，也不构成"codeseek 强于某 LLM"的结论——任务形态（检索 vs 长上下文生成）、候选集（10 条 needle vs 全仓库）与输入（源文件快照 vs 16K 依赖排序上下文）都不同。

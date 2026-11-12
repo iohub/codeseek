@@ -127,11 +127,19 @@ python -m repoqa_eval selftest
   因此覆盖的符号数少于真实仓库，检索难度与官方口径存在系统性差异。
 - **`codeseek init` 的 stdout 有进度条污染**：`adapter.init_repo` 不解析输出内容，只看退出码；
   `search` 的 JSON 用三段式容错解析（整体 → `[..]`/`{..}` 截取 → 逐行 NDJSON）。
-- **【P0 · 当前最大瓶颈】cpp 切块粒度 = 45.0%**：`cpp` 11 道失败中 **7 道** `best_target` 与 needle
+- **【已解决】cpp 切块粒度问题（旧 P0）**：上一轮基线里 `cpp` 11 道失败中有 **7 道** `best_target` 与 needle
   **同名**（正确符号已被检索为 Top-1），仅因返回的 `code_block` 是父容器（class/struct）的**严格超集**
   而 BLEU 低于 0.8（例 `ThrowableInformationPatternConverterPrivate`，sim=0.392）。**抢占 rank1 的是
-  容器 chunk，不是成员 chunk**，属索引侧切块问题，不是检索能力问题。修复方向与 `rust` 的 `impl_item`
-  `full_range` 收窄同构：容器符号的 chunk 不得覆盖成员符号的源码区间。
+  容器 chunk，不是成员 chunk**。
+  该问题**已通过排序期父子包含降权（仅 cpp）解决**：`hybrid_search.rs` 的 `demote_enclosing_candidates`
+  + `ENCLOSING_DEMOTE_LANGUAGES = ["cpp"]`，把容器 chunk 的名次压下去、让成员块上位，`cpp` 由
+  **45.0% → 55.0%**（+2 题，两题 `best_similarity` 0.246 / 0.217 → **1.0**），整体 **82.0% → 84.0%**，
+  其余四语言零回归。**切块层的内容降级方案已实测否决**（父容器 `content` 改为 `declaration_range` 签名
+  骨架，实测 **78.0%**：容器退化成"超短文档 + 符号名完美命中"，BM25 长度归一化把它顶回 rank1，
+  typescript 100%→70%、rust 90%→85%）。详见 [`results/README.md`](results/README.md) 第 2 节。
+- **cpp 剩余瓶颈已转为召回**：当前 9 道 cpp 失败题中仅 2 道与 needle 同名（`below_threshold`），
+  另 7 道为 `wrong_target`（返回了别的符号，如 `PropertiesPatternConverterPrivate` → `ConfiguratorWatchdog`），
+  已不属于切块粒度问题；下一步应看 cpp 符号覆盖（宏、模板特化、匿名 namespace 内静态函数）与同名符号排序。
 - **失败 Top1 是边界差异、不是召回失败**：`rust__rust-bakery__nom__n07`（`be_i8_tests`）
   `best_target` 与 needle **同名**但 `best_similarity=0.721 < 0.8`，属**切块边界差异**；
   该题在修复前基线里是 `wrong_target`（返回 `many1_count`），现已从"未召回"改善为"边界不符"。
@@ -144,7 +152,9 @@ evals/repoqa/
 ├── requirements.txt
 ├── results/                # 已跑通的实测结果归档（见第 8 节）
 │   ├── README.md
-│   ├── 2026-11-12-report.md           # 主口径 backend=nltk，82.0%
+│   ├── 2026-11-12b-report.md          # 主口径 backend=builtin，84.0%
+│   ├── 2026-11-12b-report.json
+│   ├── 2026-11-12-report.md           # 上一轮基线 backend=nltk，82.0%
 │   ├── 2026-11-12-report.json
 │   ├── 2026-11-11-report.md           # 修复前基线 backend=nltk，74.0%
 │   ├── 2026-11-11-report.json
@@ -190,23 +200,31 @@ evals/repoqa/
 
 ## 8. 实测结果
 
-**当前主口径：2026-11-12 报告，总体 82.0%（82/100）**（100 题子集，5 语言 × 2 仓库 × 10 needle，
-`threshold=0.8`，`backend=nltk`，`hybrid` 检索 100%，0 空结果）：
+**当前主口径：2026-11-12（b）报告，总体 84.0%（84/100）**（100 题子集，5 语言 × 2 仓库 × 10 needle，
+`threshold=0.8`，`hybrid` 检索 100%，0 空结果；被测二进制 `sha256` 前缀 `b1532bb1b43e3d65`）：
 
 | 语言 | 通过/总数 | accuracy |
 | --- | --- | --- |
 | python | 18/20 | 90.0% |
-| cpp | 9/20 | 45.0% |
+| cpp | 11/20 | 55.0% |
 | java | 17/20 | 85.0% |
 | typescript | 20/20 | 100.0% |
 | rust | 18/20 | 90.0% |
-| **all** | **82/100** | **82.0%** |
+| **all** | **84/100** | **84.0%** |
 
-- 报告与逐题明细：[`results/README.md`](results/README.md)（`results/2026-11-12-report.md` / `.json` 为主口径）
-- 改进来源：`rust` 解析器的 `mod_item` 分支（`rust-core/src/codegraph/treesitter/parsers/rust.rs` 的
-  `parse_block`）+ `impl_item` 的 `full_range` 收窄到 `declaration_range`，使 rust 由 50.0% → 90.0%
-  （+40.0pt），总体由 74.0% → 82.0%（+8.0pt），**8 题翻转、0 回归**。
-- 三条关键洞察（切块与 needle 同源、cpp 45.0% 主因是切块粒度=P0、rust 漏索引是主因）见该目录说明。
+- 报告与逐题明细：[`results/README.md`](results/README.md)（`results/2026-11-12b-report.md` / `.json` 为主口径）
+- 改进路径（两轮，均在 `rust-core/`）：
+  1. **74.0% → 82.0%（rust）**：`rust-core/src/codegraph/treesitter/parsers/rust.rs` 的 `parse_block` 补
+     `mod_item` 分支 + `impl_item` 的 `full_range` 收窄到 `declaration_range`，rust 50.0% → 90.0%
+     （+40.0pt，8 题翻转、0 回归）。
+  2. **82.0% → 84.0%（cpp）**：`services/hybrid_search.rs` 的 `demote_enclosing_candidates`
+     （**排序期**父子包含降权，`ENCLOSING_DEMOTE_LANGUAGES = ["cpp"]`），cpp 45.0% → 55.0%（+2 题），
+     其余四语言零回归。
+- 关键洞察见 [`results/README.md`](results/README.md) 第 4 节；**三次已实测否决的方案**（切块层内容降级
+  78.0%、全语言降权 81.0%、BM25 存真实 `line_end` 48.0%）见其第 2 节。
+
+**历史对照（上一轮基线）**：2026-11-12 首批，总体 82.0%（82/100），cpp 45.0%（9/20），
+二进制 `sha256` 前缀 `38edff1bb1b1d1cd`（`results/2026-11-12-report.md` / `.json`）。
 
 **历史对照（修复前基线）**：2026-11-11 首次端到端评测，总体 74.0%（74/100），rust 50.0%（10/20），
 二进制 `sha256` 前缀 `5972636dc15431ee`；该批次仅作基线保留（`results/2026-11-11-report.md` / `.json`，
