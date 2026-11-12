@@ -1,17 +1,47 @@
 # RepoQA 实测结果归档
 
-这是 codeseek 在 RepoQA **100 题子集**上的**首次端到端评测结果**（2026-11-11 跑通，非估算、非抽样外推）。
+这是 codeseek 在 RepoQA **100 题子集**上的端到端评测结果归档（非估算、非抽样外推），当前包含**两个批次**：2026-11-11 的**修复前基线**（74.0%）与 2026-11-12 的**修复后结果**（82.0%）。
 
 | 文件 | 说明 |
 | --- | --- |
-| `2026-11-11-report.md` | 中文可读报告（总体/分语言/分 repo/失败 Top10/复现命令），BLEU backend = `nltk` |
-| `2026-11-11-report.json` | 机器可读明细（`meta` / `aggregate` / `by_repo` / 逐题 `per_task` / `failure_top`） |
-| `2026-11-11-report.builtin.md` | 内置 BLEU 复刻实现的基线备份（`backend=builtin`），用于与 nltk 对拍 |
+| `2026-11-12-report.md` | **最新（修复后）**：中文可读报告（总体/分语言/分 repo/失败 Top10/复现命令），总体 82.0%，BLEU backend = `nltk` |
+| `2026-11-12-report.json` | **最新（修复后）**：机器可读明细（`meta` / `aggregate` / `by_repo` / 逐题 `per_task` / `failure_top`） |
+| `2026-11-11-report.md` | **修复前基线**：同一口径的中文可读报告，总体 74.0%，BLEU backend = `nltk` |
+| `2026-11-11-report.json` | **修复前基线**：机器可读明细 |
+| `2026-11-11-report.builtin.md` | 修复前基线的内置 BLEU 复刻实现副本（`backend=builtin`），用于与 nltk 对拍 |
 | `2026-11-11-report.builtin.json` | 同上，机器可读版本 |
 
-四个文件均为 `/tmp/repoqa-eval/`（`--workdir` 默认位置）下同名产物的**原样复制**，仅追加日期前缀重命名，未做任何内容改动。
+所有 `.md` / `.json` 均为 `/tmp/repoqa-eval/`（`--workdir` 默认位置）下同名产物的**原样复制**，仅追加日期前缀重命名，未做任何内容改动；`.md` 由 `repoqa_eval/report.py` 的 `render_markdown()` 渲染（两个批次同一渲染器，见下方"归档时间线"的溯源说明）。
+
+## 归档时间线
+
+| 批次 | 文件（主口径 `nltk`） | 总体 accuracy | rust | 被测二进制 `sha256` 前缀 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| **2026-11-11**（修复前基线） | `2026-11-11-report.md` / `.json` | **74.0%**（74/100） | 50.0%（10/20） | `5972636dc15431ee` | 修复前基线，作为对照基线保留 |
+| **2026-11-12**（修复后） | `2026-11-12-report.md` / `.json` | **82.0%**（82/100） | 90.0%（18/20） | `38edff1bb1b1d1cd` | 较基线 **+8.0pt**；**8 题翻转为通过、0 题回归**，且 8 题**全部为 rust** |
+
+两次评测的口径完全一致：同一 100 题子集（5 语言 × 2 仓库 × 10 needle）、同一数据集（`sha256` 前缀 `bd3f7cab47283cde`，release `2024-06-23`）、同一 `threshold = 0.8`、同一 BLEU backend（`nltk`）、`hybrid: 100`（`name_fallback: 0`、`unknown_empty: 0`，无退化、无空结果）；两次的 python / cpp / java / typescript 分项**逐项相同**，差异全部来自 rust。
+
+2026-11-12 的 8 道翻转题（`fail → pass`，逐题比对 `per_task.passed` 得出；无回归题）：
+
+| # | 题目 id | 仓库 |
+| --- | --- | --- |
+| 1 | `rust__rust-bakery__nom__n01` | rust-bakery/nom |
+| 2 | `rust__rust-bakery__nom__n03` | rust-bakery/nom |
+| 3 | `rust__rust-bakery__nom__n04` | rust-bakery/nom |
+| 4 | `rust__rust-bakery__nom__n06` | rust-bakery/nom |
+| 5 | `rust__rust-bakery__nom__n08` | rust-bakery/nom |
+| 6 | `rust__helix-editor__helix__n00` | helix-editor/helix |
+| 7 | `rust__helix-editor__helix__n06` | helix-editor/helix |
+| 8 | `rust__helix-editor__helix__n09` | helix-editor/helix |
+
+> **`.builtin.*` 后缀的含义**：它表示**用内置 BLEU 复刻后端**（`backend=builtin`，未安装 nltk 时的兜底实现）对同一批检索结果重新判分的副本，用于与主口径对拍。**主口径是 `nltk`**，即不带后缀的 `.md` / `.json`。2026-11-11 批次做过 100 题逐位对拍：逐题 `best_similarity` 变化 0/100，`passed` 翻转 0，因此两套分数完全相同。2026-11-12 批次只产出了 `nltk` 主口径，**未生成** `.builtin.*` 副本。
+>
+> **溯源**：两份 `.md` 均由 `repoqa_eval/report.py` 的 `render_markdown()` 渲染，未手工改数字。验证方式：用该渲染器渲染 `2026-11-11-report.json`，与仓库中已有的 `2026-11-11-report.md` **逐行零差异**（77 行全等），说明两批报告章节结构、表头与措辞同源。
 
 ## 1. 关键结论
+
+> 本节及第 3 节的分析均针对 **2026-11-11 修复前基线**（保留原文不改，便于与历史结论对照）；最新结果见上方"归档时间线"与 [`2026-11-12-report.md`](2026-11-12-report.md)。
 
 **总体 accuracy：74.0%（74/100 题通过，threshold = 0.8）**
 
@@ -25,6 +55,8 @@
 | **all** | **74/100** | **74.0%** |
 
 ## 2. 评测条件
+
+> 下表为 **2026-11-11 修复前基线**的评测条件。2026-11-12 批次口径完全相同，仅两处取值不同：被测二进制改为 `sha256` 前缀 `38edff1bb1b1d1cd`（`size_bytes=60583760`，mtime `2026-11-12T03:05:33.317865+00:00`），`embedding` 配置检测结果为"已配置（model=Qwen/Qwen3-Embedding-4B，api_token 长度 51）"而非"未检测"。
 
 | 项 | 取值 |
 | --- | --- |
@@ -54,6 +86,8 @@
 例：`ThrowableInformationPatternConverterPrivate` 返回 12 行 420 字符，GT 只有 3 行 185 字符（字符比 2.27），BLEU = 0.392 < 0.8。
 
 若改用"GT 落在返回块内即算通过"的粒度容忍口径，cpp 从 **45.0% → 75.0%（+30.0pt）**，总体从 74.0% → 82.0%（+8.0pt）。这说明 cpp 的短板是**切块**，不是**排序**。
+
+> 注：这里的 82.0% 是**粒度容忍口径下的假想值**，与 2026-11-12 修复后**实测**的 82.0% 仅是数值巧合相同，两者的口径与构成完全不同，勿混淆（后者仍是不容忍粒度的原口径，见上方"归档时间线"）。
 
 ### 3.3 rust 50.0% 的主因是检索选错符号
 
