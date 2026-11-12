@@ -1,22 +1,15 @@
 {
   "meta": {
-    "generated_at": "2026-11-12T07:18:32+00:00",
+    "generated_at": "2026-11-12T07:26:25+00:00",
     "tasks": 100,
     "repos": 10,
     "threshold": 0.8,
-    "search_limit": 5,
-    "concurrency": 1,
-    "search_timeout_s": 180.0,
-    "init_timeout_s": 1800.0,
-    "elapsed_s": 198.2,
-    "bleu_backend": "builtin",
+    "bleu_backend": "nltk",
     "treesitter_available": false,
     "mode_counts": {
       "hybrid": 100
     },
-    "embedding_configured": true,
-    "embedding_note": "embedding 已配置（model=Qwen/Qwen3-Embedding-4B，api_token 长度 51）",
-    "init_failures": [],
+    "rescore_only": true,
     "dataset": {
       "path": "/tmp/repoqa-eval/repoqa-2024-06-23.json",
       "exists": true,
@@ -32,8 +25,8 @@
       "mtime_iso": "2026-11-12T07:05:19.955112+00:00",
       "sha256_prefix": "b1532bb1b43e3d65"
     },
-    "command": "run",
-    "limit_questions": 0,
+    "command": "score",
+    "search_limit": 5,
     "subset": {
       "languages": [
         "python",
@@ -3239,7 +3232,5 @@
       ]
     }
   ],
-  "warnings": [
-    "BLEU 使用**内置复刻实现**（未安装 nltk）。与官方 `repoqa.compute_score` 的差异仅在 nltk 版本级细节上，建议 `pip install nltk` 后用同一批 raw 结果执行 `score` 复核。"
-  ]
+  "warnings": []
 }

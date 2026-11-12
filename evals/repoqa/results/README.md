@@ -11,7 +11,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `2026-11-12b-report.md` | **主口径**：中文可读报告（总体/分语言/分 repo/失败 Top10/复现命令），总体 84.0%，BLEU backend = `builtin` |
+| `2026-11-12b-report.md` | **主口径**：中文可读报告（总体/分语言/分 repo/失败 Top10/复现命令），总体 84.0%，BLEU backend = `nltk` |
 | `2026-11-12b-report.json` | **主口径**：机器可读明细（`meta` / `aggregate` / `by_repo` / 逐题 `per_task` / `failure_top`） |
 | `2026-11-12-report.md` | **上一轮基线**：rust `mod_item` 修复后的报告，总体 82.0%，BLEU backend = `nltk` |
 | `2026-11-12-report.json` | 同上，机器可读明细 |
@@ -22,11 +22,11 @@
 
 所有 `.md` / `.json` 均为 `/tmp/repoqa-eval/`（`--workdir` 默认位置）下同名产物的**原样复制**，仅追加日期前缀重命名，未做任何内容改动；`.md` 由 `repoqa_eval/report.py` 的 `render_markdown()` 渲染（三个批次同一渲染器，见下方「归档时间线」的溯源说明）。
 
-> **为什么文件名带 `b` 后缀**：主口径批次的 `meta.generated_at` 为 `2026-11-12T07:18:32+00:00`，日期与已归档的 `2026-11-12-report.*`（上一轮基线）**冲突**。为不覆盖、不改写历史归档，该批次命名为 `2026-11-12b-report.json` / `.md`，表示**同一天的第二批**；两批的 `meta.generated_at` 时间戳与二进制 `sha256` 前缀均可区分。
+> **为什么文件名带 `b` 后缀**：主口径批次的 `meta.generated_at` 为 `2026-11-12T07:26:25+00:00`（`score` 重判时刻；原始检索完成于 `07:18:32`），日期与已归档的 `2026-11-12-report.*`（上一轮基线）**冲突**。为不覆盖、不改写历史归档，该批次命名为 `2026-11-12b-report.json` / `.md`，表示**同一天的第二批**；两批的 `meta.generated_at` 时间戳与二进制 `sha256` 前缀均可区分。
 
 ## 归档时间线
 
-| 批次 | 文件（主口径 `nltk`/`builtin`） | 总体 accuracy | cpp | rust | 被测二进制 `sha256` 前缀 | 说明 |
+| 批次 | 文件（主口径 backend 均为 `nltk`） | 总体 accuracy | cpp | rust | 被测二进制 `sha256` 前缀 | 说明 |
 | --- | --- | --- | --- | --- | --- | --- |
 | **2026-11-12b**（**当前主口径**） | `2026-11-12b-report.md` / `.json` | **84.0%**（84/100） | **55.0%（11/20）** | 90.0%（18/20） | `b1532bb1b43e3d65` | 较上一轮基线 **+2.0pt**；改动来源=**排序期父子包含降权（仅 cpp）**，cpp **+2 题（45.0% → 55.0%）**，**其余四语言零回归** |
 | 2026-11-12（上一轮基线：rust `mod_item` 修复） | `2026-11-12-report.md` / `.json` | 82.0%（82/100） | 45.0%（9/20） | 90.0%（18/20） | `38edff1bb1b1d1cd` | 较修复前基线 **+8.0pt**；**8 题翻转为通过、0 题回归**，且 8 题**全部为 rust** |
@@ -37,7 +37,7 @@
 - **74.0% → 82.0%**：差异**全部来自 rust**（50.0% → 90.0%，+40.0pt）；python / cpp / java / typescript 分项逐项相同。
 - **82.0% → 84.0%**：差异**全部来自 cpp**（45.0% → 55.0%，+2 题）；python / java / typescript / rust 的 **80 道非 cpp 题 `best_similarity` 逐位相同**（不是"聚合分相同"，是浮点取值完全一致），因此「其余四语言零回归」是可逐题核验的硬事实。
 
-> **BLEU backend 说明（主口径批次为 `builtin`）**：84.0% 批次运行时环境未安装 nltk，`meta.bleu_backend = builtin`（内置复刻实现），因此该批 `report.md` 顶部带一条 ⚠️ 警示。三条证据表明这不影响可比性：(1) 2026-11-11 批次做过 `nltk` / `builtin` **100 题逐位对拍**，逐题 `best_similarity` 无差异、`passed` 无翻转；(2) 本批与上一轮（`nltk`）的 **80 道非 cpp 题 `best_similarity` 取值完全相同**；(3) 本批两处翻转题的相似度都直接跳到 **1.0**（与 GT 完全一致的 BLEU-4 满分），与 BLEU 实现的版本级差异无关。装好 nltk 后可用同一批 `raw/` 执行 `score` 重判复核。
+> **BLEU backend 说明（主口径批次为 `nltk`）**：该批次**最初以 `builtin` 后端产出**（运行时未安装 nltk，`meta.bleu_backend = builtin`，内置复刻实现），随后安装 nltk 并用 `repoqa_eval score` 对**同一批 `raw/` 检索结果**重判（`meta.command = score`、`meta.rescore_only = true`，不重跑检索）。重判结论与 `builtin` **逐位一致**：总体同为 **84.0%（84/100）**、分语言同为 **18 / 11 / 17 / 20 / 18**、**逐题 `passed` 0 翻转、`best_similarity` 最大绝对误差 0.0**，因此**两个后端在本批次上等价、可互换**，归档的 `2026-11-12b-report.json` / `.md` 就是这个 `nltk` 重判版本（`builtin` 版仅作为对拍中间产物留在 `/tmp/repoqa-eval/report.builtin.{json,md}`，未入库）。
 
 从修复前基线（74.0%）到主口径（84.0%），共 **10 道题 `fail → pass`、0 道回归**（逐题比对两批 `per_task.passed` 得出）：
 
@@ -56,9 +56,9 @@
 
 > 第 9、10 两题翻转前 `best_target` **与 needle 同名**（正确符号已被检索为 Top-1），只是返回的 `code_block` 是父容器（class/struct）的严格超集，BLEU 被稀释到 0.2 左右；降权容器后成员块顶到 rank1，相似度直接满分。
 
-> **`.builtin.*` 后缀的含义**：它表示**用内置 BLEU 复刻后端**（`backend=builtin`，未安装 nltk 时的兜底实现）对同一批检索结果重新判分的副本，用于与主口径对拍。**2026-11-11 与 2026-11-12（首批）的主口径是 `nltk`**，即不带后缀的 `.md` / `.json`；**2026-11-12b 的主口径本身就是 `builtin`**（见上方警示），故不再另存 `.builtin.*` 副本。2026-11-11 批次做过 100 题逐位对拍：逐题 `best_similarity` 无差异、`passed` 无翻转，因此两套分数完全相同。
+> **`.builtin.*` 后缀的含义**：它表示**用内置 BLEU 复刻后端**（`backend=builtin`，未安装 nltk 时的兜底实现）对同一批检索结果重新判分的副本，用于与主口径对拍。**三个批次的主口径均为 `nltk`**，即不带后缀的 `.md` / `.json`；仓库中只保留了 2026-11-11 基线的 `.builtin.*` 副本。**2026-11-12b 批次的 `builtin` 版未入库**，仅存于 `/tmp/repoqa-eval/report.builtin.{json,md}`；它与入库的 `nltk` 版**逐题 `passed` 0 翻转、`best_similarity` 最大绝对误差 0.0**（见上方「BLEU backend 说明」）。2026-11-11 批次同样做过 100 题逐位对拍：逐题 `best_similarity` 无差异、`passed` 无翻转，因此两套分数完全相同。
 >
-> **溯源**：三份 `.md` 均由 `repoqa_eval/report.py` 的 `render_markdown()` 渲染，未手工改数字。验证方式：用该渲染器渲染 `2026-11-12-report.json`，与仓库中已有的 `2026-11-12-report.md` **逐字节零差异**（3554 字节全等）；渲染 `2026-11-12b-report.json` 的输出与 `/tmp/repoqa-eval/report.md` **逐字节零差异**（md5 `083ee19e80de07531d876586283236e7`），说明三批报告章节结构、表头与措辞同源。
+> **溯源**：三份 `.md` 均由 `repoqa_eval/report.py` 的 `render_markdown()` 渲染，未手工改数字。验证方式（三批全部用当前归档的 `.json` 重渲染后逐字节比对，全部 `disk_equal=True`）：`2026-11-11` → 4049 字节、md5 `41646851700302b8fdedfce3e352d1c1`；`2026-11-12` → 4132 字节、md5 `9e36ffb36696a8ca6f4193b1bb4cdcde`；`2026-11-12b` → 4004 字节、md5 `7acc64c396dc69b0324c360ad040bcf5`（与 `/tmp/repoqa-eval/report.md` 完全一致，即 `nltk` 重判版）。三批报告章节结构、表头与措辞同源。
 
 ## 1. 关键结论
 
@@ -91,7 +91,7 @@
 
 ## 2. 已实测否决的方案（避免重走）
 
-以下三次尝试均为**清索引、全量 100 题重跑**得到的结果，与当前主口径只差被测改动这一项。记录在此以便后来者不必重复踩坑。
+表中前三行为**已实测否决 / 回退**的方案，第四行为**当前采用**的方案；三次否决尝试均为**清索引、全量 100 题重跑**得到的结果，与当前主口径只差被测改动这一项。记录在此以便后来者不必重复踩坑。
 
 | 方案 | 做法 | 实测 | 结论 |
 | --- | --- | --- | --- |
@@ -106,7 +106,7 @@
 
 ## 3. 评测条件
 
-> 下表为 **2026-11-12b 主口径**的评测条件。前两批口径相同，仅三处取值不同：被测二进制（上一轮 `38edff1bb1b1d1cd`、修复前 `5972636dc15431ee`）、BLEU backend（前两批为 `nltk`）、`run` 的 `--concurrency`（修复前基线为 `4`，其余为 `1`）。
+> 下表为 **2026-11-12b 主口径**的评测条件。前两批口径相同，仅三处取值不同：被测二进制（上一轮 `38edff1bb1b1d1cd`、修复前 `5972636dc15431ee`）、`run` 的 `--concurrency`（修复前基线为 `4`，其余为 `1`）、以及判分后端来源（主口径批次由 `builtin` 经 `score` 重判为 `nltk`，前两批直接以 `nltk` 产出）；三批最终 backend 均为 `nltk`。
 
 | 项 | 取值 |
 | --- | --- |
@@ -120,8 +120,8 @@
 | 被测二进制 | `rust-core/target/release/codeseek`，`sha256` 前缀 `b1532bb1b43e3d65`，`size_bytes=60600320`，mtime `2026-11-12T07:05:19.955112+00:00` |
 | codeseek 版本 | `codeseek 0.1.31`（`codeseek --version`） |
 | embedding 配置 | `embedding 已配置（model=Qwen/Qwen3-Embedding-4B，api_token 长度 51）` |
-| BLEU backend | `builtin`（内置复刻实现，运行时未安装 nltk）；等价性论证见上方「BLEU backend 说明」 |
-| 运行规模 | `generated_at=2026-11-12T07:18:32+00:00`，`elapsed_s=198.2`，`concurrency=1`，`init_failures=[]` |
+| BLEU backend | `nltk`（与官方 `repoqa.compute_score` 同款）；该批曾以 `builtin` 产出后经 `score` 重判，结论逐位一致，见上方「BLEU backend 说明」 |
+| 运行规模 | 检索：`generated_at=2026-11-12T07:18:32+00:00`、`elapsed_s=198.2`、`concurrency=1`、`init_failures=[]`；重判：`command=score`、`rescore_only=true`、`generated_at=2026-11-12T07:26:25+00:00`（不重跑检索，仅换 BLEU 后端重判同一批 `raw/`） |
 
 ## 4. 三条关键洞察
 
@@ -173,7 +173,7 @@ python -m repoqa_eval run --workdir /tmp/repoqa-eval --limit 5 --threshold 0.8 -
 python -m repoqa_eval score --workdir /tmp/repoqa-eval             # 换阈值重判，不重跑检索
 ```
 
-> 三批之间唯一的运行参数差异是 `--concurrency`（修复前基线用 `4`，后两批用 `1`）；并发修复（`c56a41f`）后两者结果等价。主口径批次运行时未安装 nltk，故 `meta.bleu_backend=builtin`；装上 nltk 后执行 `score` 即可用同一批 `raw/` 复核（不会重跑检索）。
+> 三批之间唯一的运行参数差异是 `--concurrency`（修复前基线用 `4`，后两批用 `1`）；并发修复（`c56a41f`）后两者结果等价。主口径批次最初在未安装 nltk 的环境下以 `meta.bleu_backend=builtin` 产出，随后安装 nltk 并对**同一批 `raw/`** 执行 `score` 重判（`meta.command=score`、`rescore_only=true`，不重跑检索），归档的 `2026-11-12b-report.*` 即该 `nltk` 重判版：总体、分语言与逐题 `passed` 与 `builtin` 版完全一致（`best_similarity` 最大绝对误差 0.0）。
 >
 > 主口径批次的被测二进制为 `rust-core/target/release/codeseek`（`sha256` 前缀 `b1532bb1b43e3d65`），对应 commit `571fe6c`（`fix(hybrid-search): revert line_end schema, gate demotion to cpp`）。
 

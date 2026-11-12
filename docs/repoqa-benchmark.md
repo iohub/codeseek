@@ -292,8 +292,8 @@ repoqa.compute_score --model-output-path={model-output}.jsonl
 
 两轮改进路径（均在 `rust-core/` 内，切块与排序分离）：
 
-1. **74.0% → 82.0%（rust）**：`treesitter/parsers/rust.rs` 的 `parse_block` 补 `mod_item` 分支（此前 `mod tests` 子树零产出）+ `impl_item` 的 `full_range` 收窄到 `declaration_range`，rust 50.0% → 90.0%（+8.0pt，8 题翻转、0 回归）。
-2. **82.0% → 84.0%（cpp）**：`services/hybrid_search.rs` 的 `demote_enclosing_candidates` —— **排序期**父子包含降权，语言白名单 `ENCLOSING_DEMOTE_LANGUAGES = ["cpp"]`。即**已通过排序期包含降权（仅 cpp）把 cpp 从 45.0% 提升到 55.0%，整体 82.0% → 84.0%；切块层内容降级方案已实测否决（78.0%）**（见下表）。
+1. **修复前 74.0% → 上一轮 82.0%（rust）**：`treesitter/parsers/rust.rs` 的 `parse_block` 补 `mod_item` 分支（此前 `mod tests` 子树零产出）+ `impl_item` 的 `full_range` 收窄到 `declaration_range`，rust 上一轮前的 50.0% → 上一轮的 90.0%（+8.0pt，8 题翻转、0 回归）。
+2. **上一轮 82.0% → 当前 84.0%（cpp）**：`services/hybrid_search.rs` 的 `demote_enclosing_candidates` —— **排序期**父子包含降权，语言白名单 `ENCLOSING_DEMOTE_LANGUAGES = ["cpp"]`。即**已通过排序期包含降权（仅 cpp）把 cpp 从 45.0% 提升到 55.0%，整体 82.0% → 84.0%；切块层内容降级方案已实测否决（78.0%）**（见下表）。
 
 **已实测否决的方案（避免重走，均为清索引全量重跑）**
 
@@ -304,6 +304,6 @@ repoqa.compute_score --model-output-path={model-output}.jsonl
 | BM25 存真实 `line_end` | tantivy schema 增 STORED `line_start`/`line_end` 并按边界回填 | 48.0%（rust 全 `unknown_empty`、express 10 题全空） | **回退**：按 `line_end` 切片产生空正文，已 `git revert` |
 | **排序期包含降权（仅 cpp）** | 同上 + `cpp` 门控 | **84.0%（cpp 55%，其余零回归）** | **采用**（当前主口径） |
 
-关于 cpp 的现状：本轮之后 cpp 的瓶颈**已从"切块粒度"转为"召回/排序"**——剩余 9 道 cpp 失败题中仅 2 道与 needle 同名（`below_threshold`），另 7 道为 `wrong_target`（返回了别的符号）。因此"cpp 是最大短板、建议做 chunker 包含剪枝"这条旧结论**已不再成立**：包含问题已用**排序期**手段解决，切块层的"减内容"改动已被 78.0% 的实测否决，后续应从 cpp 符号覆盖（宏、模板特化、匿名 namespace 内静态函数）与同名符号排序入手。
+关于 cpp 的现状：本轮之后 cpp 的瓶颈**已从"切块粒度"转为"召回/排序"**——剩余 9 道 cpp 失败题中仅 2 道与 needle 同名（`below_threshold`），另 7 道为 `wrong_target`（返回了别的符号）。因此"cpp 是最大短板、建议做 chunker 包含剪枝"这条旧结论**已不再成立**：已通过**排序期**父子包含降权（语言门控仅 cpp）把 cpp 由 45.0% 提升至 55.0%，总体 82.0%→84.0%；而切块层内容降级方案实测 78.0% 已否决（会制造"短文档 + 符号名完美命中"的诱饵抢 rank1，正文只剩签名 → BLEU≈0）。后续应从 cpp 符号覆盖（宏、模板特化、匿名 namespace 内静态函数）与同名符号排序入手。
 
 > 口径提醒：本节分数与第 6 节官方榜（gpt-4o / claude-3-opus 等 90.6）**不可直接对比**，也不构成"codeseek 强于某 LLM"的结论——任务形态（检索 vs 长上下文生成）、候选集（10 条 needle vs 全仓库）与输入（源文件快照 vs 16K 依赖排序上下文）都不同。
