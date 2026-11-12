@@ -262,8 +262,14 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 name="AppsRetrieval",
                 hf_dataset="CoIR-Retrieval/apps",
                 layout=_DEFAULT_LAYOUT,
+                doc_ext=".py",
+                code_like=True,
                 language="python",
-                note="competitive-programming solutions; corpus 8,765 rows.",
+                note=(
+                    "competitive-programming solutions; corpus 8,765 rows. "
+                    "doc_ext is .py (not .txt): codeseek's indexer only picks up "
+                    "cpp/py/java/rs/ts/tsx/js/go, so .txt corpora index as 0 files."
+                ),
             ),
         ),
         (
@@ -282,8 +288,14 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 name="CodeTransOceanContest",
                 hf_dataset="CoIR-Retrieval/codetrans-contest",
                 layout=_DEFAULT_LAYOUT,
-                language="text",
-                note="contest-level code translation pairs; corpus 1,008 rows.",
+                doc_ext=".cpp",
+                code_like=True,
+                language="cpp",
+                note=(
+                    "contest-level code translation pairs; corpus 1,008 rows. "
+                    "corpus text is C++ source, so it is materialized as .cpp "
+                    "(codeseek does not index .txt)."
+                ),
             ),
         ),
         (
@@ -292,8 +304,14 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 name="CodeTransOceanDL",
                 hf_dataset="CoIR-Retrieval/codetrans-dl",
                 layout=_DEFAULT_LAYOUT,
+                doc_ext=".py",
+                code_like=True,
                 language="python",
-                note="deep-learning framework API translation pairs; corpus 816 rows.",
+                note=(
+                    "deep-learning framework API translation pairs; corpus 816 rows. "
+                    "corpus text is Python source, so it is materialized as .py "
+                    "(codeseek does not index .txt)."
+                ),
             ),
         ),
         (
