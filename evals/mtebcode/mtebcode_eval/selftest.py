@@ -299,8 +299,8 @@ def _check_data_helpers(checker: _Checker) -> None:
         ",".join(data.DEFAULT_TASKS),
     )
     checker.check(
-        "注册表 13 个任务且都有 doc_ext/code_like",
-        len(data.TASKS) == 13 and all(spec.doc_ext.startswith(".") for spec in data.TASKS.values()),
+        "注册表 15 个任务且都有 doc_ext/code_like",
+        len(data.TASKS) == 15 and all(spec.doc_ext.startswith(".") for spec in data.TASKS.values()),
         f"{len(data.TASKS)} tasks",
     )
 
@@ -329,21 +329,25 @@ def _check_data_helpers(checker: _Checker) -> None:
         repr(data.diff_postimage(indent_diff)),
     )
 
-    codeedit_specs = [name for name in data.TASKS if name.startswith("CodeEditSearchRetrieval-")]
+    # java / ruby 也注册在同一数据集下，但带 excluded_reason（不可选中）：这里只看**可运行**的
+    # 语言子任务。同时断言 -javascript 已被 operator 决定移除（注册表里不允许再出现可运行的 .js 任务）。
+    codeedit_all = [name for name in data.TASKS if name.startswith("CodeEditSearchRetrieval-")]
+    codeedit_specs = [name for name in codeedit_all if not data.TASKS[name].excluded_reason]
     checker.check(
-        "3 个 CodeEditSearchRetrieval 语言子任务都开启 diff_postimage 且配额 20",
+        "3 个可运行的 CodeEditSearchRetrieval 子任务（go/python/typescript）开启 diff_postimage 且配额 20",
         sorted(codeedit_specs)
         == [
             "CodeEditSearchRetrieval-go",
-            "CodeEditSearchRetrieval-javascript",
             "CodeEditSearchRetrieval-python",
+            "CodeEditSearchRetrieval-typescript",
         ]
-        and all(data.TASKS[name].diff_postimage and data.TASKS[name].query_quota == 20 for name in codeedit_specs),
+        and all(data.TASKS[name].diff_postimage and data.TASKS[name].query_quota == 20 for name in codeedit_specs)
+        and "CodeEditSearchRetrieval-javascript" not in data.TASKS,
         ",".join(codeedit_specs),
     )
     checker.check(
         "3 个语言子任务的 doc_ext 都在 codeseek 白名单内",
-        {data.TASKS[name].doc_ext for name in codeedit_specs} == {".py", ".go", ".js"},
+        {data.TASKS[name].doc_ext for name in codeedit_specs} == {".py", ".go", ".ts"},
         str(sorted({data.TASKS[name].doc_ext for name in codeedit_specs})),
     )
     checker.check(
@@ -361,6 +365,8 @@ def _check_data_helpers(checker: _Checker) -> None:
             "AppsRetrieval",
             "CodeTransOceanContest",
             "CodeTransOceanDL",
+            "CodeEditSearchRetrieval-java",
+            "CodeEditSearchRetrieval-ruby",
             "CodeFeedbackST",
             "CodeFeedbackMT",
             "StackOverflowQA",
@@ -370,7 +376,7 @@ def _check_data_helpers(checker: _Checker) -> None:
         if not data.TASKS[name].excluded_reason
     ]
     checker.check(
-        "8 个已剔除任务都带 excluded_reason",
+        "10 个已剔除任务（含 java / ruby）都带 excluded_reason",
         not excluded_without_reason,
         ",".join(excluded_without_reason),
     )

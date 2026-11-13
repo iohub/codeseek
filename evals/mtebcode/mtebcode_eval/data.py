@@ -356,10 +356,17 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
         # ---- 第 2 批（全短 query 任务集）：CodeEditSearchRetrieval 的语言子任务 ----
         # config/split 于本机逐条实测（/splits + /rows + HF parquet 仓库三方核对）：
         #   * 该数据集所有 config **只有 train 一个 split**；
-        #   * go / javascript / python：corpus + queries + qrels 三个接口均 HTTP 200（各 1,000 行）；
+        #   * go / python：corpus + queries + qrels 三个接口均 HTTP 200（各 1,000 行）；
+        #   * typescript：datasets-server 的 /rows 对三个 config 全部 500，但数据集**官方 parquet**
+        #     在本机 HF 缓存里可读（corpus 320,945 B / queries 48,594 B / qrels 48,818 B，各 1,000 行），
+        #     因此该语言必须走 `--parquet-cache`；`{lang}-corpus` 目录命名正是官方文件布局，
+        #     `ParquetRows._matches` 天然解析得到，不需要任何额外分支；
+        #   * javascript：**已被 operator 决定移除**（引擎对该语言的处理不满足评测要求），
+        #     原来那条 -javascript spec 已删除，位置由 -typescript 接替；旧数字只作为历史留在
+        #     results/README.md，不允许再被选中，避免污染批次对比；
         #   * java：只有 java-corpus / java-queries，**仓库里根本没有 java-qrels**（/rows 404），
         #     因此 java 不可用（注意 java 本身在 codeseek 白名单里，缺的是 qrels 那一半）；
-        #   * ruby / typescript：三个 config 的 /rows 全部 500（parquet 读不出来）；.rb 另不在白名单。
+        #   * ruby：三个 config 的 /rows 全部 500，本地也没有 parquet；.rb 另不在索引白名单。
         # qrels split 优先级仍是 test → valid → train，实际只会落到 train。
         (
             "CodeEditSearchRetrieval-python",
@@ -393,18 +400,61 @@ TASKS: "OrderedDict[str, TaskSpec]" = OrderedDict(
                 note="same dataset, go sub-config; queries 19-1529 chars (median 45).",
             ),
         ),
+        # REMOVED BY OPERATOR DECISION -- the `-javascript` entry used to live here:
+        #   name="CodeEditSearchRetrieval-javascript", doc_ext=".js", language="javascript", 20 queries.
+        # It was dropped by operator decision (the engine's handling of that language did not meet the
+        # evaluation requirement) and replaced by `-typescript` below. No runnable spec is registered for
+        # it, so `--tasks` can no longer select it; its old numbers survive only as history in
+        # results/README.md. Re-adding it would require a deliberate, documented decision.
         (
-            "CodeEditSearchRetrieval-javascript",
+            "CodeEditSearchRetrieval-typescript",
             TaskSpec(
-                name="CodeEditSearchRetrieval-javascript",
+                name="CodeEditSearchRetrieval-typescript",
                 hf_dataset="mteb/CodeEditSearchRetrieval",
-                layout=_lang_layout("javascript", corpus_split="train", queries_split="train"),
-                doc_ext=".js",
+                layout=_lang_layout("typescript", corpus_split="train", queries_split="train"),
+                doc_ext=".ts",
                 code_like=True,
-                language="javascript",
+                language="typescript",
                 query_quota=20,
                 diff_postimage=True,
-                note="same dataset, javascript sub-config; queries 18-601 chars (median 43).",
+                note=(
+                    "same dataset, typescript sub-config; queries 19-659 chars (median 44, 3.6% > 200). "
+                    "datasets-server /rows answers 500 for all three configs, so this language is read "
+                    "from the official parquet files through --parquet-cache (corpus 320,945 B / "
+                    "queries 48,594 B / qrels 48,818 B, 1,000 rows each). hash _ids -> scan fallback."
+                ),
+            ),
+        ),
+        (
+            "CodeEditSearchRetrieval-java",
+            TaskSpec(
+                name="CodeEditSearchRetrieval-java",
+                hf_dataset="mteb/CodeEditSearchRetrieval",
+                layout=_lang_layout("java", corpus_split="train", queries_split="train"),
+                doc_ext=".java",
+                code_like=True,
+                language="java",
+                excluded_reason="java-qrels config does not exist in the dataset (404)",
+                note=(
+                    "java-corpus and java-queries exist (1,000 rows each), but the repository has no "
+                    "java-qrels at all, so there is no relevance signal to score against."
+                ),
+            ),
+        ),
+        (
+            "CodeEditSearchRetrieval-ruby",
+            TaskSpec(
+                name="CodeEditSearchRetrieval-ruby",
+                hf_dataset="mteb/CodeEditSearchRetrieval",
+                layout=_lang_layout("ruby", corpus_split="train", queries_split="train"),
+                doc_ext=".rb",
+                code_like=True,
+                language="ruby",
+                excluded_reason="all three configs return 500 and .rb is outside the indexer whitelist",
+                note=(
+                    "no ruby parquet exists in the local cache either; even with readable data, .rb is "
+                    "not in codeseek's is_supported_file whitelist, so the corpus would index as 0 files."
+                ),
             ),
         ),
     )
