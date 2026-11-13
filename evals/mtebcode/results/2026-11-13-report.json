@@ -1,19 +1,19 @@
 {
   "meta": {
-    "generated_at": "2026-11-12T11:51:54+00:00",
+    "generated_at": "2026-11-13T02:25:45+00:00",
     "benchmark": "MTEB(Code, v1)",
     "command": "run",
     "tasks": [
       "CodeEditSearchRetrieval-go",
-      "CodeEditSearchRetrieval-javascript",
       "CodeEditSearchRetrieval-python",
+      "CodeEditSearchRetrieval-typescript",
       "CosQA"
     ],
     "dataset_splits": {
       "CosQA": "test",
       "CodeEditSearchRetrieval-python": "train",
       "CodeEditSearchRetrieval-go": "train",
-      "CodeEditSearchRetrieval-javascript": "train"
+      "CodeEditSearchRetrieval-typescript": "train"
     },
     "n_queries": 100,
     "n_queries_all": 100,
@@ -23,7 +23,7 @@
     "concurrency": 4,
     "search_timeout_s": 180.0,
     "init_timeout_s": 1800.0,
-    "elapsed_s": 68.8,
+    "elapsed_s": 75.2,
     "mode_counts": {
       "hybrid": 100
     },
@@ -45,20 +45,20 @@
     "seed": 42,
     "corpus_size": 300,
     "limit_queries": 20,
-    "sampling_fingerprint": "2986c8ffabe1d0e2",
+    "sampling_fingerprint": "94e480122f909def",
     "prepare_warnings": [],
     "mode_ratio": {
       "hybrid": 1.0,
       "name_fallback": 0.0,
       "unknown_empty": 0.0
     },
-    "workdir": "/tmp/mtebcode-short"
+    "workdir": "/tmp/mtebcode-ts"
   },
   "aggregate": {
-    "mean_ndcg_at_10": 0.5339205817405623,
-    "mean_recall_at_10": 0.6,
-    "mean_mrr_at_10": 0.5128273809523809,
-    "mean_recall_at_k": 0.6,
+    "mean_ndcg_at_10": 0.5857543695496148,
+    "mean_recall_at_10": 0.6375,
+    "mean_mrr_at_10": 0.5687500000000001,
+    "mean_recall_at_k": 0.6375,
     "n_tasks": 4,
     "n_tasks_scored": 4,
     "n_queries": 100,
@@ -106,9 +106,9 @@
         "n_queries": 20,
         "n_scored": 20,
         "n_skipped": 0,
-        "ndcg_at_10": 0.4882004945703363,
+        "ndcg_at_10": 0.48934418725907075,
         "recall_at_10": 0.55,
-        "mrr_at_10": 0.46964285714285714,
+        "mrr_at_10": 0.4708333333333334,
         "recall_at_k": 0.55,
         "k": 10,
         "mode_counts": {
@@ -119,14 +119,14 @@
         "mean_unmapped": 0.0,
         "with_errors": 0
       },
-      "CodeEditSearchRetrieval-javascript": {
+      "CodeEditSearchRetrieval-typescript": {
         "n_queries": 20,
         "n_scored": 20,
         "n_skipped": 0,
-        "ndcg_at_10": 0.2653423693561944,
-        "recall_at_10": 0.35,
-        "mrr_at_10": 0.24,
-        "recall_at_k": 0.35,
+        "ndcg_at_10": 0.4715338279036697,
+        "recall_at_10": 0.5,
+        "mrr_at_10": 0.4625,
+        "recall_at_k": 0.5,
         "k": 10,
         "mode_counts": {
           "hybrid": 20
@@ -169,8 +169,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.759,
-      "retrieved_at": "2026-11-12T11:50:49+00:00"
+      "elapsed_s": 2.464,
+      "retrieved_at": "2026-11-13T02:24:34+00:00"
     },
     {
       "task_id": "cosqa__q0001",
@@ -202,8 +202,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 3.99,
-      "retrieved_at": "2026-11-12T11:50:50+00:00"
+      "elapsed_s": 4.465,
+      "retrieved_at": "2026-11-13T02:24:36+00:00"
     },
     {
       "task_id": "cosqa__q0002",
@@ -235,8 +235,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.891,
-      "retrieved_at": "2026-11-12T11:50:49+00:00"
+      "elapsed_s": 4.42,
+      "retrieved_at": "2026-11-13T02:24:36+00:00"
     },
     {
       "task_id": "cosqa__q0003",
@@ -268,8 +268,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.749,
-      "retrieved_at": "2026-11-12T11:50:49+00:00"
+      "elapsed_s": 5.16,
+      "retrieved_at": "2026-11-13T02:24:37+00:00"
     },
     {
       "task_id": "cosqa__q0004",
@@ -293,7 +293,7 @@
         "d8907",
         "d8908",
         "d8966",
-        "d15945"
+        "d15901"
       ],
       "gold_doc_ids": [
         "d20146"
@@ -301,8 +301,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.21,
-      "retrieved_at": "2026-11-12T11:50:51+00:00"
+      "elapsed_s": 2.957,
+      "retrieved_at": "2026-11-13T02:24:37+00:00"
     },
     {
       "task_id": "cosqa__q0005",
@@ -334,8 +334,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.462,
-      "retrieved_at": "2026-11-12T11:50:51+00:00"
+      "elapsed_s": 2.802,
+      "retrieved_at": "2026-11-13T02:24:39+00:00"
     },
     {
       "task_id": "cosqa__q0006",
@@ -367,8 +367,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.811,
-      "retrieved_at": "2026-11-12T11:50:52+00:00"
+      "elapsed_s": 4.3,
+      "retrieved_at": "2026-11-13T02:24:40+00:00"
     },
     {
       "task_id": "cosqa__q0007",
@@ -400,8 +400,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.583,
-      "retrieved_at": "2026-11-12T11:50:53+00:00"
+      "elapsed_s": 4.038,
+      "retrieved_at": "2026-11-13T02:24:41+00:00"
     },
     {
       "task_id": "cosqa__q0008",
@@ -433,8 +433,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 3.64,
-      "retrieved_at": "2026-11-12T11:50:55+00:00"
+      "elapsed_s": 2.516,
+      "retrieved_at": "2026-11-13T02:24:39+00:00"
     },
     {
       "task_id": "cosqa__q0009",
@@ -466,8 +466,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.362,
-      "retrieved_at": "2026-11-12T11:50:54+00:00"
+      "elapsed_s": 2.28,
+      "retrieved_at": "2026-11-13T02:24:41+00:00"
     },
     {
       "task_id": "cosqa__q0010",
@@ -499,8 +499,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 4.096,
-      "retrieved_at": "2026-11-12T11:50:56+00:00"
+      "elapsed_s": 2.265,
+      "retrieved_at": "2026-11-13T02:24:42+00:00"
     },
     {
       "task_id": "cosqa__q0011",
@@ -532,8 +532,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.912,
-      "retrieved_at": "2026-11-12T11:50:55+00:00"
+      "elapsed_s": 2.232,
+      "retrieved_at": "2026-11-13T02:24:42+00:00"
     },
     {
       "task_id": "cosqa__q0012",
@@ -565,8 +565,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.578,
-      "retrieved_at": "2026-11-12T11:50:56+00:00"
+      "elapsed_s": 2.302,
+      "retrieved_at": "2026-11-13T02:24:43+00:00"
     },
     {
       "task_id": "cosqa__q0013",
@@ -598,8 +598,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.375,
-      "retrieved_at": "2026-11-12T11:50:57+00:00"
+      "elapsed_s": 2.292,
+      "retrieved_at": "2026-11-13T02:24:43+00:00"
     },
     {
       "task_id": "cosqa__q0014",
@@ -623,7 +623,7 @@
         "d5351",
         "d8986",
         "d8903",
-        "d5367"
+        "d20401"
       ],
       "gold_doc_ids": [
         "d20248"
@@ -631,8 +631,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.926,
-      "retrieved_at": "2026-11-12T11:50:58+00:00"
+      "elapsed_s": 2.284,
+      "retrieved_at": "2026-11-13T02:24:44+00:00"
     },
     {
       "task_id": "cosqa__q0015",
@@ -664,8 +664,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.814,
-      "retrieved_at": "2026-11-12T11:50:59+00:00"
+      "elapsed_s": 3.299,
+      "retrieved_at": "2026-11-13T02:24:46+00:00"
     },
     {
       "task_id": "cosqa__q0016",
@@ -688,8 +688,8 @@
         "d20299",
         "d8984",
         "d20530",
-        "d15927",
-        "d5307"
+        "d5307",
+        "d15927"
       ],
       "gold_doc_ids": [
         "d20299"
@@ -697,8 +697,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.924,
-      "retrieved_at": "2026-11-12T11:50:59+00:00"
+      "elapsed_s": 3.799,
+      "retrieved_at": "2026-11-13T02:24:47+00:00"
     },
     {
       "task_id": "cosqa__q0017",
@@ -722,7 +722,7 @@
         "d15931",
         "d8961",
         "d20153",
-        "d8951"
+        "d5368"
       ],
       "gold_doc_ids": [
         "d20301"
@@ -730,8 +730,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.392,
-      "retrieved_at": "2026-11-12T11:50:59+00:00"
+      "elapsed_s": 2.659,
+      "retrieved_at": "2026-11-13T02:24:46+00:00"
     },
     {
       "task_id": "cosqa__q0018",
@@ -763,8 +763,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.518,
-      "retrieved_at": "2026-11-12T11:51:01+00:00"
+      "elapsed_s": 2.642,
+      "retrieved_at": "2026-11-13T02:24:47+00:00"
     },
     {
       "task_id": "cosqa__q0019",
@@ -796,8 +796,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.603,
-      "retrieved_at": "2026-11-12T11:51:01+00:00"
+      "elapsed_s": 3.234,
+      "retrieved_at": "2026-11-13T02:24:49+00:00"
     },
     {
       "task_id": "cosqa__q0020",
@@ -829,8 +829,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.481,
-      "retrieved_at": "2026-11-12T11:51:02+00:00"
+      "elapsed_s": 4.848,
+      "retrieved_at": "2026-11-13T02:24:51+00:00"
     },
     {
       "task_id": "cosqa__q0021",
@@ -862,8 +862,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.385,
-      "retrieved_at": "2026-11-12T11:51:02+00:00"
+      "elapsed_s": 3.355,
+      "retrieved_at": "2026-11-13T02:24:50+00:00"
     },
     {
       "task_id": "cosqa__q0022",
@@ -885,9 +885,9 @@
       "top5_doc_ids": [
         "d20367",
         "d15943",
-        "d8931",
         "d15959",
-        "d5311"
+        "d5311",
+        "d8931"
       ],
       "gold_doc_ids": [
         "d20367"
@@ -895,8 +895,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.442,
-      "retrieved_at": "2026-11-12T11:51:03+00:00"
+      "elapsed_s": 3.269,
+      "retrieved_at": "2026-11-13T02:24:50+00:00"
     },
     {
       "task_id": "cosqa__q0023",
@@ -928,8 +928,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.428,
-      "retrieved_at": "2026-11-12T11:51:04+00:00"
+      "elapsed_s": 4.222,
+      "retrieved_at": "2026-11-13T02:24:53+00:00"
     },
     {
       "task_id": "cosqa__q0024",
@@ -961,8 +961,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.377,
-      "retrieved_at": "2026-11-12T11:51:04+00:00"
+      "elapsed_s": 3.414,
+      "retrieved_at": "2026-11-13T02:24:53+00:00"
     },
     {
       "task_id": "cosqa__q0025",
@@ -994,8 +994,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.859,
-      "retrieved_at": "2026-11-12T11:51:05+00:00"
+      "elapsed_s": 3.695,
+      "retrieved_at": "2026-11-13T02:24:54+00:00"
     },
     {
       "task_id": "cosqa__q0026",
@@ -1027,8 +1027,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 4.968,
-      "retrieved_at": "2026-11-12T11:51:08+00:00"
+      "elapsed_s": 3.508,
+      "retrieved_at": "2026-11-13T02:24:54+00:00"
     },
     {
       "task_id": "cosqa__q0027",
@@ -1060,8 +1060,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 4.349,
-      "retrieved_at": "2026-11-12T11:51:08+00:00"
+      "elapsed_s": 2.829,
+      "retrieved_at": "2026-11-13T02:24:56+00:00"
     },
     {
       "task_id": "cosqa__q0028",
@@ -1093,8 +1093,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.376,
-      "retrieved_at": "2026-11-12T11:51:06+00:00"
+      "elapsed_s": 2.926,
+      "retrieved_at": "2026-11-13T02:24:56+00:00"
     },
     {
       "task_id": "cosqa__q0029",
@@ -1126,8 +1126,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.203,
-      "retrieved_at": "2026-11-12T11:51:07+00:00"
+      "elapsed_s": 2.812,
+      "retrieved_at": "2026-11-13T02:24:57+00:00"
     },
     {
       "task_id": "cosqa__q0030",
@@ -1159,8 +1159,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.195,
-      "retrieved_at": "2026-11-12T11:51:09+00:00"
+      "elapsed_s": 2.526,
+      "retrieved_at": "2026-11-13T02:24:57+00:00"
     },
     {
       "task_id": "cosqa__q0031",
@@ -1192,8 +1192,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.952,
-      "retrieved_at": "2026-11-12T11:51:10+00:00"
+      "elapsed_s": 2.797,
+      "retrieved_at": "2026-11-13T02:24:59+00:00"
     },
     {
       "task_id": "cosqa__q0032",
@@ -1225,8 +1225,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.334,
-      "retrieved_at": "2026-11-12T11:51:10+00:00"
+      "elapsed_s": 2.634,
+      "retrieved_at": "2026-11-13T02:24:59+00:00"
     },
     {
       "task_id": "cosqa__q0033",
@@ -1248,8 +1248,8 @@
       "top5_doc_ids": [
         "d20530",
         "d5381",
-        "d8984",
         "d20299",
+        "d8984",
         "d5368"
       ],
       "gold_doc_ids": [
@@ -1258,8 +1258,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.628,
-      "retrieved_at": "2026-11-12T11:51:11+00:00"
+      "elapsed_s": 2.419,
+      "retrieved_at": "2026-11-13T02:24:59+00:00"
     },
     {
       "task_id": "cosqa__q0034",
@@ -1283,7 +1283,7 @@
         "d5312",
         "d5370",
         "d8923",
-        "d20299"
+        "d8984"
       ],
       "gold_doc_ids": [
         "d20532"
@@ -1291,8 +1291,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 3.388,
-      "retrieved_at": "2026-11-12T11:51:12+00:00"
+      "elapsed_s": 2.18,
+      "retrieved_at": "2026-11-13T02:24:59+00:00"
     },
     {
       "task_id": "cosqa__q0035",
@@ -1324,8 +1324,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.496,
-      "retrieved_at": "2026-11-12T11:51:12+00:00"
+      "elapsed_s": 2.317,
+      "retrieved_at": "2026-11-13T02:25:01+00:00"
     },
     {
       "task_id": "cosqa__q0036",
@@ -1357,8 +1357,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.307,
-      "retrieved_at": "2026-11-12T11:51:13+00:00"
+      "elapsed_s": 2.726,
+      "retrieved_at": "2026-11-13T02:25:02+00:00"
     },
     {
       "task_id": "cosqa__q0037",
@@ -1382,7 +1382,7 @@
         "d5362",
         "d5361",
         "d15905",
-        "d5368"
+        "d15923"
       ],
       "gold_doc_ids": [
         "d20577"
@@ -1390,8 +1390,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.732,
-      "retrieved_at": "2026-11-12T11:51:14+00:00"
+      "elapsed_s": 2.618,
+      "retrieved_at": "2026-11-13T02:25:02+00:00"
     },
     {
       "task_id": "cosqa__q0038",
@@ -1423,8 +1423,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.429,
-      "retrieved_at": "2026-11-12T11:51:14+00:00"
+      "elapsed_s": 2.747,
+      "retrieved_at": "2026-11-13T02:25:02+00:00"
     },
     {
       "task_id": "cosqa__q0039",
@@ -1456,8 +1456,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.522,
-      "retrieved_at": "2026-11-12T11:51:15+00:00"
+      "elapsed_s": 2.528,
+      "retrieved_at": "2026-11-13T02:25:04+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0000",
@@ -1489,8 +1489,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.222,
-      "retrieved_at": "2026-11-12T11:51:15+00:00"
+      "elapsed_s": 2.504,
+      "retrieved_at": "2026-11-13T02:25:04+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0001",
@@ -1513,8 +1513,8 @@
         "3b3c51cbf77085b4d5ccdbbc41a3c7ee8b67b713",
         "a16cffb7c3fe100e5e68a71e2dfcca26bf124464",
         "c4f51fd3c030f3d88f8545a94698ed4e9f5ef9bc",
-        "e81e25f1d97ef4f141e392bda736aaa6a37aadf5",
-        "6d928da6c3848c2fd9f34772033fb645767ae4c3"
+        "6d928da6c3848c2fd9f34772033fb645767ae4c3",
+        "e81e25f1d97ef4f141e392bda736aaa6a37aadf5"
       ],
       "gold_doc_ids": [
         "a16cffb7c3fe100e5e68a71e2dfcca26bf124464"
@@ -1522,8 +1522,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.403,
-      "retrieved_at": "2026-11-12T11:51:16+00:00"
+      "elapsed_s": 3.341,
+      "retrieved_at": "2026-11-13T02:25:05+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0002",
@@ -1555,8 +1555,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.827,
-      "retrieved_at": "2026-11-12T11:51:17+00:00"
+      "elapsed_s": 2.295,
+      "retrieved_at": "2026-11-13T02:25:04+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0003",
@@ -1580,7 +1580,7 @@
         "24bbd5dea392bc7206a939941f43a878baaf61dd",
         "d0c82bdd2d7e801c5bebc8ef0d87ed436e29fb82",
         "c68a69beb03047d7ea388704fbb12074b32216bc",
-        "398a3f8856b1390c2ad8a0fda2dd14eda4efbd2d"
+        "0f8b6f4a12c23e5498e8135a3f39da40c4333788"
       ],
       "gold_doc_ids": [
         "24bbd5dea392bc7206a939941f43a878baaf61dd"
@@ -1588,8 +1588,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.356,
-      "retrieved_at": "2026-11-12T11:51:17+00:00"
+      "elapsed_s": 3.15,
+      "retrieved_at": "2026-11-13T02:25:07+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0004",
@@ -1607,7 +1607,7 @@
       "n_returned": 20,
       "n_mapped": 20,
       "n_unmapped": 0,
-      "n_ranked": 14,
+      "n_ranked": 15,
       "top5_doc_ids": [
         "dad970e9db2d3985a4995982d91a995898c8781b",
         "f67abceeae7716cd385a308b26ce447e0277518f",
@@ -1621,8 +1621,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.386,
-      "retrieved_at": "2026-11-12T11:51:17+00:00"
+      "elapsed_s": 2.29,
+      "retrieved_at": "2026-11-13T02:25:06+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0005",
@@ -1654,8 +1654,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.303,
-      "retrieved_at": "2026-11-12T11:51:18+00:00"
+      "elapsed_s": 3.017,
+      "retrieved_at": "2026-11-13T02:25:07+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0006",
@@ -1687,8 +1687,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.288,
-      "retrieved_at": "2026-11-12T11:51:19+00:00"
+      "elapsed_s": 3.225,
+      "retrieved_at": "2026-11-13T02:25:08+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0007",
@@ -1720,8 +1720,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.624,
-      "retrieved_at": "2026-11-12T11:51:20+00:00"
+      "elapsed_s": 2.671,
+      "retrieved_at": "2026-11-13T02:25:09+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0008",
@@ -1753,8 +1753,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.562,
-      "retrieved_at": "2026-11-12T11:51:20+00:00"
+      "elapsed_s": 2.329,
+      "retrieved_at": "2026-11-13T02:25:09+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0009",
@@ -1772,12 +1772,12 @@
       "n_returned": 20,
       "n_mapped": 20,
       "n_unmapped": 0,
-      "n_ranked": 16,
+      "n_ranked": 17,
       "top5_doc_ids": [
         "73dfb1fc4ff62705f37b1128e0684e88be416d8f",
         "29a57097fb903f2849fe21647dd99e06509c364a",
-        "8ce6aa788573aa10758375d58881f03ff438db16",
         "d0c82bdd2d7e801c5bebc8ef0d87ed436e29fb82",
+        "8ce6aa788573aa10758375d58881f03ff438db16",
         "d7b89cf5e8a0102034b0d9ed7f28fbe7fb0bc167"
       ],
       "gold_doc_ids": [
@@ -1786,8 +1786,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.474,
-      "retrieved_at": "2026-11-12T11:51:21+00:00"
+      "elapsed_s": 2.644,
+      "retrieved_at": "2026-11-13T02:25:10+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0010",
@@ -1819,8 +1819,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.628,
-      "retrieved_at": "2026-11-12T11:51:22+00:00"
+      "elapsed_s": 2.419,
+      "retrieved_at": "2026-11-13T02:25:11+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0011",
@@ -1843,8 +1843,8 @@
         "6b49db80a4508c3cba7f410db8ed3f23b5234e3b",
         "2d6e0710dbc781f54295e18299be6f4c1bb0ec43",
         "b5e368437a600d78e22a53abe53c0103b20daa24",
-        "0ed4c7a502db204a6503dfa43e384d58632f44ab",
-        "8e755e7dc94b6966e73af5434d382fa1ecd15572"
+        "8e755e7dc94b6966e73af5434d382fa1ecd15572",
+        "0ed4c7a502db204a6503dfa43e384d58632f44ab"
       ],
       "gold_doc_ids": [
         "551ab95d733ed89fb88c9d6b91659499e0efcd7a"
@@ -1852,8 +1852,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.667,
-      "retrieved_at": "2026-11-12T11:51:22+00:00"
+      "elapsed_s": 3.436,
+      "retrieved_at": "2026-11-13T02:25:12+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0012",
@@ -1885,8 +1885,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.342,
-      "retrieved_at": "2026-11-12T11:51:22+00:00"
+      "elapsed_s": 3.244,
+      "retrieved_at": "2026-11-13T02:25:12+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0013",
@@ -1918,8 +1918,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 3.365,
-      "retrieved_at": "2026-11-12T11:51:24+00:00"
+      "elapsed_s": 2.37,
+      "retrieved_at": "2026-11-13T02:25:12+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0014",
@@ -1951,8 +1951,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 5.756,
-      "retrieved_at": "2026-11-12T11:51:28+00:00"
+      "elapsed_s": 2.34,
+      "retrieved_at": "2026-11-13T02:25:13+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0015",
@@ -1970,7 +1970,7 @@
       "n_returned": 20,
       "n_mapped": 20,
       "n_unmapped": 0,
-      "n_ranked": 18,
+      "n_ranked": 19,
       "top5_doc_ids": [
         "ee5cf0b47d50904061daf62c33741d50b848f02b",
         "7b8fc55b9c27b3001709b65b373b37394a9b332e",
@@ -1984,8 +1984,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 3.266,
-      "retrieved_at": "2026-11-12T11:51:25+00:00"
+      "elapsed_s": 2.322,
+      "retrieved_at": "2026-11-13T02:25:14+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0016",
@@ -2017,8 +2017,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 3.229,
-      "retrieved_at": "2026-11-12T11:51:26+00:00"
+      "elapsed_s": 3.646,
+      "retrieved_at": "2026-11-13T02:25:16+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0017",
@@ -2050,8 +2050,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.368,
-      "retrieved_at": "2026-11-12T11:51:27+00:00"
+      "elapsed_s": 3.002,
+      "retrieved_at": "2026-11-13T02:25:15+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0018",
@@ -2083,8 +2083,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.651,
-      "retrieved_at": "2026-11-12T11:51:28+00:00"
+      "elapsed_s": 2.304,
+      "retrieved_at": "2026-11-13T02:25:15+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalpython__q0019",
@@ -2116,8 +2116,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.556,
-      "retrieved_at": "2026-11-12T11:51:28+00:00"
+      "elapsed_s": 2.353,
+      "retrieved_at": "2026-11-13T02:25:17+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0000",
@@ -2149,8 +2149,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.414,
-      "retrieved_at": "2026-11-12T11:51:29+00:00"
+      "elapsed_s": 2.878,
+      "retrieved_at": "2026-11-13T02:25:18+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0001",
@@ -2170,8 +2170,8 @@
       "n_unmapped": 0,
       "n_ranked": 17,
       "top5_doc_ids": [
-        "5241cdb4403e99e6debd06c2d6ed2d8e4d1f3bfd",
         "0e93f1795a8a479ce4ac381d103727b55f68b1e4",
+        "5241cdb4403e99e6debd06c2d6ed2d8e4d1f3bfd",
         "949b59607ba26cdf2ab1d740265005d1d02b42ad",
         "c9ededb515aefc2e14a021cd38b9313845463524",
         "027a290a2d885cf93d296769570a840a78b2981d"
@@ -2182,8 +2182,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 3.905,
-      "retrieved_at": "2026-11-12T11:51:32+00:00"
+      "elapsed_s": 2.218,
+      "retrieved_at": "2026-11-13T02:25:18+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0002",
@@ -2215,8 +2215,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 3.588,
-      "retrieved_at": "2026-11-12T11:51:32+00:00"
+      "elapsed_s": 2.544,
+      "retrieved_at": "2026-11-13T02:25:19+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0003",
@@ -2248,8 +2248,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.938,
-      "retrieved_at": "2026-11-12T11:51:31+00:00"
+      "elapsed_s": 2.478,
+      "retrieved_at": "2026-11-13T02:25:19+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0004",
@@ -2281,8 +2281,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.715,
-      "retrieved_at": "2026-11-12T11:51:32+00:00"
+      "elapsed_s": 2.562,
+      "retrieved_at": "2026-11-13T02:25:20+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0005",
@@ -2314,8 +2314,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.692,
-      "retrieved_at": "2026-11-12T11:51:34+00:00"
+      "elapsed_s": 2.482,
+      "retrieved_at": "2026-11-13T02:25:21+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0006",
@@ -2347,8 +2347,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.536,
-      "retrieved_at": "2026-11-12T11:51:34+00:00"
+      "elapsed_s": 3.047,
+      "retrieved_at": "2026-11-13T02:25:22+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0007",
@@ -2366,7 +2366,7 @@
       "n_returned": 20,
       "n_mapped": 20,
       "n_unmapped": 0,
-      "n_ranked": 14,
+      "n_ranked": 15,
       "top5_doc_ids": [
         "ff758e9bb9ca6a6750d21f17cd9653126c467cef",
         "40809336d676a25237a2619bb7fb94849213a529",
@@ -2380,8 +2380,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.36,
-      "retrieved_at": "2026-11-12T11:51:34+00:00"
+      "elapsed_s": 2.451,
+      "retrieved_at": "2026-11-13T02:25:22+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0008",
@@ -2413,8 +2413,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 3.042,
-      "retrieved_at": "2026-11-12T11:51:35+00:00"
+      "elapsed_s": 3.749,
+      "retrieved_at": "2026-11-13T02:25:24+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0009",
@@ -2446,8 +2446,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.774,
-      "retrieved_at": "2026-11-12T11:51:37+00:00"
+      "elapsed_s": 3.688,
+      "retrieved_at": "2026-11-13T02:25:24+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0010",
@@ -2455,9 +2455,9 @@
       "query_id": "757",
       "query_text": "Remove default and increase channel size\n",
       "language": "go",
-      "ndcg_at_10": 0.3333333333333333,
+      "ndcg_at_10": 0.3562071871080222,
       "recall_at_10": 1.0,
-      "mrr_at_10": 0.14285714285714285,
+      "mrr_at_10": 0.16666666666666666,
       "recall_at_k": 1.0,
       "k": 10,
       "search_limit": 20,
@@ -2479,8 +2479,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.315,
-      "retrieved_at": "2026-11-12T11:51:36+00:00"
+      "elapsed_s": 3.84,
+      "retrieved_at": "2026-11-13T02:25:26+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0011",
@@ -2504,7 +2504,7 @@
         "075bcf92c669fd55c16629e37626aa94a37fe697",
         "1f3f00407aec774e47493353390622ee1efd5a24",
         "ded70ace33c11aa33c8c565cbf852b0b31afa055",
-        "46688a6f88fdf54ed64b0669386cda3024c080c7"
+        "0f81fc87f193ce12bf44bdbef149514ced6ad36e"
       ],
       "gold_doc_ids": [
         "ded70ace33c11aa33c8c565cbf852b0b31afa055"
@@ -2512,8 +2512,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.486,
-      "retrieved_at": "2026-11-12T11:51:37+00:00"
+      "elapsed_s": 3.773,
+      "retrieved_at": "2026-11-13T02:25:26+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0012",
@@ -2536,8 +2536,8 @@
         "68a9954511dd7825dc9b3744a68b51398ce120b1",
         "b8b3602976fd85e310d7cb718c6654617a1b4c94",
         "0ffb77da6e1d1eb8873e70aa081ac3bbffd8dd6f",
-        "52ceb9fbc6674c9fa4f409d989b9b8c832e1aed7",
-        "50c1804b294cfdebf84285c312124583867d3e34"
+        "50bcc11856a4cf4951234cb29a56993789d69c7e",
+        "52ceb9fbc6674c9fa4f409d989b9b8c832e1aed7"
       ],
       "gold_doc_ids": [
         "68a9954511dd7825dc9b3744a68b51398ce120b1"
@@ -2545,8 +2545,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.633,
-      "retrieved_at": "2026-11-12T11:51:37+00:00"
+      "elapsed_s": 3.685,
+      "retrieved_at": "2026-11-13T02:25:28+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0013",
@@ -2578,8 +2578,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.78,
-      "retrieved_at": "2026-11-12T11:51:39+00:00"
+      "elapsed_s": 3.307,
+      "retrieved_at": "2026-11-13T02:25:28+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0014",
@@ -2611,8 +2611,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.539,
-      "retrieved_at": "2026-11-12T11:51:39+00:00"
+      "elapsed_s": 2.977,
+      "retrieved_at": "2026-11-13T02:25:29+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0015",
@@ -2636,7 +2636,7 @@
         "6205608474a3637d975e8fa4313a78d7e4db51ad",
         "55ddd24e0357d733b321872fda8b183025f6a2c4",
         "7505cfa0538d05a52c70ebb7a8f844d9887ac9dc",
-        "433745d068bf6bceb9c438e4bd0a8d713de5ed77"
+        "a9748f2657b41b03a4209baa8a04e07ba1c023b8"
       ],
       "gold_doc_ids": [
         "6f2375c97130fc61eb62d9691ecd31878a68361f"
@@ -2644,8 +2644,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.551,
-      "retrieved_at": "2026-11-12T11:51:39+00:00"
+      "elapsed_s": 5.303,
+      "retrieved_at": "2026-11-13T02:25:31+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0016",
@@ -2663,7 +2663,7 @@
       "n_returned": 20,
       "n_mapped": 20,
       "n_unmapped": 0,
-      "n_ranked": 19,
+      "n_ranked": 18,
       "top5_doc_ids": [
         "75e1284b2c13a1ab3423964c804df1688c9a6dbe",
         "68a9954511dd7825dc9b3744a68b51398ce120b1",
@@ -2677,8 +2677,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.348,
-      "retrieved_at": "2026-11-12T11:51:40+00:00"
+      "elapsed_s": 3.266,
+      "retrieved_at": "2026-11-13T02:25:31+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0017",
@@ -2710,8 +2710,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.778,
-      "retrieved_at": "2026-11-12T11:51:42+00:00"
+      "elapsed_s": 2.662,
+      "retrieved_at": "2026-11-13T02:25:30+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0018",
@@ -2743,8 +2743,8 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.293,
-      "retrieved_at": "2026-11-12T11:51:42+00:00"
+      "elapsed_s": 2.516,
+      "retrieved_at": "2026-11-13T02:25:31+00:00"
     },
     {
       "task_id": "codeeditsearchretrievalgo__q0019",
@@ -2767,8 +2767,8 @@
         "09980b8e6b94a854cded0147f3a904fa93b03484",
         "55ddd24e0357d733b321872fda8b183025f6a2c4",
         "8cbf5b0f35478eeb748c4593f583e4996f3da562",
-        "8fb49dc9153c4593b739a5950ae2bc8cbddc758f",
-        "ea9e6806e8f708aee08267b358de0cb6e9990925"
+        "ea9e6806e8f708aee08267b358de0cb6e9990925",
+        "8fb49dc9153c4593b739a5950ae2bc8cbddc758f"
       ],
       "gold_doc_ids": [
         "a4cffbaf359a022748413daa22da03f5b4119265"
@@ -2776,81 +2776,48 @@
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.342,
-      "retrieved_at": "2026-11-12T11:51:42+00:00"
+      "elapsed_s": 2.657,
+      "retrieved_at": "2026-11-13T02:25:33+00:00"
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0000",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "115",
-      "query_text": "Fix up put webpack build\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.0,
-      "recall_at_10": 0.0,
-      "mrr_at_10": 0.0,
-      "recall_at_k": 0.0,
+      "task_id": "codeeditsearchretrievaltypescript__q0000",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "147",
+      "query_text": "Implement hasXWon, hasOWon, and isDraw methods\n",
+      "language": "typescript",
+      "ndcg_at_10": 1.0,
+      "recall_at_10": 1.0,
+      "mrr_at_10": 1.0,
+      "recall_at_k": 1.0,
       "k": 10,
       "search_limit": 20,
       "mode": "hybrid",
       "n_returned": 20,
       "n_mapped": 20,
       "n_unmapped": 0,
-      "n_ranked": 12,
+      "n_ranked": 11,
       "top5_doc_ids": [
-        "681918b12f7f64dabe1a93b2c245aafe78a98994",
-        "f0d015f6b45f599518e247c24c152fa5f17ba017",
-        "32cc7a7b81c3aea0e2a23817d1274e8352dbf04b",
-        "1830e19dabf0d34667bdc4e94cce2218be8be87c",
-        "b6402d6116fbea0d9368931db3e3415028ac9035"
+        "4d689b06112bd5b6113dca8272c87a5ddefcc09b",
+        "a9c050cf8318e0f477071c71023cd6cf38a73aca",
+        "c6c31a69852893edd7aa62d64e8865d484139703",
+        "ffc6edf6a6119b9a29ee9570b0fb22724c8a0ea7",
+        "d442eb06da8456d002a746f66dd44a2b47b190d5"
       ],
       "gold_doc_ids": [
-        "736b8d27d4924a9aa29f82894bcf541aac62c18f"
+        "4d689b06112bd5b6113dca8272c87a5ddefcc09b"
       ],
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 1.951,
-      "retrieved_at": "2026-11-12T11:51:42+00:00"
+      "elapsed_s": 2.339,
+      "retrieved_at": "2026-11-13T02:25:33+00:00"
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0001",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "139",
-      "query_text": "Use parseInt to test Babel major version.\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.0,
-      "recall_at_10": 0.0,
-      "mrr_at_10": 0.0,
-      "recall_at_k": 0.0,
-      "k": 10,
-      "search_limit": 20,
-      "mode": "hybrid",
-      "n_returned": 20,
-      "n_mapped": 20,
-      "n_unmapped": 0,
-      "n_ranked": 14,
-      "top5_doc_ids": [
-        "b6402d6116fbea0d9368931db3e3415028ac9035",
-        "ad92334950a29dbae2388c795bc086c71cc5649b",
-        "6f98235d97e4bdd67990176cfd3c2d098d56ad1d",
-        "14858929325c953d0c99a0569d61d1442c0232a0",
-        "644f74f1c8ceca5f89a7d5d56f523ff297e8c804"
-      ],
-      "gold_doc_ids": [
-        "be71e987e3275b8b21ac60bdda33dc8a0e97405c"
-      ],
-      "qrels_size": 1,
-      "skipped": false,
-      "error": "",
-      "elapsed_s": 2.203,
-      "retrieved_at": "2026-11-12T11:51:44+00:00"
-    },
-    {
-      "task_id": "codeeditsearchretrievaljavascript__q0002",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "140",
-      "query_text": "Append selected choice to log in web interface\n",
-      "language": "javascript",
+      "task_id": "codeeditsearchretrievaltypescript__q0001",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "177",
+      "query_text": "Add comment explaining purpose of file\n",
+      "language": "typescript",
       "ndcg_at_10": 0.0,
       "recall_at_10": 0.0,
       "mrr_at_10": 0.0,
@@ -2863,31 +2830,163 @@
       "n_unmapped": 0,
       "n_ranked": 18,
       "top5_doc_ids": [
-        "7b68f91c32d8b47574b66807106fda5163d7d407",
-        "d9c47e47b4ccd249687d38f422b9b1d62489e5c1",
-        "a59d64c52c05e3afe9da86fc523ac2597f040cf5",
-        "0fdd418274a18fa954510053fd34c4730d2c7267",
-        "243949b415c875f56f01ef2793ebd23e4ddc88a4"
+        "d7be8867581c6582e54f911073a65a362b7f4ece",
+        "9a3b81daab3fd2ca3134eacc1425b8b42b783865",
+        "ef481d8edce24412eee6430d6564461a9025ce46",
+        "afd220aa4f20dd4a996294b069fe0dd0cb1a8768",
+        "f18a8787adf25e16ae1e37617a760ea4093196d9"
       ],
       "gold_doc_ids": [
-        "54ae3d3d59e7eac4a29ff02225bcbb454632c181"
+        "7d458f2f0753f0c55b27a0e4059770163d877f97"
       ],
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.233,
-      "retrieved_at": "2026-11-12T11:51:44+00:00"
+      "elapsed_s": 2.254,
+      "retrieved_at": "2026-11-13T02:25:33+00:00"
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0003",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "204",
-      "query_text": "Make `isPlaying` function more straightforward\n",
-      "language": "javascript",
+      "task_id": "codeeditsearchretrievaltypescript__q0002",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "181",
+      "query_text": "React: Fix react-docgen for JS files\n",
+      "language": "typescript",
       "ndcg_at_10": 0.0,
       "recall_at_10": 0.0,
       "mrr_at_10": 0.0,
       "recall_at_k": 0.0,
+      "k": 10,
+      "search_limit": 20,
+      "mode": "hybrid",
+      "n_returned": 20,
+      "n_mapped": 20,
+      "n_unmapped": 0,
+      "n_ranked": 18,
+      "top5_doc_ids": [
+        "a10bad0248e918c9badc42f5710b14a61cd667bf",
+        "f18a8787adf25e16ae1e37617a760ea4093196d9",
+        "d442eb06da8456d002a746f66dd44a2b47b190d5",
+        "d2b184b0b1f6da24f944c04e0b8291119d9c5f68",
+        "d8d77bc9ebb59bdb1d692a9fb2b41f9b804b1db0"
+      ],
+      "gold_doc_ids": [
+        "9f282bf8846ab24c14d7ccd598487d562306699a"
+      ],
+      "qrels_size": 1,
+      "skipped": false,
+      "error": "",
+      "elapsed_s": 1.992,
+      "retrieved_at": "2026-11-13T02:25:33+00:00"
+    },
+    {
+      "task_id": "codeeditsearchretrievaltypescript__q0003",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "220",
+      "query_text": "Add 2 tests, 1 failing\n",
+      "language": "typescript",
+      "ndcg_at_10": 0.0,
+      "recall_at_10": 0.0,
+      "mrr_at_10": 0.0,
+      "recall_at_k": 0.0,
+      "k": 10,
+      "search_limit": 20,
+      "mode": "hybrid",
+      "n_returned": 20,
+      "n_mapped": 20,
+      "n_unmapped": 0,
+      "n_ranked": 16,
+      "top5_doc_ids": [
+        "7fbeb670ec64ceaf271193d9e6cad0b5dc3534b9",
+        "b0e355367c227b508e448f1acc60ad834d9c2485",
+        "3c01fce00cf8dc7ee2275cd4ae5c9b0cb401673c",
+        "7958f45d24461ea0ded4e87a5d3a0b5509b2681b",
+        "d8d77bc9ebb59bdb1d692a9fb2b41f9b804b1db0"
+      ],
+      "gold_doc_ids": [
+        "e315e8aa4ce8acc3d4173f8b43f034b0e802c731"
+      ],
+      "qrels_size": 1,
+      "skipped": false,
+      "error": "",
+      "elapsed_s": 2.22,
+      "retrieved_at": "2026-11-13T02:25:35+00:00"
+    },
+    {
+      "task_id": "codeeditsearchretrievaltypescript__q0004",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "233",
+      "query_text": "Update tests to check for date\n",
+      "language": "typescript",
+      "ndcg_at_10": 0.0,
+      "recall_at_10": 0.0,
+      "mrr_at_10": 0.0,
+      "recall_at_k": 0.0,
+      "k": 10,
+      "search_limit": 20,
+      "mode": "hybrid",
+      "n_returned": 20,
+      "n_mapped": 20,
+      "n_unmapped": 0,
+      "n_ranked": 16,
+      "top5_doc_ids": [
+        "7958f45d24461ea0ded4e87a5d3a0b5509b2681b",
+        "7fbeb670ec64ceaf271193d9e6cad0b5dc3534b9",
+        "0f358e1f21a623ae7423fab7af955f1b2bf47336",
+        "be560ac73ca772b8a6184f0364c788311237ce37",
+        "799b78488d95996a67837ace1baf88830d3456c8"
+      ],
+      "gold_doc_ids": [
+        "3f085db5c340251930d9ca89cbc2250c55f493f5"
+      ],
+      "qrels_size": 1,
+      "skipped": false,
+      "error": "",
+      "elapsed_s": 2.513,
+      "retrieved_at": "2026-11-13T02:25:36+00:00"
+    },
+    {
+      "task_id": "codeeditsearchretrievaltypescript__q0005",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "277",
+      "query_text": "Add handler for the case document.documentElement is null\n",
+      "language": "typescript",
+      "ndcg_at_10": 0.0,
+      "recall_at_10": 0.0,
+      "mrr_at_10": 0.0,
+      "recall_at_k": 0.0,
+      "k": 10,
+      "search_limit": 20,
+      "mode": "hybrid",
+      "n_returned": 20,
+      "n_mapped": 20,
+      "n_unmapped": 0,
+      "n_ranked": 14,
+      "top5_doc_ids": [
+        "d2b184b0b1f6da24f944c04e0b8291119d9c5f68",
+        "25f95c40d65cf071d1e551c5185a008519ea3075",
+        "f4f99e96d7b57c431c7538d31b04c2b358128815",
+        "ae7c485ab6c600adc5626ccb69c95f785d7f0f94",
+        "c30821c7ef6cd8268ac7e66fa862e64590218bf5"
+      ],
+      "gold_doc_ids": [
+        "753c762f7837e2a924e16a7ef9020c417327b920"
+      ],
+      "qrels_size": 1,
+      "skipped": false,
+      "error": "",
+      "elapsed_s": 2.784,
+      "retrieved_at": "2026-11-13T02:25:36+00:00"
+    },
+    {
+      "task_id": "codeeditsearchretrievaltypescript__q0006",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "279",
+      "query_text": "Read recipes from web API\n",
+      "language": "typescript",
+      "ndcg_at_10": 1.0,
+      "recall_at_10": 1.0,
+      "mrr_at_10": 1.0,
+      "recall_at_k": 1.0,
       "k": 10,
       "search_limit": 20,
       "mode": "hybrid",
@@ -2896,60 +2995,27 @@
       "n_unmapped": 0,
       "n_ranked": 12,
       "top5_doc_ids": [
-        "86b3bd06d76d8ea3806acaf397cda97bff202127",
-        "2dfe519ec439159edaec9b63a6196935ca9f59ce",
-        "4b81900bbe4bbf113fbfb967ff37938ac96f071f",
-        "a59d64c52c05e3afe9da86fc523ac2597f040cf5",
-        "4b5caa131c3beb73dc4e18fe30f885a2ffb2b1c3"
+        "17e0ce594a81a88f37fabcc39cea6ee2ddb2db29",
+        "a1711158f3d3815c78f1b56ac133fe62efc489cb",
+        "c3de5579581dd3835ce8545e98a6a35f17e6c036",
+        "eb5eca250e11655a39dcb51bda8213a932cd3bd2",
+        "e84e8130dffdc79809ab2c933c517947be269511"
       ],
       "gold_doc_ids": [
-        "e3b2811e914d318ab1f51103a00bf52076c43d1a"
+        "17e0ce594a81a88f37fabcc39cea6ee2ddb2db29"
       ],
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.181,
-      "retrieved_at": "2026-11-12T11:51:44+00:00"
+      "elapsed_s": 2.834,
+      "retrieved_at": "2026-11-13T02:25:36+00:00"
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0004",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "261",
-      "query_text": "Refactor constructor to take advantage of __super__ member.\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.0,
-      "recall_at_10": 0.0,
-      "mrr_at_10": 0.0,
-      "recall_at_k": 0.0,
-      "k": 10,
-      "search_limit": 20,
-      "mode": "hybrid",
-      "n_returned": 20,
-      "n_mapped": 20,
-      "n_unmapped": 0,
-      "n_ranked": 13,
-      "top5_doc_ids": [
-        "22c668bc821c098470200b5a4db78b20f9eed81d",
-        "4b81900bbe4bbf113fbfb967ff37938ac96f071f",
-        "fba58310b0eedd0390b4cce7efb103a682678012",
-        "7bc2ec71730925101105d46b00577108e1578098",
-        "bd290d002d5f4090d6b5a57264d872366d7ff45c"
-      ],
-      "gold_doc_ids": [
-        "4036b9f7009c65aa1889b80ddbb81f2ad95dc873"
-      ],
-      "qrels_size": 1,
-      "skipped": false,
-      "error": "",
-      "elapsed_s": 2.671,
-      "retrieved_at": "2026-11-12T11:51:45+00:00"
-    },
-    {
-      "task_id": "codeeditsearchretrievaljavascript__q0005",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "30",
-      "query_text": "Prepend ember fingerprints with Julz.jl path",
-      "language": "javascript",
+      "task_id": "codeeditsearchretrievaltypescript__q0007",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "291",
+      "query_text": "Fix the impossibility to override usb device driver\n",
+      "language": "typescript",
       "ndcg_at_10": 1.0,
       "recall_at_10": 1.0,
       "mrr_at_10": 1.0,
@@ -2962,126 +3028,27 @@
       "n_unmapped": 0,
       "n_ranked": 16,
       "top5_doc_ids": [
-        "798f0a318578df8f91744accf1ec1a55310ee6ef",
-        "0807f7a4c65e8e357fb1471e73b1f6cbb287c7b3",
-        "b2987678c06e7527491984a11e86a63da1d17cb4",
-        "7bc2ec71730925101105d46b00577108e1578098",
-        "644f74f1c8ceca5f89a7d5d56f523ff297e8c804"
+        "54233ee9f61917909662062baa5bf13d31c0696d",
+        "ae7c485ab6c600adc5626ccb69c95f785d7f0f94",
+        "b16da0bdd9690b8d3af3e70862ec4757ea4b95b8",
+        "d2b184b0b1f6da24f944c04e0b8291119d9c5f68",
+        "c6c31a69852893edd7aa62d64e8865d484139703"
       ],
       "gold_doc_ids": [
-        "798f0a318578df8f91744accf1ec1a55310ee6ef"
+        "54233ee9f61917909662062baa5bf13d31c0696d"
       ],
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.459,
-      "retrieved_at": "2026-11-12T11:51:46+00:00"
+      "elapsed_s": 2.454,
+      "retrieved_at": "2026-11-13T02:25:38+00:00"
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0006",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "31",
-      "query_text": "Return latest 3 data items\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.38685280723454163,
-      "recall_at_10": 1.0,
-      "mrr_at_10": 0.2,
-      "recall_at_k": 1.0,
-      "k": 10,
-      "search_limit": 20,
-      "mode": "hybrid",
-      "n_returned": 20,
-      "n_mapped": 20,
-      "n_unmapped": 0,
-      "n_ranked": 15,
-      "top5_doc_ids": [
-        "ef172672651f4e81adb8a700b31b30547bb4ad01",
-        "371068d40e89955e29863bb1b51ab568aa8e9a47",
-        "47ecf6e39fa628f798ea533440b324cf0f7e1d17",
-        "9c117026f141ef68e06571afb5bffc90a29d22ee",
-        "ce91c0521cf884a6f6d128064faf22095bcc3b7a"
-      ],
-      "gold_doc_ids": [
-        "ce91c0521cf884a6f6d128064faf22095bcc3b7a"
-      ],
-      "qrels_size": 1,
-      "skipped": false,
-      "error": "",
-      "elapsed_s": 2.245,
-      "retrieved_at": "2026-11-12T11:51:46+00:00"
-    },
-    {
-      "task_id": "codeeditsearchretrievaljavascript__q0007",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "319",
-      "query_text": "Add opportunity pass webpack root (context)\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.0,
-      "recall_at_10": 0.0,
-      "mrr_at_10": 0.0,
-      "recall_at_k": 0.0,
-      "k": 10,
-      "search_limit": 20,
-      "mode": "hybrid",
-      "n_returned": 20,
-      "n_mapped": 20,
-      "n_unmapped": 0,
-      "n_ranked": 14,
-      "top5_doc_ids": [
-        "681918b12f7f64dabe1a93b2c245aafe78a98994",
-        "1830e19dabf0d34667bdc4e94cce2218be8be87c",
-        "f0d015f6b45f599518e247c24c152fa5f17ba017",
-        "ad92334950a29dbae2388c795bc086c71cc5649b",
-        "b6402d6116fbea0d9368931db3e3415028ac9035"
-      ],
-      "gold_doc_ids": [
-        "4021d99786f51646633cf9d15fead8c3a58bef7c"
-      ],
-      "qrels_size": 1,
-      "skipped": false,
-      "error": "",
-      "elapsed_s": 2.959,
-      "retrieved_at": "2026-11-12T11:51:47+00:00"
-    },
-    {
-      "task_id": "codeeditsearchretrievaljavascript__q0008",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "336",
-      "query_text": "Add handling of fn callback for render.\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.2890648263178879,
-      "recall_at_10": 1.0,
-      "mrr_at_10": 0.1,
-      "recall_at_k": 1.0,
-      "k": 10,
-      "search_limit": 20,
-      "mode": "hybrid",
-      "n_returned": 20,
-      "n_mapped": 20,
-      "n_unmapped": 0,
-      "n_ranked": 16,
-      "top5_doc_ids": [
-        "d1e80ed5aa35827b3d91db596209f71975ce7549",
-        "c479a91b96ce6741980ef493a8a6fc7bed32cf1a",
-        "7b68f91c32d8b47574b66807106fda5163d7d407",
-        "5565536bc06325e341c5e028ea68581fa56ea9b1",
-        "d5e3e5bdb5433b9a6101e3c5a67d9ccdc9973f3d"
-      ],
-      "gold_doc_ids": [
-        "12f58924dc7f0dc6644671a0f39d1df3678c0681"
-      ],
-      "qrels_size": 1,
-      "skipped": false,
-      "error": "",
-      "elapsed_s": 3.135,
-      "retrieved_at": "2026-11-12T11:51:48+00:00"
-    },
-    {
-      "task_id": "codeeditsearchretrievaljavascript__q0009",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "442",
-      "query_text": "Add indexes to user schema\n",
-      "language": "javascript",
+      "task_id": "codeeditsearchretrievaltypescript__q0008",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "326",
+      "query_text": "Use getter and setter for Lists input in ListsTableComponent\n",
+      "language": "typescript",
       "ndcg_at_10": 1.0,
       "recall_at_10": 1.0,
       "mrr_at_10": 1.0,
@@ -3092,29 +3059,29 @@
       "n_returned": 20,
       "n_mapped": 20,
       "n_unmapped": 0,
-      "n_ranked": 15,
+      "n_ranked": 9,
       "top5_doc_ids": [
-        "1bcccf2ad5f9aa0587eaad96df67a71c9f09da06",
-        "9f64e032942dd095e2b0b3e5482e6f63bf7b5ce0",
-        "8c31bbff09e9aa0923ce6937f4d6cd65c6aef79d",
-        "1133a64b6ad90b13e81eee3ad8b87c0c03b9b170",
-        "4752fa05cfd155c80ebc75d960763856194c35aa"
+        "3ebc5bdff5e41d5b38f5a1bcc77556c2f490bca8",
+        "a1711158f3d3815c78f1b56ac133fe62efc489cb",
+        "b16da0bdd9690b8d3af3e70862ec4757ea4b95b8",
+        "e84e8130dffdc79809ab2c933c517947be269511",
+        "a9c050cf8318e0f477071c71023cd6cf38a73aca"
       ],
       "gold_doc_ids": [
-        "1bcccf2ad5f9aa0587eaad96df67a71c9f09da06"
+        "3ebc5bdff5e41d5b38f5a1bcc77556c2f490bca8"
       ],
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.079,
-      "retrieved_at": "2026-11-12T11:51:48+00:00"
+      "elapsed_s": 2.39,
+      "retrieved_at": "2026-11-13T02:25:38+00:00"
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0010",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "474",
-      "query_text": "Switch to Space.getenv for default envs\n",
-      "language": "javascript",
+      "task_id": "codeeditsearchretrievaltypescript__q0009",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "406",
+      "query_text": "Use port 9090 on test\n",
+      "language": "typescript",
       "ndcg_at_10": 1.0,
       "recall_at_10": 1.0,
       "mrr_at_10": 1.0,
@@ -3125,132 +3092,33 @@
       "n_returned": 20,
       "n_mapped": 20,
       "n_unmapped": 0,
-      "n_ranked": 15,
+      "n_ranked": 18,
       "top5_doc_ids": [
-        "4752fa05cfd155c80ebc75d960763856194c35aa",
-        "3fe151d044e6a6f4ea957e3a75105a45a2865314",
-        "b6402d6116fbea0d9368931db3e3415028ac9035",
-        "54563dc94ccb1aea8a29b22739eff309bca21bbc",
-        "6c5d4de1eefb2c7dd8f6b18d08cf1cb13411a75c"
+        "ba54f7db4ec57d4b30cd8f3cfd9dea27dcaa74cb",
+        "5ded6834bfa4ee1acd958441be745db69ddd3a18",
+        "ab9caa459f236a7c921042e9044859340829ea9e",
+        "5e788f0da48a13dae08b09ca8156a92f0884795d",
+        "eb5eca250e11655a39dcb51bda8213a932cd3bd2"
       ],
       "gold_doc_ids": [
-        "4752fa05cfd155c80ebc75d960763856194c35aa"
+        "ba54f7db4ec57d4b30cd8f3cfd9dea27dcaa74cb"
       ],
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.213,
-      "retrieved_at": "2026-11-12T11:51:48+00:00"
+      "elapsed_s": 2.295,
+      "retrieved_at": "2026-11-13T02:25:38+00:00"
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0011",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "731",
-      "query_text": "Fix show-more links not working after rebuild\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.0,
-      "recall_at_10": 0.0,
-      "mrr_at_10": 0.0,
-      "recall_at_k": 0.0,
-      "k": 10,
-      "search_limit": 20,
-      "mode": "hybrid",
-      "n_returned": 20,
-      "n_mapped": 20,
-      "n_unmapped": 0,
-      "n_ranked": 19,
-      "top5_doc_ids": [
-        "aa22196011e9d54db7587e62492c150a8ac81bc0",
-        "e5c1148583b076e9bdfb1c35e02c579ade240e3c",
-        "5967940b83c14f5047863f1a6529c40f20af676b",
-        "59a3bdf354fa9ed4d2def439ee13d4d2a7415b70",
-        "798f0a318578df8f91744accf1ec1a55310ee6ef"
-      ],
-      "gold_doc_ids": [
-        "f808e1dda87f67b9b1e5cf8fa724dd3c5287af0d"
-      ],
-      "qrels_size": 1,
-      "skipped": false,
-      "error": "",
-      "elapsed_s": 2.109,
-      "retrieved_at": "2026-11-12T11:51:49+00:00"
-    },
-    {
-      "task_id": "codeeditsearchretrievaljavascript__q0012",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "738",
-      "query_text": "Fix for when a user edits a Client Relationship Manager\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.0,
-      "recall_at_10": 0.0,
-      "mrr_at_10": 0.0,
-      "recall_at_k": 0.0,
-      "k": 10,
-      "search_limit": 20,
-      "mode": "hybrid",
-      "n_returned": 20,
-      "n_mapped": 20,
-      "n_unmapped": 0,
-      "n_ranked": 17,
-      "top5_doc_ids": [
-        "8c31bbff09e9aa0923ce6937f4d6cd65c6aef79d",
-        "2f61e76a50034cd06611bf0086d57deeaf61a2dd",
-        "bd290d002d5f4090d6b5a57264d872366d7ff45c",
-        "e4b92571af5d30868396635d86c50e120ff38524",
-        "644f74f1c8ceca5f89a7d5d56f523ff297e8c804"
-      ],
-      "gold_doc_ids": [
-        "3087a2fd6b38cff3f689f2dfabaffc6c182fa17c"
-      ],
-      "qrels_size": 1,
-      "skipped": false,
-      "error": "",
-      "elapsed_s": 2.552,
-      "retrieved_at": "2026-11-12T11:51:50+00:00"
-    },
-    {
-      "task_id": "codeeditsearchretrievaljavascript__q0013",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "777",
-      "query_text": "Tag a changed for p.\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.6309297535714575,
+      "task_id": "codeeditsearchretrievaltypescript__q0010",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "425",
+      "query_text": "Update pagination slice to use directly the query params for detecting the offset\n",
+      "language": "typescript",
+      "ndcg_at_10": 1.0,
       "recall_at_10": 1.0,
-      "mrr_at_10": 0.5,
+      "mrr_at_10": 1.0,
       "recall_at_k": 1.0,
-      "k": 10,
-      "search_limit": 20,
-      "mode": "hybrid",
-      "n_returned": 20,
-      "n_mapped": 20,
-      "n_unmapped": 0,
-      "n_ranked": 14,
-      "top5_doc_ids": [
-        "ad207a87639cef156201b8e2a208f38c51e93c50",
-        "03cc40cc7817f57e6df12205e7c67ed70bb449a0",
-        "59134321c984f27983f07817f1f5f9aeab9e597b",
-        "9c117026f141ef68e06571afb5bffc90a29d22ee",
-        "827360189cde1aa7ea4b57ecf42b43c6e6311e8d"
-      ],
-      "gold_doc_ids": [
-        "03cc40cc7817f57e6df12205e7c67ed70bb449a0"
-      ],
-      "qrels_size": 1,
-      "skipped": false,
-      "error": "",
-      "elapsed_s": 2.529,
-      "retrieved_at": "2026-11-12T11:51:51+00:00"
-    },
-    {
-      "task_id": "codeeditsearchretrievaljavascript__q0014",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "805",
-      "query_text": "Add test cases to Sum of Multiples\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.0,
-      "recall_at_10": 0.0,
-      "mrr_at_10": 0.0,
-      "recall_at_k": 0.0,
       "k": 10,
       "search_limit": 20,
       "mode": "hybrid",
@@ -3259,60 +3127,27 @@
       "n_unmapped": 0,
       "n_ranked": 11,
       "top5_doc_ids": [
-        "14858929325c953d0c99a0569d61d1442c0232a0",
-        "dbc7d6cce301f81c5b3ee386d4aaa11e158fe513",
-        "3fe151d044e6a6f4ea957e3a75105a45a2865314",
-        "9697b8d10a8312fb9e07009ce62a8e380e68bc76",
-        "742bb07d73e4c75f98fb0067326d10bb4ace8ca8"
+        "7ef9406a3024dc17e43ae4391b75a90b3c4dccab",
+        "ffc6edf6a6119b9a29ee9570b0fb22724c8a0ea7",
+        "e768807e8d457bfa57ea2bef4b13c29fd62dbdca",
+        "c3de5579581dd3835ce8545e98a6a35f17e6c036",
+        "3c01fce00cf8dc7ee2275cd4ae5c9b0cb401673c"
       ],
       "gold_doc_ids": [
-        "5269ca693cc067c753a278170500e8405d81a6d7"
+        "7ef9406a3024dc17e43ae4391b75a90b3c4dccab"
       ],
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.23,
-      "retrieved_at": "2026-11-12T11:51:51+00:00"
+      "elapsed_s": 3.726,
+      "retrieved_at": "2026-11-13T02:25:40+00:00"
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0015",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "858",
-      "query_text": "Make it unnecessary to modify the last assert.",
-      "language": "javascript",
-      "ndcg_at_10": 0.0,
-      "recall_at_10": 0.0,
-      "mrr_at_10": 0.0,
-      "recall_at_k": 0.0,
-      "k": 10,
-      "search_limit": 20,
-      "mode": "hybrid",
-      "n_returned": 20,
-      "n_mapped": 20,
-      "n_unmapped": 0,
-      "n_ranked": 10,
-      "top5_doc_ids": [
-        "742bb07d73e4c75f98fb0067326d10bb4ace8ca8",
-        "0fdd418274a18fa954510053fd34c4730d2c7267",
-        "c2d9247ea82b07c28dba83580b1c9c50112083f1",
-        "9697b8d10a8312fb9e07009ce62a8e380e68bc76",
-        "371068d40e89955e29863bb1b51ab568aa8e9a47"
-      ],
-      "gold_doc_ids": [
-        "5190972544547feaaacc34abfb49ddd7b890c857"
-      ],
-      "qrels_size": 1,
-      "skipped": false,
-      "error": "",
-      "elapsed_s": 2.411,
-      "retrieved_at": "2026-11-12T11:51:51+00:00"
-    },
-    {
-      "task_id": "codeeditsearchretrievaljavascript__q0016",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "865",
-      "query_text": "Clean any previous usage of blanket (because re-run in the same process)\n",
-      "language": "javascript",
+      "task_id": "codeeditsearchretrievaltypescript__q0011",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "439",
+      "query_text": "Fix convection artist id mapping\n",
+      "language": "typescript",
       "ndcg_at_10": 0.0,
       "recall_at_10": 0.0,
       "mrr_at_10": 0.0,
@@ -3325,27 +3160,159 @@
       "n_unmapped": 0,
       "n_ranked": 17,
       "top5_doc_ids": [
-        "742bb07d73e4c75f98fb0067326d10bb4ace8ca8",
-        "7d068aa32ea0717c13c66c56fcb62a6eb437c609",
-        "c63382cd0c0857332a9d4e69e6c97273eb93e5e8",
-        "ad92334950a29dbae2388c795bc086c71cc5649b",
-        "d5e3e5bdb5433b9a6101e3c5a67d9ccdc9973f3d"
+        "b1c382653182fd69bad7f7882aaeca55eeaea3d2",
+        "c3de5579581dd3835ce8545e98a6a35f17e6c036",
+        "ed7358bb6d5fe38c1bb7539100c768421ad408af",
+        "ffc6edf6a6119b9a29ee9570b0fb22724c8a0ea7",
+        "06e7bc39ce24164e3623b6c630e79af84af1c9bb"
       ],
       "gold_doc_ids": [
-        "91d8bb02e4216ac90cfe6d2ec98c52785720cc3b"
+        "8eee3cab5013253a58ef9cbb183cfbf9d37f7e0d"
       ],
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.427,
-      "retrieved_at": "2026-11-12T11:51:53+00:00"
+      "elapsed_s": 2.313,
+      "retrieved_at": "2026-11-13T02:25:40+00:00"
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0017",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "900",
-      "query_text": "Change mocha's reporter type to spec",
-      "language": "javascript",
+      "task_id": "codeeditsearchretrievaltypescript__q0012",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "456",
+      "query_text": "Change that when there is no rotation in props' the checker won't throw an error.\n",
+      "language": "typescript",
+      "ndcg_at_10": 0.0,
+      "recall_at_10": 0.0,
+      "mrr_at_10": 0.0,
+      "recall_at_k": 0.0,
+      "k": 10,
+      "search_limit": 20,
+      "mode": "hybrid",
+      "n_returned": 20,
+      "n_mapped": 20,
+      "n_unmapped": 0,
+      "n_ranked": 18,
+      "top5_doc_ids": [
+        "c29ea6e4906c466f550c1bd12d27ceb1f12de10e",
+        "4d689b06112bd5b6113dca8272c87a5ddefcc09b",
+        "ae7c485ab6c600adc5626ccb69c95f785d7f0f94",
+        "e8de26ff202e862da95d1c69dea5d0e7fafef761",
+        "b1794b746c7a6f0d9dc15aebdc0abca030352c7a"
+      ],
+      "gold_doc_ids": [
+        "b5ee5af9c2763ed3fa45679cd3e3e35404bbcbd4"
+      ],
+      "qrels_size": 1,
+      "skipped": false,
+      "error": "",
+      "elapsed_s": 2.602,
+      "retrieved_at": "2026-11-13T02:25:41+00:00"
+    },
+    {
+      "task_id": "codeeditsearchretrievaltypescript__q0013",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "460",
+      "query_text": "Add workaround for ConnectableObservable type error\n",
+      "language": "typescript",
+      "ndcg_at_10": 0.0,
+      "recall_at_10": 0.0,
+      "mrr_at_10": 0.0,
+      "recall_at_k": 0.0,
+      "k": 10,
+      "search_limit": 20,
+      "mode": "hybrid",
+      "n_returned": 20,
+      "n_mapped": 20,
+      "n_unmapped": 0,
+      "n_ranked": 14,
+      "top5_doc_ids": [
+        "554b2fccd9ff48c206d7274083155cf6a9d023ea",
+        "e84e8130dffdc79809ab2c933c517947be269511",
+        "1eb63ba789319df24bbe98863d5aee91e0b80e1a",
+        "b16da0bdd9690b8d3af3e70862ec4757ea4b95b8",
+        "fbddf94debbb15053880a83f14449c581b5c69cc"
+      ],
+      "gold_doc_ids": [
+        "fc62c22205b4b9e6a4c52a33e60c1377466ce90d"
+      ],
+      "qrels_size": 1,
+      "skipped": false,
+      "error": "",
+      "elapsed_s": 2.509,
+      "retrieved_at": "2026-11-13T02:25:41+00:00"
+    },
+    {
+      "task_id": "codeeditsearchretrievaltypescript__q0014",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "635",
+      "query_text": "Tweak the NamedTuple type to allow arbitrary number keys\n",
+      "language": "typescript",
+      "ndcg_at_10": 0.0,
+      "recall_at_10": 0.0,
+      "mrr_at_10": 0.0,
+      "recall_at_k": 0.0,
+      "k": 10,
+      "search_limit": 20,
+      "mode": "hybrid",
+      "n_returned": 20,
+      "n_mapped": 20,
+      "n_unmapped": 0,
+      "n_ranked": 15,
+      "top5_doc_ids": [
+        "b1e38df068abe54f85d2d269fe137d7d074e5bbb",
+        "cf510fc80edfe4b75cc8e469324f6a3d48c6b935",
+        "a9e9b061600aae14ac902dc9dad4f2fb58b20503",
+        "d8d77bc9ebb59bdb1d692a9fb2b41f9b804b1db0",
+        "c2c76e54331620ccf9963a00515bc860716e4159"
+      ],
+      "gold_doc_ids": [
+        "09e45ca3a968df96d06a5428a9e4e09c92f0f762"
+      ],
+      "qrels_size": 1,
+      "skipped": false,
+      "error": "",
+      "elapsed_s": 2.531,
+      "retrieved_at": "2026-11-13T02:25:42+00:00"
+    },
+    {
+      "task_id": "codeeditsearchretrievaltypescript__q0015",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "683",
+      "query_text": "Revert \"Commit from LXDE Pootle server by user LStranger.: 391 of 391 strings translated (0 need review).\"\n\nThis reverts commit d538764d91b1cf3ea993cdf0d6200eea2b2c9384.\n\nIt appeared this change was wrong because it was out of sync.\n",
+      "language": "typescript",
+      "ndcg_at_10": 0.0,
+      "recall_at_10": 0.0,
+      "mrr_at_10": 0.0,
+      "recall_at_k": 0.0,
+      "k": 10,
+      "search_limit": 20,
+      "mode": "hybrid",
+      "n_returned": 20,
+      "n_mapped": 20,
+      "n_unmapped": 0,
+      "n_ranked": 17,
+      "top5_doc_ids": [
+        "c30821c7ef6cd8268ac7e66fa862e64590218bf5",
+        "d442eb06da8456d002a746f66dd44a2b47b190d5",
+        "b1e38df068abe54f85d2d269fe137d7d074e5bbb",
+        "ae7c485ab6c600adc5626ccb69c95f785d7f0f94",
+        "d2b184b0b1f6da24f944c04e0b8291119d9c5f68"
+      ],
+      "gold_doc_ids": [
+        "555166bb60ce537936009bc8f886473c7e7a88cf"
+      ],
+      "qrels_size": 1,
+      "skipped": false,
+      "error": "",
+      "elapsed_s": 2.929,
+      "retrieved_at": "2026-11-13T02:25:43+00:00"
+    },
+    {
+      "task_id": "codeeditsearchretrievaltypescript__q0016",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "72",
+      "query_text": "DefinitionProvider: Use IndexLocator instead of Index\n",
+      "language": "typescript",
       "ndcg_at_10": 1.0,
       "recall_at_10": 1.0,
       "mrr_at_10": 1.0,
@@ -3356,88 +3323,121 @@
       "n_returned": 20,
       "n_mapped": 20,
       "n_unmapped": 0,
-      "n_ranked": 10,
+      "n_ranked": 14,
       "top5_doc_ids": [
-        "8afb86988829ead1404efdfa4bccf77fb983a08e",
-        "14858929325c953d0c99a0569d61d1442c0232a0",
-        "b8f36d4860000d7a3c0614cb36c68903e4c87646",
-        "742bb07d73e4c75f98fb0067326d10bb4ace8ca8",
-        "ad92334950a29dbae2388c795bc086c71cc5649b"
+        "ef481d8edce24412eee6430d6564461a9025ce46",
+        "d8d77bc9ebb59bdb1d692a9fb2b41f9b804b1db0",
+        "b1c382653182fd69bad7f7882aaeca55eeaea3d2",
+        "b1e38df068abe54f85d2d269fe137d7d074e5bbb",
+        "a9c050cf8318e0f477071c71023cd6cf38a73aca"
       ],
       "gold_doc_ids": [
-        "8afb86988829ead1404efdfa4bccf77fb983a08e"
+        "ef481d8edce24412eee6430d6564461a9025ce46"
       ],
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.133,
-      "retrieved_at": "2026-11-12T11:51:53+00:00"
+      "elapsed_s": 2.353,
+      "retrieved_at": "2026-11-13T02:25:43+00:00"
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0018",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "917",
-      "query_text": "Disable unused imports, enable production mode\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.0,
-      "recall_at_10": 0.0,
-      "mrr_at_10": 0.0,
-      "recall_at_k": 0.0,
+      "task_id": "codeeditsearchretrievaltypescript__q0017",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "739",
+      "query_text": "Kill child process on exit\n",
+      "language": "typescript",
+      "ndcg_at_10": 1.0,
+      "recall_at_10": 1.0,
+      "mrr_at_10": 1.0,
+      "recall_at_k": 1.0,
       "k": 10,
       "search_limit": 20,
       "mode": "hybrid",
       "n_returned": 20,
       "n_mapped": 20,
       "n_unmapped": 0,
-      "n_ranked": 13,
+      "n_ranked": 14,
       "top5_doc_ids": [
-        "b6402d6116fbea0d9368931db3e3415028ac9035",
-        "792a78fa349dcfe49dff2a60483d12dedb9c0c97",
-        "798f0a318578df8f91744accf1ec1a55310ee6ef",
-        "681918b12f7f64dabe1a93b2c245aafe78a98994",
-        "742bb07d73e4c75f98fb0067326d10bb4ace8ca8"
+        "5e788f0da48a13dae08b09ca8156a92f0884795d",
+        "05e92d2080b5098e7eea0c1e136af75fd565c4d7",
+        "ba54f7db4ec57d4b30cd8f3cfd9dea27dcaa74cb",
+        "ab9caa459f236a7c921042e9044859340829ea9e",
+        "ae7c485ab6c600adc5626ccb69c95f785d7f0f94"
       ],
       "gold_doc_ids": [
-        "575c526925dbf3e0433933ba01b441155ff29e1b"
+        "5e788f0da48a13dae08b09ca8156a92f0884795d"
       ],
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.757,
-      "retrieved_at": "2026-11-12T11:51:53+00:00"
+      "elapsed_s": 2.197,
+      "retrieved_at": "2026-11-13T02:25:43+00:00"
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0019",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "93",
-      "query_text": "Fix bad require path in gulp plugin\n\nSigned-off-by: Vinson Chuong <6df075c17c17de53656cfe2eb11616735a18bb18@pivotal.io>\n",
-      "language": "javascript",
-      "ndcg_at_10": 0.0,
-      "recall_at_10": 0.0,
-      "mrr_at_10": 0.0,
-      "recall_at_k": 0.0,
+      "task_id": "codeeditsearchretrievaltypescript__q0018",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "910",
+      "query_text": "[field] Fix error in object/array matching on shapes\n",
+      "language": "typescript",
+      "ndcg_at_10": 1.0,
+      "recall_at_10": 1.0,
+      "mrr_at_10": 1.0,
+      "recall_at_k": 1.0,
       "k": 10,
       "search_limit": 20,
       "mode": "hybrid",
       "n_returned": 20,
       "n_mapped": 20,
       "n_unmapped": 0,
-      "n_ranked": 10,
+      "n_ranked": 15,
       "top5_doc_ids": [
-        "d5e3e5bdb5433b9a6101e3c5a67d9ccdc9973f3d",
-        "681918b12f7f64dabe1a93b2c245aafe78a98994",
-        "b8f36d4860000d7a3c0614cb36c68903e4c87646",
-        "1830e19dabf0d34667bdc4e94cce2218be8be87c",
-        "23536c9d05be3e0c58d1eacc2bcb8f23b00bac54"
+        "cfbfbe6c98c8a017f78a197d53dbc631b1b43569",
+        "d0578030e8fce16edc11734dc2a0f9a64b21516e",
+        "a9e9b061600aae14ac902dc9dad4f2fb58b20503",
+        "cf510fc80edfe4b75cc8e469324f6a3d48c6b935",
+        "b1c382653182fd69bad7f7882aaeca55eeaea3d2"
       ],
       "gold_doc_ids": [
-        "fe9b46d748539bb5823f66b09374e63374ff2c20"
+        "cfbfbe6c98c8a017f78a197d53dbc631b1b43569"
       ],
       "qrels_size": 1,
       "skipped": false,
       "error": "",
-      "elapsed_s": 2.061,
-      "retrieved_at": "2026-11-12T11:51:53+00:00"
+      "elapsed_s": 2.072,
+      "retrieved_at": "2026-11-13T02:25:44+00:00"
+    },
+    {
+      "task_id": "codeeditsearchretrievaltypescript__q0019",
+      "task": "CodeEditSearchRetrieval-typescript",
+      "query_id": "947",
+      "query_text": "Fix broken build because of macOS case-insensitive FS :(\n",
+      "language": "typescript",
+      "ndcg_at_10": 0.43067655807339306,
+      "recall_at_10": 1.0,
+      "mrr_at_10": 0.25,
+      "recall_at_k": 1.0,
+      "k": 10,
+      "search_limit": 20,
+      "mode": "hybrid",
+      "n_returned": 20,
+      "n_mapped": 20,
+      "n_unmapped": 0,
+      "n_ranked": 15,
+      "top5_doc_ids": [
+        "d8d77bc9ebb59bdb1d692a9fb2b41f9b804b1db0",
+        "bfdb047521856ea93a79e7b392f84132255c90a9",
+        "ae7c485ab6c600adc5626ccb69c95f785d7f0f94",
+        "d2b184b0b1f6da24f944c04e0b8291119d9c5f68",
+        "f4f99e96d7b57c431c7538d31b04c2b358128815"
+      ],
+      "gold_doc_ids": [
+        "d2b184b0b1f6da24f944c04e0b8291119d9c5f68"
+      ],
+      "qrels_size": 1,
+      "skipped": false,
+      "error": "",
+      "elapsed_s": 2.419,
+      "retrieved_at": "2026-11-13T02:25:45+00:00"
     }
   ],
   "failure_top": [
@@ -3456,8 +3456,8 @@
         "e992a8d75516a96dcfd718d028a58ab55d599330"
       ],
       "retrieved_not_gold": [
-        "5241cdb4403e99e6debd06c2d6ed2d8e4d1f3bfd",
         "0e93f1795a8a479ce4ac381d103727b55f68b1e4",
+        "5241cdb4403e99e6debd06c2d6ed2d8e4d1f3bfd",
         "949b59607ba26cdf2ab1d740265005d1d02b42ad",
         "c9ededb515aefc2e14a021cd38b9313845463524",
         "027a290a2d885cf93d296769570a840a78b2981d"
@@ -3598,7 +3598,7 @@
         "6205608474a3637d975e8fa4313a78d7e4db51ad",
         "55ddd24e0357d733b321872fda8b183025f6a2c4",
         "7505cfa0538d05a52c70ebb7a8f844d9887ac9dc",
-        "433745d068bf6bceb9c438e4bd0a8d713de5ed77"
+        "a9748f2657b41b03a4209baa8a04e07ba1c023b8"
       ],
       "error": ""
     },
@@ -3643,16 +3643,16 @@
         "09980b8e6b94a854cded0147f3a904fa93b03484",
         "55ddd24e0357d733b321872fda8b183025f6a2c4",
         "8cbf5b0f35478eeb748c4593f583e4996f3da562",
-        "8fb49dc9153c4593b739a5950ae2bc8cbddc758f",
-        "ea9e6806e8f708aee08267b358de0cb6e9990925"
+        "ea9e6806e8f708aee08267b358de0cb6e9990925",
+        "8fb49dc9153c4593b739a5950ae2bc8cbddc758f"
       ],
       "error": ""
     },
     {
-      "task_id": "codeeditsearchretrievaljavascript__q0000",
-      "task": "CodeEditSearchRetrieval-javascript",
-      "query_id": "115",
-      "query_text": "Fix up put webpack build\n",
+      "task_id": "codeeditsearchretrievalpython__q0002",
+      "task": "CodeEditSearchRetrieval-python",
+      "query_id": "20",
+      "query_text": "Add argument to specify different files to load\n\nThis will make implementing other services easier.\n",
       "ndcg_at_10": 0.0,
       "recall_at_10": 0.0,
       "mode": "hybrid",
@@ -3660,14 +3660,14 @@
       "n_mapped": 20,
       "n_unmapped": 0,
       "gold_doc_ids": [
-        "736b8d27d4924a9aa29f82894bcf541aac62c18f"
+        "acf7b76e098e70c77fbce95d03ec70911260ab58"
       ],
       "retrieved_not_gold": [
-        "681918b12f7f64dabe1a93b2c245aafe78a98994",
-        "f0d015f6b45f599518e247c24c152fa5f17ba017",
-        "32cc7a7b81c3aea0e2a23817d1274e8352dbf04b",
-        "1830e19dabf0d34667bdc4e94cce2218be8be87c",
-        "b6402d6116fbea0d9368931db3e3415028ac9035"
+        "20fce7b482fd11a65494014e14aabecbe4e87683",
+        "f17310e0fcf5d7ea7ceab2b9243f106eb1222b69",
+        "01dd4901532df4f3da51501d4f223c873dd49dd8",
+        "0ed4c7a502db204a6503dfa43e384d58632f44ab",
+        "6b49db80a4508c3cba7f410db8ed3f23b5234e3b"
       ],
       "error": ""
     }

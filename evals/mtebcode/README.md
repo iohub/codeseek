@@ -73,7 +73,7 @@ python3 -m mtebcode_eval selftest
 # 1. prepare: fetch + sample + pool + materialize + git init  (the parameters of the archived batch)
 python3 -m mtebcode_eval prepare \
   --workdir /tmp/mtebcode-short \
-  --tasks CodeEditSearchRetrieval-go,CodeEditSearchRetrieval-javascript,CodeEditSearchRetrieval-python,CosQA \
+  --tasks CosQA,CodeEditSearchRetrieval-python,CodeEditSearchRetrieval-go,CodeEditSearchRetrieval-typescript \
   --limit-queries 20 \
   --corpus-size 300 \
   --seed 42 \
@@ -123,7 +123,7 @@ python3 -m mtebcode_eval score --workdir /tmp/mtebcode-short --limit 20 --k 10
 2. **Task screening comes before sampling.** A task is only usable when three things hold: the queries are short
    enough to be a realistic search query, the corpus text is actually code (not a docstring and not a unified
    diff), and the corpus is materializable into an extension codeseek indexes. Measured medians that drove this
-   filter: CosQA is short, `CodeEditSearchRetrieval-{python,go,javascript}` have medians of 45 / 45 / 43
+   filter: CosQA is short, `CodeEditSearchRetrieval-{python,go,typescript}` have medians of 45 / 45 / 44
    characters, while `CodeFeedbackST` (540), `CodeTransOceanContest` (547), `CodeSearchNetRetrieval` (624),
    `StackOverflowQA` (883), `CodeTransOceanDL` (1,211), `AppsRetrieval` (1,316) and `CodeFeedbackMT` (3,571)
    were rejected for query length. `SyntheticText2SQL` was rejected because a `.sql` corpus is outside
@@ -137,7 +137,7 @@ python3 -m mtebcode_eval score --workdir /tmp/mtebcode-short --limit 20 --k 10
    metric will read low"). If a query's gold documents all fall outside the pool, the query is recorded as
    skipped instead of silently scoring 0.
 5. **Materialization.** Each pooled document is written as a real file whose extension comes from the task's
-   language (`.py`, `.go`, `.js`, `.sql`, `.txt`), because codeseek's indexer only picks up
+   language (`.py`, `.go`, `.ts`, `.sql`, `.txt`), because codeseek's indexer only picks up
    `cpp/cc/cxx/c++/c/h/hpp/hxx/hh/inl/inc/tpp/tpl/py/py3/pyx/java/rs/ts/tsx/js/jsx/go`
    (`rust-core/src/codegraph/parser.rs`, `is_supported_file`). The file name is
    `<dataset-stem>_<sha1(doc_id)[:8]><ext>` — the hash prefix keeps two documents with the same stem from
@@ -182,16 +182,16 @@ python3 -m mtebcode_eval score --workdir /tmp/mtebcode-short --limit 20 --k 10
   quality would need multi-gold tasks or graded relevance.
 - **`recall@10 == recall@20` in the archived batch**, i.e. no gold document ever lands in positions 11–20. The
   budget of 20 is sufficient, but the protocol measures **nothing** about positions 11–20.
-- **`CodeEditSearchRetrieval`'s corpus is a unified diff**, only 22.7–58.3% of whose post-image documents contain
+- **`CodeEditSearchRetrieval`'s corpus is a unified diff**, only 33.3–62.3% of whose post-image documents contain
   a definition at all, while its queries are commit-message shaped. That task family partly measures the
   unretrievability of diffs rather than retrieval quality (see Section 4.4 of [`results/README.md`](results/README.md)).
-- **The dataset exposes only a `train` split**, java has no qrels and ruby/typescript return 500, so the family
-  is covered by three languages out of six.
+- **The dataset exposes only a `train` split**, java has **no qrels at all** and ruby returns 500, so the family
+  is covered by three languages out of six (`python`, `go`, `typescript`).
 - **The reranker is an uncontrolled variable**: `enabled` with `top_n = 5`, but
   `derived_top_n = max(top_n, final_budget) = 20`, so its effect on short queries was not measured.
 - **Every result is bound to its cutoff configuration.** With the default `index.hybrid.cutoff.enabled = true`
-  the same 100 queries score mean nDCG@10 **0.4266** with **36** `unknown_empty`, against **0.5339** and **0**
-  with the cutoff disabled. A result without its cutoff state is not interpretable.
+  the same 100 queries score mean nDCG@10 **0.4891** with **35** `unknown_empty` and `mean_returned = 1.00`,
+  against **0.5858** and **0** with the cutoff disabled. A result without its cutoff state is not interpretable.
 - **Very long queries have a practical usability ceiling**: a screening probe on one AppsRetrieval query
   (1,316-character median family) returned `[]` for the full text and 3 results once truncated to its
   152-character first line. That is a product-side defect, and it is why long-query tasks are excluded rather
@@ -208,8 +208,8 @@ evals/mtebcode/
 ├── requirements.txt          # a docstring, not a dependency list: standard library only
 ├── results/                  # archived measured results (see Section 8)
 │   ├── README.md
-│   ├── 2026-11-12-report.md
-│   └── 2026-11-12-report.json
+│   ├── 2026-11-13-report.md
+│   └── 2026-11-13-report.json
 └── mtebcode_eval/
     ├── __init__.py
     ├── data.py       # TaskSpec registry / datasets-server client / pooling / materialization / diff post-image
@@ -253,8 +253,9 @@ evals/mtebcode/
   very long input; (4) did `docmap.json` get written — a missing or empty docmap is reported in `per_query.error`.
 - **`429 Too Many Requests` from `/rows`**: lower the request rate with a larger `--rate-limit`, or point
   `--parquet-cache` at a populated `~/.cache/huggingface/hub` so the rows can be read from disk.
-  **`500` from `/rows`**: that config's parquet is unreadable server-side — this is how the ruby and typescript
-  variants of `CodeEditSearchRetrieval` were ruled out; drop the task with `--tasks`.
+  **`500` from `/rows`**: that config's parquet is unreadable by the datasets server. This is how `ruby` was
+  ruled out, and how `typescript` is *served*: with `--parquet-cache` pointing at a populated HF hub the same
+  config reads fine from disk.
 - **Binary not found**: the error message prints the exact
   `cargo build --release --manifest-path rust-core/Cargo.toml` command; `--auto-build` builds it for you.
 - **`--cache-only`** turns any cache miss into an immediate error, which is the reliable way to prove a
@@ -262,8 +263,8 @@ evals/mtebcode/
 
 ## 8. Measured results
 
-**The archived primary result is the 2026-11-12 batch: mean nDCG@10 = 0.5339** — 100 queries over 4 tasks
-(40 CosQA + 20 each for `CodeEditSearchRetrieval-{python,go,javascript}`), a 300-document pooled corpus per task
+**The archived primary result is the 2026-11-13 batch: mean nDCG@10 = 0.5858** — 100 queries over 4 tasks
+(40 CosQA + 20 each for `CodeEditSearchRetrieval-{python,go,typescript}`), a 300-document pooled corpus per task
 (1,200 documents in total), `k = 10`, `search_limit = 20`, `seed = 42`, retrieval mode `hybrid` on 100% of the
 queries, and **`index.hybrid.cutoff.enabled = false`**:
 
@@ -271,14 +272,14 @@ queries, and **`index.hybrid.cutoff.enabled = false`**:
 | --- | --- | --- | --- | --- | --- |
 | CosQA | 40 | 0.9690 | 1.0000 | 0.9583 | 1.0000 |
 | CodeEditSearchRetrieval-python | 20 | 0.4131 | 0.5000 | 0.3833 | 0.5000 |
-| CodeEditSearchRetrieval-go | 20 | 0.4882 | 0.5500 | 0.4696 | 0.5500 |
-| CodeEditSearchRetrieval-javascript | 20 | 0.2653 | 0.3500 | 0.2400 | 0.3500 |
-| **Mean(Task)** | **100** | **0.5339** | **0.6000** | **0.5128** | **0.6000** |
+| CodeEditSearchRetrieval-go | 20 | 0.4893 | 0.5500 | 0.4708 | 0.5500 |
+| CodeEditSearchRetrieval-typescript | 20 | 0.4715 | 0.5000 | 0.4625 | 0.5000 |
+| **Mean(Task)** | **100** | **0.5858** | **0.6375** | **0.5688** | **0.6375** |
 
 - Report and per-query detail: [`results/README.md`](results/README.md), with
-  [`results/2026-11-12-report.md`](results/2026-11-12-report.md) and
-  [`results/2026-11-12-report.json`](results/2026-11-12-report.json) (binary under test `sha256` prefix
+  [`results/2026-11-13-report.md`](results/2026-11-13-report.md) and
+  [`results/2026-11-13-report.json`](results/2026-11-13-report.json) (binary under test `sha256` prefix
   `b1532bb1b43e3d65`).
-- The `recall@10 == recall@20` equality and the failure decomposition (40.00 points of recall loss against 6.61
+- The `recall@10 == recall@20` equality and the failure decomposition (36.25 points of recall loss against 5.17
   points of ordering loss) are discussed in Section 1.3 and Section 4.2 of that archive; the measured-and-rejected
   protocol configurations are in its Section 2.
