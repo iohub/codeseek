@@ -237,17 +237,47 @@ def _task_names(meta: Mapping[str, Any], by_task: Mapping[str, Any]) -> list[str
 CUTOFF_PRECONDITION_JSON = '{"index": {"hybrid": {"cutoff": {"enabled": false}}}}'
 
 
-def _cutoff_precondition_lines(meta: Mapping[str, Any]) -> list[str]:
+def _batch_cutoff_facts(meta: Mapping[str, Any], aggregate: Mapping[str, Any]) -> str | None:
+    """用**本批次自身**的数字说明 cutoff 关闭时的检索规模。
+
+    ``mean_returned`` 由 ``aggregate.by_task[*].mean_returned`` 以 ``n_scored`` 为权重加权得到，
+    ``unknown_empty`` 取自 ``meta.mode_counts``；两者都无法从报告里恢复时返回 ``None``，
+    绝不编造默认值。
+    """
+    by_task = aggregate.get("by_task") or {}
+    weighted = 0.0
+    weight = 0
+    for bucket in by_task.values():
+        scored = int(bucket.get("n_scored") or 0)
+        if scored:
+            weighted += float(bucket.get("mean_returned") or 0.0) * scored
+            weight += scored
+    if not weight:
+        return None
+    mean_returned = weighted / weight
+    mode_counts = meta.get("mode_counts") or {}
+    unknown_empty = int(mode_counts.get("unknown_empty", 0) or 0)
+    n_queries = int(aggregate.get("n_queries") or weight)
+    return (
+        f"For this batch, with the cutoff disabled, the result lists stay full: "
+        f"`mean_returned = {mean_returned:.2f}` and `unknown_empty = {unknown_empty}` over "
+        f"{n_queries} queries -- the same numbers as Sections 1-3 above."
+    )
+
+
+def _cutoff_precondition_lines(
+    meta: Mapping[str, Any],
+    aggregate: Mapping[str, Any],
+) -> list[str]:
     """State the adaptive-cutoff precondition *before* the reproduction block.
 
-    Every archived short-query batch of this suite was produced with
-    ``index.hybrid.cutoff.enabled = false``. With the default (``true``) the
-    three-gate adaptive cutoff trims a short query down to roughly one result,
-    which collapses ``nDCG@10`` / ``recall@10`` / ``MRR@10`` onto the same value
-    and turns most queries into ``unknown_empty``: the score then measures the
-    cutoff instead of retrieval quality. The paragraph is therefore part of the
-    measurement condition rather than a convenience note, and it is emitted even
-    when ``meta`` does not record the setting.
+    The report is measured with ``index.hybrid.cutoff.enabled = false``. With the
+    default (``true``) the three-gate adaptive cutoff trims a short query down to
+    roughly one result, which collapses ``nDCG@10`` / ``recall@10`` / ``MRR@10``
+    onto the same value and turns most queries into ``unknown_empty``: the score
+    then measures the cutoff instead of retrieval quality. The paragraph is
+    therefore part of the measurement condition rather than a convenience note,
+    and it is emitted even when ``meta`` does not record the setting.
     """
     lines: list[str] = [
         "**Precondition -- the adaptive cutoff must be disabled.** The retrieval results below were produced with "
@@ -266,9 +296,10 @@ def _cutoff_precondition_lines(meta: Mapping[str, Any]) -> list[str]:
         "2. Run the commands below, then **restore the previous configuration**. `~/.codeseek/config.json` is the "
         "only place the cutoff can be changed: there is no CLI flag and no environment variable for it.",
         "",
-        "Measured impact on the same 100-query short-query batch: `Mean nDCG@10` **0.4266 -> 0.5339**, "
-        "`unknown_empty` **36 -> 0**, `mean_returned` **0.98 -> 20.00**.",
     ]
+    facts = _batch_cutoff_facts(meta, aggregate)
+    if facts:
+        lines.append(facts)
     if meta.get("cutoff_enabled") is False:
         lines.append("")
         lines.append("`meta.cutoff_enabled = false` records that this run used that condition.")
@@ -316,7 +347,7 @@ def _reproduction_commands(
     else:
         seed_arg = str(int(seed))
 
-    lines: list[str] = _cutoff_precondition_lines(meta)
+    lines: list[str] = _cutoff_precondition_lines(meta, aggregate)
     lines.append("")
     lines.append("```bash")
     lines.append("# Run from the repository root; every artifact lands under --workdir")

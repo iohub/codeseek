@@ -72,7 +72,7 @@ python3 -m mtebcode_eval selftest
 
 # 1. prepare: fetch + sample + pool + materialize + git init  (the parameters of the archived batch)
 python3 -m mtebcode_eval prepare \
-  --workdir /tmp/mtebcode-short \
+  --workdir /tmp/mtebcode-ts \
   --tasks CosQA,CodeEditSearchRetrieval-python,CodeEditSearchRetrieval-go,CodeEditSearchRetrieval-typescript \
   --limit-queries 20 \
   --corpus-size 300 \
@@ -82,13 +82,13 @@ python3 -m mtebcode_eval prepare \
 
 # 2. run: serial init + concurrent search + scoring + report
 python3 -m mtebcode_eval run \
-  --workdir /tmp/mtebcode-short \
+  --workdir /tmp/mtebcode-ts \
   --limit 20 \
   --k 10 \
   --concurrency 4
 
 # 3. score: re-compute the metrics only (new --k, no retrieval re-run)
-python3 -m mtebcode_eval score --workdir /tmp/mtebcode-short --limit 20 --k 10
+python3 -m mtebcode_eval score --workdir /tmp/mtebcode-ts --limit 20 --k 10
 ```
 
 | command | flag | meaning |
@@ -184,14 +184,16 @@ python3 -m mtebcode_eval score --workdir /tmp/mtebcode-short --limit 20 --k 10
   budget of 20 is sufficient, but the protocol measures **nothing** about positions 11–20.
 - **`CodeEditSearchRetrieval`'s corpus is a unified diff**, only 33.3–62.3% of whose post-image documents contain
   a definition at all, while its queries are commit-message shaped. That task family partly measures the
-  unretrievability of diffs rather than retrieval quality (see Section 4.4 of [`results/README.md`](results/README.md)).
+  unretrievability of diffs rather than retrieval quality (see Section 4.3 of [`results/README.md`](results/README.md)).
 - **The dataset exposes only a `train` split**, java has **no qrels at all** and ruby returns 500, so the family
   is covered by three languages out of six (`python`, `go`, `typescript`).
 - **The reranker is an uncontrolled variable**: `enabled` with `top_n = 5`, but
   `derived_top_n = max(top_n, final_budget) = 20`, so its effect on short queries was not measured.
-- **Every result is bound to its cutoff configuration.** With the default `index.hybrid.cutoff.enabled = true`
-  the same 100 queries score mean nDCG@10 **0.4891** with **35** `unknown_empty` and `mean_returned = 1.00`,
-  against **0.5858** and **0** with the cutoff disabled. A result without its cutoff state is not interpretable.
+- **Every result is bound to its cutoff configuration.** With the default `index.hybrid.cutoff.enabled = true`, the
+  three-gate adaptive cutoff trims short queries to about one result, which collapses `nDCG@10`, `recall@10` and
+  `MRR@10` onto the same value and turns most queries into `unknown_empty`; the archived numbers
+  (**0.5858**, `unknown_empty = 0`, `mean_returned = 20.00`) require the cutoff **disabled**. A result without its
+  cutoff state is not interpretable.
 - **Very long queries have a practical usability ceiling**: a screening probe on one AppsRetrieval query
   (1,316-character median family) returned `[]` for the full text and 3 results once truncated to its
   152-character first line. That is a product-side defect, and it is why long-query tasks are excluded rather
@@ -226,7 +228,7 @@ evals/mtebcode/
 `<workdir>` layout:
 
 ```
-/tmp/mtebcode-short/
+/tmp/mtebcode-ts/
 ├── cache/                       # one JSON page per (dataset, config, split, offset)
 ├── corpora/<task-slug>/
 │   ├── docs/<stem>_<sha1[:8]>.<ext>   # the pooled documents, as real files
@@ -280,6 +282,9 @@ queries, and **`index.hybrid.cutoff.enabled = false`**:
   [`results/2026-11-13-report.md`](results/2026-11-13-report.md) and
   [`results/2026-11-13-report.json`](results/2026-11-13-report.json) (binary under test `sha256` prefix
   `b1532bb1b43e3d65`).
-- The `recall@10 == recall@20` equality and the failure decomposition (36.25 points of recall loss against 5.17
-  points of ordering loss) are discussed in Section 1.3 and Section 4.2 of that archive; the measured-and-rejected
-  protocol configurations are in its Section 2.
+- **Derived, conditional on a hit**: nDCG@10 over *recalled* queries only is **0.9188** (`0.5858 / 0.6375`) and
+  MRR@10 over recalled queries only is **0.8922** (`0.5688 / 0.6375`), i.e. the gold document sits at mean rank
+  **1.12** whenever it is retrieved at all. The failure decomposition is `1 − recall@10` = **0.3625** (outright
+  recall failure) against `recall@10 − nDCG@10` = **0.0517** (ordering loss after the gold document was found).
+- The `recall@10 == recall@20` equality and the same decomposition (36.25 points of recall loss against 5.17
+  points of ordering loss) are discussed in Section 1.3 and Section 4.2 of that archive.
